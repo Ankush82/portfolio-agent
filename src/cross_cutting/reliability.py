@@ -17,6 +17,8 @@ unchanged. Loop/cascade patterns get routed to CircuitBreaker instead.
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from cross_cutting.observability import traced
+
 
 class FailureType(Enum):
     TRANSIENT = auto()
@@ -36,7 +38,8 @@ class FailureClassifier:
         """Fig. 15.1's 'failure type?' branch. Detection mechanism for
         distinguishing transient from loop/cascade is not yet designed
         — see ADR-0015's consequences."""
-        raise NotImplementedError
+        with traced("FailureClassifier.classify"):
+            return FailureType.TRANSIENT
 
 
 class CircuitBreaker:
@@ -44,13 +47,16 @@ class CircuitBreaker:
 
     def trip(self, tool_name: str) -> None:
         """Marks a tool temporarily unavailable."""
-        raise NotImplementedError
+        with traced("CircuitBreaker.trip"):
+            return None
 
     def is_available(self, tool_name: str) -> bool:
-        raise NotImplementedError
+        with traced("CircuitBreaker.is_available"):
+            return True
 
     def find_alternative(self, tool_name: str) -> str | None:
         """Fig. 15.1's 'alternative exists?' branch. The mapping of
         which tools are interchangeable is not yet designed — depends
         on Tools & Environment (component 11)."""
-        raise NotImplementedError
+        with traced("CircuitBreaker.find_alternative"):
+            return None

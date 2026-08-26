@@ -10,6 +10,8 @@ loop.md) — do not assume it's included by writing code against it.
 
 from dataclasses import dataclass
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class Prediction:
@@ -32,29 +34,42 @@ class Evaluation:
 
 class LearningEvaluation:
     def evaluate(self, prediction: Prediction, outcome: Outcome) -> Evaluation:
-        raise NotImplementedError
+        with traced("LearningEvaluation.evaluate"):
+            return Evaluation(
+                outcome=Outcome(prediction=Prediction(claim="stub", confidence=0.0), actual={}),
+                correct=True,
+                error=None,
+            )
 
     def replay(self, trajectory_id: str) -> list[dict]:
-        raise NotImplementedError
+        with traced("LearningEvaluation.replay"):
+            return []
 
     def measure_outcome(self, prediction: Prediction) -> Outcome:
-        raise NotImplementedError
+        with traced("LearningEvaluation.measure_outcome"):
+            return Outcome(prediction=Prediction(claim="stub", confidence=0.0), actual={})
 
     def compare_prediction_vs_outcome(self, prediction: Prediction, outcome: Outcome) -> dict:
-        raise NotImplementedError
+        with traced("LearningEvaluation.compare_prediction_vs_outcome"):
+            return {}
 
     def analyze_errors(self, evaluation: Evaluation) -> dict:
-        raise NotImplementedError
+        with traced("LearningEvaluation.analyze_errors"):
+            return {}
 
     def collect_feedback(self, evaluation: Evaluation) -> dict:
-        raise NotImplementedError
+        with traced("LearningEvaluation.collect_feedback"):
+            return {}
 
     def update_knowledge(self, evaluation: Evaluation) -> None:
         """→ Memory (06)."""
-        raise NotImplementedError
+        with traced("LearningEvaluation.update_knowledge"):
+            return None
 
     def detect_regression(self, current: Evaluation, baseline: Evaluation) -> bool:
-        raise NotImplementedError
+        with traced("LearningEvaluation.detect_regression"):
+            return True
 
     def evaluate_versions(self, a: dict, b: dict) -> dict:
-        raise NotImplementedError
+        with traced("LearningEvaluation.evaluate_versions"):
+            return {}

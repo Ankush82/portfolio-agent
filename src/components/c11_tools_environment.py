@@ -10,6 +10,8 @@ Reliability & Resilience's CircuitBreaker.find_alternative() (component
 
 from dataclasses import dataclass
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class Tool:
@@ -32,25 +34,33 @@ class ToolResult:
 
 class ToolsEnvironment:
     def register_tool(self, tool: Tool) -> None:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.register_tool"):
+            return None
 
     def discover_tool(self, need: str) -> list[Tool]:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.discover_tool"):
+            return []
 
     def select_tool(self, need: str, candidates: list[Tool]) -> Tool:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.select_tool"):
+            return Tool(name="stub", schema={})
 
     def execute_tool(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.execute_tool"):
+            return ToolResult(call=ToolCall(tool_name="stub", arguments={}), output={}, ok=True)
 
     def validate_result(self, result: ToolResult) -> bool:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.validate_result"):
+            return True
 
     def retry_tool(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.retry_tool"):
+            return ToolResult(call=ToolCall(tool_name="stub", arguments={}), output={}, ok=True)
 
     def switch_tool(self, failed: Tool, need: str) -> Tool:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.switch_tool"):
+            return Tool(name="stub", schema={})
 
     def interact_with_environment(self, action: dict) -> dict:
-        raise NotImplementedError
+        with traced("ToolsEnvironment.interact_with_environment"):
+            return {}

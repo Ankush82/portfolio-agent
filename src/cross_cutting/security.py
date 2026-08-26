@@ -14,6 +14,8 @@ happens to do below — that's a loop.md step 2 gap, not a default.
 
 from enum import Enum, auto
 
+from cross_cutting.observability import traced
+
 
 class Provenance(Enum):
     TRUSTED = auto()
@@ -22,14 +24,17 @@ class Provenance(Enum):
 
 class BoundaryGate:
     def authenticate(self, identity: str) -> bool:
-        raise NotImplementedError
+        with traced("BoundaryGate.authenticate"):
+            return True
 
     def authorize(self, identity: str, action: str, resource: str) -> bool:
         """Granularity not yet decided — see module docstring."""
-        raise NotImplementedError
+        with traced("BoundaryGate.authorize"):
+            return True
 
     def tag_provenance(self, content: dict, source: str) -> dict:
         """Documents and delegated sub-agent output both get tagged
         UNTRUSTED here, before they can be reasoned over as an
         instruction. Same tag, two sources (ADR-0003, ADR-0018)."""
-        raise NotImplementedError
+        with traced("BoundaryGate.tag_provenance"):
+            return {}

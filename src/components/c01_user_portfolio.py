@@ -9,6 +9,8 @@ Portfolio -> Event & Analysis, User -> Notification.
 
 from dataclasses import dataclass, field
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class User:
@@ -51,30 +53,39 @@ class PortfolioSnapshot:
 
 class UserPortfolio:
     def onboard_user(self, details: dict) -> User:
-        raise NotImplementedError
+        with traced("UserPortfolio.onboard_user"):
+            return User(id="stub-id", preferences={})
 
     def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
-        raise NotImplementedError
+        with traced("UserPortfolio.connect_portfolio"):
+            return Portfolio(id="stub-id", user_id="stub-id")
 
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
-        raise NotImplementedError
+        with traced("UserPortfolio.import_holdings"):
+            return []
 
     def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
-        raise NotImplementedError
+        with traced("UserPortfolio.import_transactions"):
+            return []
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
-        raise NotImplementedError
+        with traced("UserPortfolio.synchronize_portfolio"):
+            return PortfolioSnapshot(portfolio_id="stub-id", positions=[], exposure={})
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
-        raise NotImplementedError
+        with traced("UserPortfolio.track_portfolio_state"):
+            return PortfolioSnapshot(portfolio_id="stub-id", positions=[], exposure={})
 
     def calculate_exposure(self, snapshot: PortfolioSnapshot) -> dict:
-        raise NotImplementedError
+        with traced("UserPortfolio.calculate_exposure"):
+            return {}
 
     def manage_preferences(self, user: User, updates: dict) -> User:
-        raise NotImplementedError
+        with traced("UserPortfolio.manage_preferences"):
+            return User(id="stub-id", preferences={})
 
     def determine_user_relevance(self, user: User, event: dict) -> bool:
         """→ Event / Analysis interface: is this event relevant to
         this user's portfolio at all."""
-        raise NotImplementedError
+        with traced("UserPortfolio.determine_user_relevance"):
+            return True

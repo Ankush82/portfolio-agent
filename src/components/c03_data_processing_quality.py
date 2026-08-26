@@ -8,6 +8,8 @@ low-level design or ADRs yet. Interfaces: <- Data & Sources (02),
 
 from dataclasses import dataclass
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class RawDocument:
@@ -41,28 +43,37 @@ class DataLineage:
 
 class DataProcessingQuality:
     def parse(self, raw: RawDocument) -> ParsedDocument:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.parse"):
+            return ParsedDocument(source_id="stub-id", structure={})
 
     def extract(self, parsed: ParsedDocument) -> StructuredData:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.extract"):
+            return StructuredData(source_id="stub-id", fields={})
 
     def normalize(self, data: StructuredData) -> StructuredData:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.normalize"):
+            return StructuredData(source_id="stub-id", fields={})
 
     def transform(self, data: StructuredData) -> StructuredData:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.transform"):
+            return StructuredData(source_id="stub-id", fields={})
 
     def deduplicate(self, data: StructuredData) -> StructuredData:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.deduplicate"):
+            return StructuredData(source_id="stub-id", fields={})
 
     def validate(self, data: StructuredData) -> bool:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.validate"):
+            return True
 
     def score_data_quality(self, data: StructuredData) -> DataQualityScore:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.score_data_quality"):
+            return DataQualityScore(document_id="stub-id", score=0.0)
 
     def detect_stale_data(self, data: StructuredData) -> bool:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.detect_stale_data"):
+            return True
 
     def track_data_lineage(self, data: StructuredData) -> DataLineage:
-        raise NotImplementedError
+        with traced("DataProcessingQuality.track_data_lineage"):
+            return DataLineage(document_id="stub-id", steps=[])

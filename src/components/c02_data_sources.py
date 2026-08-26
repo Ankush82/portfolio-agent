@@ -8,6 +8,8 @@ low-level design or ADRs yet. Interface: -> Data Processing & Quality
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from cross_cutting.observability import traced
+
 
 class SourceType(Enum):
     NEWS = auto()
@@ -53,25 +55,33 @@ class SourceMetadata:
 
 class DataSources:
     def register_source(self, source: Source) -> None:
-        raise NotImplementedError
+        with traced("DataSources.register_source"):
+            return None
 
     def discover_source(self, criteria: dict) -> list[Source]:
-        raise NotImplementedError
+        with traced("DataSources.discover_source"):
+            return []
 
     def ingest_source(self, source: Source) -> SourceDocument:
-        raise NotImplementedError
+        with traced("DataSources.ingest_source"):
+            return SourceDocument(source_id="stub-id", content=b"", fetched_at="")
 
     def retrieve_source(self, source_id: str) -> SourceDocument | None:
-        raise NotImplementedError
+        with traced("DataSources.retrieve_source"):
+            return None
 
     def update_source(self, source: Source) -> SourceSnapshot:
-        raise NotImplementedError
+        with traced("DataSources.update_source"):
+            return SourceSnapshot(source_id="stub-id", state={})
 
     def track_source_provenance(self, document: SourceDocument) -> Provenance:
-        raise NotImplementedError
+        with traced("DataSources.track_source_provenance"):
+            return Provenance(source_id="stub-id", origin="stub")
 
     def track_source_timestamp(self, document: SourceDocument) -> str:
-        raise NotImplementedError
+        with traced("DataSources.track_source_timestamp"):
+            return ""
 
     def track_source_reliability_metadata(self, source: Source) -> SourceMetadata:
-        raise NotImplementedError
+        with traced("DataSources.track_source_reliability_metadata"):
+            return SourceMetadata(source_id="stub-id", timestamp="", reliability=0.0)

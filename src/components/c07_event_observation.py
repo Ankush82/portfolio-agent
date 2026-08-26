@@ -7,6 +7,8 @@ low-level design or ADRs yet. Interfaces: <- Knowledge & Entity Model
 
 from dataclasses import dataclass
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class Observation:
@@ -36,25 +38,33 @@ class Event:
 
 class EventObservation:
     def observe(self, raw: dict) -> Observation:
-        raise NotImplementedError
+        with traced("EventObservation.observe"):
+            return Observation(entity_id="stub-id", metric="stub", value=0.0)
 
     def detect_change(self, current: Observation, prior: Observation) -> Change | None:
-        raise NotImplementedError
+        with traced("EventObservation.detect_change"):
+            return None
 
     def detect_anomaly(self, observation: Observation) -> Anomaly | None:
-        raise NotImplementedError
+        with traced("EventObservation.detect_anomaly"):
+            return None
 
     def detect_event(self, observations: list[Observation]) -> Event | None:
-        raise NotImplementedError
+        with traced("EventObservation.detect_event"):
+            return None
 
     def classify_event(self, event: Event) -> str:
-        raise NotImplementedError
+        with traced("EventObservation.classify_event"):
+            return ""
 
     def link_event_to_entities(self, event: Event) -> list[str]:
-        raise NotImplementedError
+        with traced("EventObservation.link_event_to_entities"):
+            return []
 
     def correlate_events(self, events: list[Event]) -> list[tuple[Event, Event]]:
-        raise NotImplementedError
+        with traced("EventObservation.correlate_events"):
+            return []
 
     def retrieve_events(self, filters: dict) -> list[Event]:
-        raise NotImplementedError
+        with traced("EventObservation.retrieve_events"):
+            return []

@@ -7,6 +7,8 @@ Decisions: ADR-0013 (mandatory evidence per claim, ALCE), ADR-0014
 
 from dataclasses import dataclass
 
+from cross_cutting.observability import traced
+
 
 @dataclass
 class Claim:
@@ -33,33 +35,44 @@ class VerifiedClaim:
 class EvidenceLinker:
     def link(self, claim: Claim) -> list[Evidence]:
         """Searches Context Pack (component 05) and Memory (06)."""
-        raise NotImplementedError
+        with traced("EvidenceLinker.link"):
+            return []
 
 
 class MandatoryEvidenceGate:
     def has_evidence(self, evidence: list[Evidence]) -> bool:
         """Fig. 2's 'evidence found?' gate (ADR-0013)."""
-        raise NotImplementedError
+        with traced("MandatoryEvidenceGate.has_evidence"):
+            return True
 
     def block(self, claim: Claim) -> None:
         """Logged, not forwarded to Decision & Policy (component 12)."""
-        raise NotImplementedError
+        with traced("MandatoryEvidenceGate.block"):
+            return None
 
 
 class ContradictionResolver:
     def sources_agree(self, evidence: list[Evidence]) -> bool:
-        raise NotImplementedError
+        with traced("ContradictionResolver.sources_agree"):
+            return True
 
     def resolve(self, evidence: list[Evidence]) -> Evidence:
         """Weight by source reliability and freshness, pick the
         higher-confidence side (ADR-0014)."""
-        raise NotImplementedError
+        with traced("ContradictionResolver.resolve"):
+            return Evidence(content={}, source="stub", reliability=0.0, freshness=0.0)
 
 
 class ClaimVerifier:
     def verify(self, claim: Claim, evidence: list[Evidence]) -> VerifiedClaim:
         """Citation quality and completeness (ALCE)."""
-        raise NotImplementedError
+        with traced("ClaimVerifier.verify"):
+            return VerifiedClaim(
+                claim=Claim(text="stub", source_component="stub"),
+                evidence=[],
+                confidence=0.0,
+            )
 
     def score_confidence(self, verified: VerifiedClaim) -> float:
-        raise NotImplementedError
+        with traced("ClaimVerifier.score_confidence"):
+            return 0.0
