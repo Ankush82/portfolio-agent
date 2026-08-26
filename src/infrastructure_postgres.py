@@ -22,7 +22,7 @@ from typing import Any
 
 import psycopg
 import redis
-from psycopg.types.json import Json
+from psycopg.types.json import Json, Jsonb
 
 from cross_cutting.observability import traced
 
@@ -143,7 +143,7 @@ class DefaultInfrastructure:
             with self._connection().cursor() as cursor:
                 cursor.execute(
                     "SELECT data FROM records WHERE table_name = %s AND data @> %s",
-                    (table, Json(filters)),
+                    (table, Jsonb(filters)),
                 )
                 rows = cursor.fetchall()
             return [row[0] for row in rows]
