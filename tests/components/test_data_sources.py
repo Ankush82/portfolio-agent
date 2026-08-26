@@ -1,5 +1,5 @@
 """Tests for DefaultDataSources and its SourceFetcher seam
-(src/components/c02_data_sources.py, ADR-0026, ADR-0027).
+(src/components/c02_data_sources.py, ADR-0026, ADR-0027, ADR-0046).
 
 Most tests run against `_FakeInfrastructure`, a minimal in-memory test
 double of the `Infrastructure` Protocol, so this component's own logic
@@ -19,15 +19,36 @@ import uuid
 
 import pytest
 
+import alpha_vantage_client
 from components.c02_data_sources import (
     PLACEHOLDER_FETCH_MARKER,
+    AlphaVantageSourceFetcher,
     DefaultDataSources,
     PlaceholderSourceFetcher,
     Source,
     SourceDocument,
     SourceType,
+    get_source_fetcher,
 )
 from cross_cutting.security import DefaultBoundaryGate
+
+
+@pytest.fixture(autouse=True)
+def _no_alpha_vantage_key_by_default(monkeypatch):
+    """Every test in this file gets a clean environment unless it opts
+    into a real key via its own `monkeypatch.setenv` call afterward —
+    `get_source_fetcher()` (called by `DefaultDataSources`'s bare
+    default) reads `ALPHA_VANTAGE_API_KEY`, and this repo's own `.env`
+    may carry a real key for actual use elsewhere in this project. Without
+    this fixture, that would make every existing test in this file that
+    relies on the placeholder default (written before ADR-0046 existed)
+    silently machine-dependent instead of deterministic — the same
+    hygiene `tests/test_llm.py`'s `_no_env_key` helper already
+    established for `OPENROUTER_API_KEY`."""
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        alpha_vantage_client, "_ENV_FILE_PATH", alpha_vantage_client._ENV_FILE_PATH.parent / "does-not-exist.env"
+    )
 
 
 class _FakeInfrastructure:
@@ -118,6 +139,118 @@ def test_default_data_sources_uses_placeholder_fetcher_when_none_injected():
     data_sources = DefaultDataSources(infrastructure=_FakeInfrastructure())
 
     assert isinstance(data_sources._source_fetcher, PlaceholderSourceFetcher)
+
+
+# --- get_source_fetcher / AlphaVantageSourceFetcher (ADR-0046) -------------
+
+
+def test_get_source_fetcher_returns_placeholder_when_key_unset():
+    placeholder = PlaceholderSourceFetcher()
+
+    assert get_source_fetcher(placeholder) is placeholder
+
+
+def test_get_source_fetcher_returns_alpha_vantage_fetcher_when_key_set(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+
+    fetcher = get_source_fetcher()
+
+    assert isinstance(fetcher, AlphaVantageSourceFetcher)
+
+
+def test_default_data_sources_resolves_alpha_vantage_fetcher_when_key_set(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+
+    data_sources = DefaultDataSources(infrastructure=_FakeInfrastructure())
+
+    assert isinstance(data_sources._source_fetcher, AlphaVantageSourceFetcher)
+
+
+def test_alpha_vantage_fetch_market_data_calls_global_quote_with_symbol(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return _FakeResponse(b'{"Global Quote": {"05. price": "123.45"}}')
+
+    monkeypatch.setattr(alpha_vantage_client.requests, "get", fake_get)
+
+    fetcher = AlphaVantageSourceFetcher()
+    document = fetcher.fetch(Source(id="AAPL", type=SourceType.MARKET_DATA))
+
+    assert captured["url"] == alpha_vantage_client.ALPHA_VANTAGE_BASE_URL
+    assert captured["params"]["function"] == "GLOBAL_QUOTE"
+    assert captured["params"]["symbol"] == "AAPL"
+    assert captured["params"]["apikey"] == "demo-key"
+    assert document.source_id == "AAPL"
+    assert document.content == b'{"Global Quote": {"05. price": "123.45"}}'
+    assert document.fetched_at  # a real clock reading
+
+
+def test_alpha_vantage_fetch_news_uses_tickers_param_not_symbol(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["params"] = params
+        return _FakeResponse(b'{"feed": []}')
+
+    monkeypatch.setattr(alpha_vantage_client.requests, "get", fake_get)
+
+    AlphaVantageSourceFetcher().fetch(Source(id="AAPL", type=SourceType.NEWS))
+
+    assert captured["params"]["function"] == "NEWS_SENTIMENT"
+    assert captured["params"]["tickers"] == "AAPL"
+    assert "symbol" not in captured["params"]
+
+
+def test_alpha_vantage_fetch_earnings_calls_earnings_function(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["params"] = params
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(alpha_vantage_client.requests, "get", fake_get)
+
+    AlphaVantageSourceFetcher().fetch(Source(id="AAPL", type=SourceType.EARNINGS))
+
+    assert captured["params"]["function"] == "EARNINGS"
+    assert captured["params"]["symbol"] == "AAPL"
+
+
+def test_alpha_vantage_fetch_delegates_unsupported_source_type_to_fallback(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "demo-key")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should not call Alpha Vantage for a FILING source")
+
+    monkeypatch.setattr(alpha_vantage_client.requests, "get", fail_if_called)
+
+    fetcher = AlphaVantageSourceFetcher(fallback=PlaceholderSourceFetcher())
+    document = fetcher.fetch(Source(id="src-1", type=SourceType.FILING))
+
+    assert document.content == PLACEHOLDER_FETCH_MARKER
+
+
+def test_alpha_vantage_fetch_raises_specific_error_when_key_missing():
+    fetcher = AlphaVantageSourceFetcher()
+
+    with pytest.raises(alpha_vantage_client.MissingAlphaVantageAPIKeyError):
+        fetcher.fetch(Source(id="AAPL", type=SourceType.MARKET_DATA))
+
+
+class _FakeResponse:
+    def __init__(self, content: bytes, status_code: int = 200) -> None:
+        self.content = content
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise alpha_vantage_client.requests.exceptions.HTTPError(f"fake status {self.status_code}")
 
 
 # --- register_source / discover_source -----------------------------------

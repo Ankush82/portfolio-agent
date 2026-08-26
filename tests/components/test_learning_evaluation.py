@@ -17,6 +17,7 @@ import uuid
 
 import pytest
 
+import alpha_vantage_client
 from components.c02_data_sources import (
     DefaultDataSources,
     Source,
@@ -40,6 +41,23 @@ from components.c14_learning_evaluation import (
     StubLearningEvaluation,
     _epoch,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_alpha_vantage_key_by_default(monkeypatch):
+    """This file's `_learning_evaluation()` helper constructs a bare
+    `DefaultDataSources()`, which resolves its `SourceFetcher` via
+    `get_source_fetcher()` (ADR-0046) — real `ALPHA_VANTAGE_API_KEY`
+    configured in this repo's own `.env` for actual use elsewhere would
+    otherwise make `test_measure_outcome_under_placeholder_fetcher_is_
+    honestly_not_comparable` (which specifically tests the placeholder
+    path) machine-dependent instead of deterministic. Same isolation
+    `tests/components/test_data_sources.py` and `tests/test_llm.py`
+    already use for their own env-gated seams."""
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        alpha_vantage_client, "_ENV_FILE_PATH", alpha_vantage_client._ENV_FILE_PATH.parent / "does-not-exist.env"
+    )
 
 
 class _InMemoryInfrastructure:

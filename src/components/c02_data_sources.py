@@ -6,15 +6,21 @@ documents.
 Design: ADR-0026 (real mechanism: persistence, provenance/timestamp/
 reliability wiring, SourceFetcher as the one seam to the outside
 world), ADR-0027 (external fetch provider choice — Proposed, not yet
-Accepted; see PlaceholderSourceFetcher below).
+Accepted; see PlaceholderSourceFetcher below), ADR-0046 (MARKET_DATA/
+NEWS/EARNINGS resolved via Alpha Vantage — see AlphaVantageSourceFetcher
+below; FILING/REPORT/PRESENTATION/EXTERNAL_DATASET remain on the
+placeholder).
 
 register_source/discover_source/retrieve_source/update_source and all
 three tracking capabilities are real, `Infrastructure`-backed logic
 (ADR-0026). ingest_source genuinely needs a live news/filing/
-market-data API to do real work — no such credential exists in this
-project yet, so it calls through an injectable `SourceFetcher` seam
-whose only shipped implementation, `PlaceholderSourceFetcher`, is an
-explicit, unmistakable non-fetch (ADR-0027, same pattern as ADR-0021's
+market-data API to do real work. `get_source_fetcher()`
+(`src/alpha_vantage_client.py`) resolves `DefaultDataSources`'s default
+`SourceFetcher`: `AlphaVantageSourceFetcher` when `ALPHA_VANTAGE_API_KEY`
+is configured (real for MARKET_DATA/NEWS/EARNINGS, ADR-0046),
+`PlaceholderSourceFetcher` otherwise — an explicit, unmistakable
+non-fetch for every other source type and for every source type when no
+key is configured at all (ADR-0027, same pattern as ADR-0021's original
 `placeholder_reason_fn` for Agent Runtime).
 """
 
@@ -24,6 +30,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Protocol
 
+from alpha_vantage_client import fetch_alpha_vantage, get_api_key as get_alpha_vantage_api_key
 from cross_cutting.observability import traced
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
 from infrastructure import Infrastructure
@@ -183,13 +190,14 @@ _RELIABILITY_REAL_DOCUMENT = 1.0
 class SourceFetcher(Protocol):
     """The one seam `DefaultDataSources.ingest_source` calls through to
     reach the outside world (ADR-0026). A real implementation needs a
-    live credential this project does not have: a market-data API for
-    SourceType.MARKET_DATA, a filings/regulatory feed for
-    SourceType.FILING/EARNINGS/PRESENTATION/REPORT, a news API for
-    SourceType.NEWS, and something dataset-specific for
-    SourceType.EXTERNAL_DATASET. See ADR-0027 (status Proposed) for the
-    real options per source type and their honest tradeoffs — none of
-    them is picked there, on purpose.
+    live credential: a market-data API for SourceType.MARKET_DATA, a
+    filings/regulatory feed for SourceType.FILING/EARNINGS/PRESENTATION/
+    REPORT, a news API for SourceType.NEWS, and something
+    dataset-specific for SourceType.EXTERNAL_DATASET. See ADR-0027
+    (status Proposed) for the real options per source type and their
+    honest tradeoffs. `AlphaVantageSourceFetcher` (ADR-0046, below)
+    resolves MARKET_DATA/NEWS/EARNINGS for real; FILING/REPORT/
+    PRESENTATION/EXTERNAL_DATASET remain genuinely open.
 
     Swapping `PlaceholderSourceFetcher` for a real implementation
     behind this same interface is the entire fix once credentials
@@ -217,6 +225,70 @@ class PlaceholderSourceFetcher:
             )
 
 
+# Alpha Vantage's real, free-tier endpoint per SourceType this vendor
+# actually covers (ADR-0046). FILING/REPORT/PRESENTATION/EXTERNAL_DATASET
+# have no entry here on purpose — see AlphaVantageSourceFetcher's
+# docstring for what happens for those.
+_ALPHA_VANTAGE_FUNCTION_BY_SOURCE_TYPE = {
+    SourceType.MARKET_DATA: "GLOBAL_QUOTE",
+    SourceType.NEWS: "NEWS_SENTIMENT",
+    SourceType.EARNINGS: "EARNINGS",
+}
+
+
+class AlphaVantageSourceFetcher:
+    """Real, partial `SourceFetcher` (ADR-0046) — resolves the
+    MARKET_DATA/NEWS/EARNINGS slice of ADR-0027's fetch-provider gap via
+    Alpha Vantage's free-tier API (`src/alpha_vantage_client.py`).
+    `source.id` is read as the ticker symbol Alpha Vantage's
+    `symbol`/`tickers` parameter expects — the natural interpretation
+    given `Source` carries no separate symbol field, and the shape every
+    caller of `DefaultDataSources` already uses `source.id` for
+    everywhere else in this file (the `_SOURCES_TABLE` row key).
+
+    For the four source types Alpha Vantage's free tier has no real
+    equivalent for (FILING, REPORT, PRESENTATION, EXTERNAL_DATASET —
+    see ADR-0027's own per-source-type alternatives, e.g. SEC EDGAR for
+    filings), this delegates to `fallback` (`PlaceholderSourceFetcher`
+    by default) rather than guessing at an unrelated vendor or raising
+    — a real, honest partial resolution, not a full one. ADR-0046 names
+    the remaining gap plainly rather than papering over it."""
+
+    def __init__(self, fallback: "SourceFetcher | None" = None) -> None:
+        self._fallback = fallback or PlaceholderSourceFetcher()
+
+    def fetch(self, source: Source) -> SourceDocument:
+        with traced("AlphaVantageSourceFetcher.fetch"):
+            function = _ALPHA_VANTAGE_FUNCTION_BY_SOURCE_TYPE.get(source.type)
+            if function is None:
+                return self._fallback.fetch(source)
+            param_name = "tickers" if source.type is SourceType.NEWS else "symbol"
+            content = fetch_alpha_vantage(function, **{param_name: source.id})
+            return SourceDocument(
+                source_id=source.id,
+                content=content,
+                fetched_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+
+
+def get_source_fetcher(placeholder: "SourceFetcher | None" = None) -> "SourceFetcher":
+    """Selection function — the same `Default*`-vs-`Stub*`-shaped choice
+    `src/llm.py`'s `get_reason_fn` already established, applied here to
+    the data-fetching seam instead of the reasoning one. Returns
+    `AlphaVantageSourceFetcher` (wrapping `placeholder` as its own
+    fallback for the source types it doesn't cover) when
+    `ALPHA_VANTAGE_API_KEY` is configured, otherwise returns
+    `placeholder` unchanged. Unlike `Mem0EntityLinker` (ADR-0045),
+    constructing `AlphaVantageSourceFetcher` never touches the network
+    — only calling `.fetch()` does — so it is safe for
+    `DefaultDataSources` to resolve this automatically at construction
+    time, the same way `build_agent_runtime_graph` resolves `reason_fn`."""
+    placeholder = placeholder or PlaceholderSourceFetcher()
+    if get_alpha_vantage_api_key() is not None:
+        return AlphaVantageSourceFetcher(fallback=placeholder)
+    return placeholder
+
+
 class DefaultDataSources:
     """Real implementation of DataSources (ADR-0026).
 
@@ -225,10 +297,13 @@ class DefaultDataSources:
     store/retrieve/query (never a database driver directly, per
     ADR-0019) against the single `_SOURCES_TABLE` ("sources") table.
 
-    ingest_source is the one method this component cannot make fully
-    real on its own: it calls through the injected `SourceFetcher`,
-    which defaults to `PlaceholderSourceFetcher` — see that class and
-    ADR-0027 for exactly why. Every `SourceDocument` this class
+    ingest_source calls through the injected `SourceFetcher`, which
+    defaults to whatever `get_source_fetcher()` resolves —
+    `AlphaVantageSourceFetcher` (real for MARKET_DATA/NEWS/EARNINGS,
+    ADR-0046) when `ALPHA_VANTAGE_API_KEY` is configured,
+    `PlaceholderSourceFetcher` otherwise; see those classes and
+    ADR-0027/ADR-0046 for exactly why the remaining source types stay
+    on the placeholder. Every `SourceDocument` this class
     produces (via ingest_source or update_source) is tagged UNTRUSTED
     through `BoundaryGate.tag_provenance` before it is stored, not
     just on request — ADR-0003 requires that tag before document
@@ -244,7 +319,7 @@ class DefaultDataSources:
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
-        self._source_fetcher = source_fetcher or PlaceholderSourceFetcher()
+        self._source_fetcher = source_fetcher or get_source_fetcher()
 
     def register_source(self, source: Source) -> None:
         with traced("DefaultDataSources.register_source"):

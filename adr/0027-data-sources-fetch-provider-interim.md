@@ -1,6 +1,6 @@
 # 0027 — Data & Sources fetch provider interim: injectable, non-fetching placeholder
 
-**Status:** Proposed — 2026-08-26
+**Status:** Partially superseded by [ADR-0046](0046-data-sources-alpha-vantage-partial-resolution.md) — 2026-08-27. `MARKET_DATA`/`NEWS`/`EARNINGS` are resolved for real via Alpha Vantage. `FILING`/`REPORT`/`PRESENTATION`/`EXTERNAL_DATASET` remain exactly as open as described below.
 **Component:** Data & Sources (02)
 
 ## Context
