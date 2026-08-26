@@ -50,6 +50,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0038](0038-decision-policy-real-mechanism.md) | Decision & Policy real mechanism: verified-claim scoring contract, weighted relevance/significance/risk rules, actionability thresholds, rate-limit policy, real pending-approval mechanism | Decision & Policy (12) |
 | [0039](0039-interaction-notification-real-mechanism.md) | Interaction & Notification real mechanism: decision-dict contract, DecisionPolicy-delegated scoring, prioritize/personalize rules, real pending-feedback/response mechanism | Interaction & Notification (13) |
 | [0040](0040-interaction-notification-delivery-channel-interim.md) | Delivery channel interim: injectable, non-sending placeholder (**Proposed**, not yet Accepted) | Interaction & Notification (13) |
+| [0041](0041-learning-evaluation-real-mechanism.md) | Learning & Evaluation real mechanism: DataSources-backed outcome measurement (inherits ADR-0027), tolerance-based comparison, multi-field trajectory replay, real Memory-write-path closure via update_knowledge | Learning & Evaluation (14) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
