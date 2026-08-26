@@ -1,6 +1,6 @@
-# 0010 — Memory technology: purpose-built memory layer (Mem0 or Supermemory)
+# 0010 — Memory technology: Mem0
 
-**Status:** Accepted, partially — 2026-08-26
+**Status:** Accepted — 2026-08-26 (vendor picked); vendor fit against the four decisions below not yet formally verified — see Consequences.
 **Component:** Memory (06)
 
 ## Context
@@ -9,9 +9,7 @@ With Memory's design complete and confirmed — active working-set management (A
 
 ## Decision
 
-A purpose-built memory layer — Mem0 or Supermemory — over building the storage ourselves.
-
-**Not yet decided:** which of the two. Neither has been checked against this design's four specific decisions. This is the one technology decision in this folder that is intentionally incomplete.
+A purpose-built memory layer — **Mem0** — over building the storage ourselves and over Supermemory. Open-source and self-hostable, chosen directly by the user; not selected via the formal per-decision evaluation this ADR originally called for (see Consequences — that check is now the responsibility of whoever implements component 06 for real).
 
 ## Alternatives considered
 
@@ -20,8 +18,8 @@ A purpose-built memory layer — Mem0 or Supermemory — over building the stora
 
 ## Consequences
 
-- Before Phase 5 of the build sequence starts, Mem0 and Supermemory must each be evaluated specifically against: does it support structural partition (ADR-0008) as separate stores or only as metadata; does it support quarantine-at-write (ADR-0007) or only post-hoc filtering; does it support A-MEM-style explicit linking (ADR-0006) or only similarity search; does it support active working-set curation (ADR-0005) or only passive storage. Whichever product fails more of these tests forces either a design compromise or a fallback to one of the rejected alternatives above.
-- This ADR should be superseded once that evaluation happens and one product is actually chosen — it is deliberately left open rather than guessed at.
+- **The evaluation this ADR originally required still has to happen — it's deferred, not skipped.** Before component 06's `Default*` adapters are written, Mem0 needs to be checked against: does it support structural partition (ADR-0008) as separate stores or only as metadata; does it support quarantine-at-write (ADR-0007) or only post-hoc filtering; does it support A-MEM-style explicit linking (ADR-0006) or only similarity search; does it support active working-set curation (ADR-0005) or only passive storage. Per `loop.md` step 2: if Mem0 doesn't fit one of these cleanly, that's a gap to flag with a draft ADR, not something to quietly work around in the implementation.
+- If Mem0 fails enough of these checks, the fallback alternatives listed above (unified store, or specialized-per-concern) are still live options, not foreclosed by this decision.
 
 ## Related
 
