@@ -12,39 +12,39 @@ sequence the design specifies, so the wiring can be observed in
 trace.log.
 """
 
-from components.c01_user_portfolio import UserPortfolio
+from components.c01_user_portfolio import StubUserPortfolio
 from components.c10_agent_runtime import (
     Checkpoint,
-    Executor,
-    Planner,
-    StateManager,
-    TaskManager,
-    WorkflowManager,
+    StubExecutor,
+    StubPlanner,
+    StubStateManager,
+    StubTaskManager,
+    StubWorkflowManager,
 )
-from components.c11_tools_environment import ToolCall, ToolsEnvironment
+from components.c11_tools_environment import StubToolsEnvironment, ToolCall
 
 
 def main() -> None:
-    user_portfolio = UserPortfolio()
+    user_portfolio = StubUserPortfolio()
     user = user_portfolio.onboard_user(details={})
     snapshot = user_portfolio.synchronize_portfolio(portfolio=None)
 
-    task_manager = TaskManager()
+    task_manager = StubTaskManager()
     task = task_manager.create_task(trigger={"snapshot": snapshot})
 
-    planner = Planner()
+    planner = StubPlanner()
     checkpoints = planner.plan_checkpoints(task=task)
 
-    state_manager = StateManager()
+    state_manager = StubStateManager()
     state_manager.update_state(task_id=task.id, delta={"status": "planned"})
 
-    tools_environment = ToolsEnvironment()
+    tools_environment = StubToolsEnvironment()
 
     # The stub always returns an empty checkpoint list, so fall back to
     # one placeholder checkpoint here purely to keep the Executor loop
     # (and its trace) meaningful — this is not part of the design.
     for checkpoint in checkpoints or [Checkpoint(id="stub-checkpoint", subgoal={})]:
-        executor = Executor()
+        executor = StubExecutor()
         decision = executor.reason(checkpoint=checkpoint, context={})
         result = executor.act(decision=decision)
         # act() is meant to call Tools & Environment internally (c10's
@@ -55,7 +55,7 @@ def main() -> None:
         )
         executor.observe(result={**result, "tool_result": tool_result})
 
-    workflow_manager = WorkflowManager()
+    workflow_manager = StubWorkflowManager()
     workflow_manager.finalize(task=task, checkpoints=checkpoints)
 
     print(f"Trace complete for task {task.id} (user {user.id}). See trace.log.")
