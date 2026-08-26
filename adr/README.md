@@ -52,6 +52,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0040](0040-interaction-notification-delivery-channel-interim.md) | Delivery channel interim: injectable, non-sending placeholder (**Proposed**, not yet Accepted) | Interaction & Notification (13) |
 | [0041](0041-learning-evaluation-real-mechanism.md) | Learning & Evaluation real mechanism: DataSources-backed outcome measurement (inherits ADR-0027), tolerance-based comparison, multi-field trajectory replay, real Memory-write-path closure via update_knowledge | Learning & Evaluation (14) |
 | [0042](0042-security-authorize-granularity-resolved.md) | Authorize granularity resolved: per-call, real enforcement against an Infrastructure-backed grant table, deny-by-default — supersedes ADR-0020 now that Tools & Environment (11) exists | Security & Privacy (17) |
+| [0044](0044-user-portfolio-manual-stock-entry.md) | Manual stock entry: real parallel onboarding path bypassing BrokerConnector, backed by Knowledge & Entity Model's registry (get_entity/search_entities added to DefaultKnowledgeEntity) | User & Portfolio (01), Knowledge & Entity Model (04) |
 
 ADR-0004 is partially superseded by ADR-0015, and ADR-0020 is superseded by ADR-0042 — see each pair for the full picture; superseded ADRs stay in the folder rather than being deleted.
 

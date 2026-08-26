@@ -4,14 +4,20 @@ world model.
 Interfaces: <- Data Processing & Quality (03), -> Observation & Event
 (07), -> Retrieval & Context (05, which already calls
 `KnowledgeEntity.resolve_entity` for real — see `DefaultRetriever` in
-c05_retrieval_context.py).
+c05_retrieval_context.py), -> User & Portfolio (01, which calls
+`DefaultKnowledgeEntity.search_entities`/`get_entity` for real — see
+`DefaultUserPortfolio.list_available_securities`/`add_holding_manually`
+in c01_user_portfolio.py).
 
 Design: ADR-0035 (real mechanism: normalized exact match plus an
 edit-distance fuzzy fallback for `resolve_entity`, `Infrastructure`-
 backed CRUD for entities and relationships, a documented alias/
-relationship transfer rule for `merge_entities`). No LLM anywhere in
-this component — entity resolution/canonicalization is a real
-structural/lookup problem against a known registry, not generation.
+relationship transfer rule for `merge_entities`). ADR-0044 adds
+`get_entity`/`search_entities`, real extra accessors beyond the
+KnowledgeEntity Protocol for id-based lookup and registry enumeration.
+No LLM anywhere in this component — entity resolution/canonicalization
+is a real structural/lookup problem against a known registry, not
+generation.
 """
 
 import re
@@ -420,3 +426,53 @@ class DefaultKnowledgeEntity:
     def query_relationships(self, entity: Entity, kind: str | None = None) -> list[Relationship]:
         with traced("DefaultKnowledgeEntity.query_relationships"):
             return self._relationships_for(entity.id, kind=kind)
+
+    def get_entity(self, entity_id: str) -> Entity | None:
+        """Not part of the KnowledgeEntity Protocol — a real, direct
+        id lookup, as opposed to resolve_entity's mention/name-based
+        fuzzy match (ADR-0044). Same "extra real-behavior accessor"
+        pattern DefaultQuarantineGate.release()/is_expired() establish
+        in c06_memory.py and DefaultEvidenceLinker.link_with_context()
+        establishes in c09_evidence_verification.py: a caller that
+        already holds a specific entity id — e.g. validating a
+        security_id a user picked from search_entities()'s own output
+        — needs to confirm it is still a real, live entity, not
+        re-resolve it by name. A merged-away id (its record carries
+        `merged_into`) redirects to the surviving entity, the same
+        redirect update_knowledge applies, rather than returning a
+        tombstone the caller can't act on."""
+        with traced("DefaultKnowledgeEntity.get_entity"):
+            record = self._get_record(entity_id)
+            if record is None:
+                return None
+            merged_into = record.get("merged_into")
+            if merged_into is not None:
+                record = self._get_record(merged_into)
+                if record is None:
+                    return None
+            return Entity(id=record["id"], kind=record["kind"])
+
+    def search_entities(self, kind: str | None = None, query: str = "") -> list[Entity]:
+        """Not part of the KnowledgeEntity Protocol — real enumeration
+        of the registry, as opposed to resolve_entity's one-mention-
+        to-one-entity resolution (ADR-0044). Same "extra real-behavior
+        accessor" pattern as get_entity() above. Filters live
+        (non-tombstoned) entities to those matching `kind` when given,
+        and, when `query` is non-blank, to those whose name or any
+        alias contains `query` (same case/whitespace normalization
+        resolve_entity uses) — so a caller can list-then-narrow, the
+        shape a search-as-you-type dropdown needs. An empty registry,
+        or a query nothing matches, returns an empty list — a correct
+        answer, not a bug."""
+        with traced("DefaultKnowledgeEntity.search_entities"):
+            normalized_query = _normalize_name(query)
+            results: list[Entity] = []
+            for record in self._live_entity_records():
+                if kind is not None and record["kind"] != kind:
+                    continue
+                if normalized_query:
+                    names = [record.get("name", ""), *record.get("aliases", [])]
+                    if not any(normalized_query in _normalize_name(name) for name in names if name):
+                        continue
+                results.append(Entity(id=record["id"], kind=record["kind"]))
+            return results

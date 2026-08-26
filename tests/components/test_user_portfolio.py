@@ -12,6 +12,8 @@ itself, which already has its own dedicated test suite.
 
 import json
 
+import pytest
+
 from components.c01_user_portfolio import (
     DefaultUserPortfolio,
     Holding,
@@ -23,6 +25,7 @@ from components.c01_user_portfolio import (
     Transaction,
     User,
 )
+from components.c04_knowledge_entity import DefaultKnowledgeEntity
 from cross_cutting import observability
 from cross_cutting.security import DefaultBoundaryGate, Provenance
 
@@ -347,6 +350,155 @@ def test_determine_user_relevance_false_for_a_user_with_no_portfolios():
     user = User(id="lonely-user", preferences={})
 
     assert portfolio_component.determine_user_relevance(user, {"security_id": "AAPL"}) is False
+
+
+# --- manual stock entry (ADR-0044) ------------------------------------------
+
+
+def test_list_available_securities_on_an_empty_registry_returns_an_empty_list():
+    """A fresh, unseeded Knowledge & Entity Model registry honestly
+    has nothing to offer a dropdown — this is a correct answer, not a
+    bug (ADR-0044)."""
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+
+    assert portfolio_component.list_available_securities() == []
+
+
+def test_list_available_securities_returns_a_real_entity_registered_via_knowledge_entity():
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    apple = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+
+    securities = portfolio_component.list_available_securities()
+
+    assert securities == [apple]
+
+
+def test_list_available_securities_merges_both_tradeable_kinds_and_excludes_non_tradeable_kinds():
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    security = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    company = knowledge_entity.create_entity({"kind": "Company", "name": "Microsoft Corp"})
+    knowledge_entity.create_entity({"kind": "Sector", "name": "Technology"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+
+    securities = portfolio_component.list_available_securities()
+
+    assert {entity.id for entity in securities} == {security.id, company.id}
+
+
+def test_list_available_securities_filters_by_query_as_a_dropdown_would_while_typing():
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    apple = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    knowledge_entity.create_entity({"kind": "Security", "name": "Microsoft Corp"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+
+    assert portfolio_component.list_available_securities(query="app") == [apple]
+    assert portfolio_component.list_available_securities(query="nonexistent") == []
+
+
+def test_default_user_portfolio_uses_a_real_default_knowledge_entity_sharing_its_own_infrastructure():
+    """No knowledge_entity injected — confirms the default constructor
+    argument is a real DefaultKnowledgeEntity (ADR-0044) sharing this
+    DefaultUserPortfolio's own Infrastructure, by registering an
+    entity directly through Infrastructure and confirming it's found."""
+    infra = _InMemoryInfrastructure()
+    infra.store("entities", {"id": "entity-1", "kind": "Security", "name": "Apple Inc", "aliases": []})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+
+    assert isinstance(portfolio_component._knowledge_entity, DefaultKnowledgeEntity)
+    securities = portfolio_component.list_available_securities()
+    assert [entity.id for entity in securities] == ["entity-1"]
+
+
+def test_add_holding_manually_for_a_real_known_security_persists_and_returns_a_real_holding():
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    apple = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+    portfolio = Portfolio(id="pf-1", user_id="user-1")
+
+    holding = portfolio_component.add_holding_manually(portfolio, apple.id, 12.0)
+
+    assert holding == Holding(portfolio_id="pf-1", security_id=apple.id, quantity=12.0)
+    stored = infra.retrieve("holdings", f"pf-1:{apple.id}")
+    assert stored["security_id"] == apple.id
+    assert stored["quantity"] == 12.0
+
+
+def test_add_holding_manually_does_not_tag_provenance_unlike_broker_imported_holdings():
+    """Contrast with import_holdings (ADR-0022): manual entry is
+    direct, validated user input, not external broker content, so it
+    is never tagged UNTRUSTED (ADR-0044)."""
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    apple = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+    portfolio = Portfolio(id="pf-1", user_id="user-1")
+
+    portfolio_component.add_holding_manually(portfolio, apple.id, 12.0)
+
+    stored = infra.retrieve("holdings", f"pf-1:{apple.id}")
+    assert "provenance" not in stored
+
+
+def test_add_holding_manually_with_an_unresolvable_security_id_fails_clearly():
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    portfolio = Portfolio(id="pf-1", user_id="user-1")
+
+    with pytest.raises(ValueError):
+        portfolio_component.add_holding_manually(portfolio, "no-such-security", 5.0)
+
+    # No holding was silently created for the nonexistent security.
+    infra = portfolio_component._infrastructure
+    assert infra.query("holdings", {"portfolio_id": "pf-1"}) == []
+
+
+def test_add_transaction_manually_mirrors_import_transactions_shape_and_persists():
+    infra = _InMemoryInfrastructure()
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+    portfolio = Portfolio(id="pf-1", user_id="user-1")
+
+    transaction = portfolio_component.add_transaction_manually(portfolio, kind="buy", amount=250.0)
+
+    assert transaction == Transaction(portfolio_id="pf-1", kind="buy", amount=250.0)
+    stored_records = infra.query("transactions", {"portfolio_id": "pf-1"})
+    assert len(stored_records) == 1
+    assert stored_records[0]["kind"] == "buy"
+    assert "provenance" not in stored_records[0]
+
+
+def test_manually_added_holding_flows_through_track_portfolio_state_and_calculate_exposure_like_a_broker_imported_one():
+    """The whole point of ADR-0044: downstream methods (track_portfolio_
+    state, calculate_exposure) must treat a manually-entered holding
+    exactly like one that came from import_holdings — they only ever
+    consume Holding/PortfolioSnapshot, indifferent to provenance of
+    origin."""
+    infra = _InMemoryInfrastructure()
+    knowledge_entity = DefaultKnowledgeEntity(infrastructure=infra)
+    apple = knowledge_entity.create_entity({"kind": "Security", "name": "Apple Inc"})
+    msft = knowledge_entity.create_entity({"kind": "Security", "name": "Microsoft Corp"})
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra, knowledge_entity=knowledge_entity)
+    portfolio = Portfolio(id="pf-1", user_id="user-1")
+
+    portfolio_component.add_holding_manually(portfolio, apple.id, 6.0)
+    portfolio_component.add_holding_manually(portfolio, msft.id, 4.0)
+
+    snapshot = portfolio_component.track_portfolio_state(portfolio)
+
+    assert len(snapshot.positions) == 2
+    assert {position.holding.security_id for position in snapshot.positions} == {apple.id, msft.id}
+    assert snapshot.exposure == {
+        apple.id: {"market_value": 6.0, "weight": 0.6},
+        msft.id: {"market_value": 4.0, "weight": 0.4},
+    }
+    # determine_user_relevance's structural lookup also sees it, the
+    # same way it would for a broker-imported holding.
+    infra.store("portfolios", {"id": "pf-1", "user_id": "user-1"})
+    user = User(id="user-1", preferences={})
+    assert portfolio_component.determine_user_relevance(user, {"security_id": apple.id}) is True
 
 
 # --- PlaceholderBrokerConnector ---------------------------------------------

@@ -13,6 +13,11 @@ Decisions:
   ADR-0023 — which real broker/aggregator API eventually backs
              BrokerConnector (Status: Proposed — genuine external-
              credential gap, not decided here).
+  ADR-0044 — manual stock entry: a parallel, real onboarding path
+             (list_available_securities/add_holding_manually/
+             add_transaction_manually on DefaultUserPortfolio) that
+             bypasses BrokerConnector entirely, backed for real by
+             Knowledge & Entity Model (04)'s registry.
 
 Interfaces below match the whiteboard-level Component Whiteboards
 artifact, card 01: Portfolio -> Portfolio State, User -> Decision &
@@ -23,6 +28,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
+from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
 from infrastructure import Infrastructure
@@ -213,6 +219,12 @@ PORTFOLIOS_TABLE = "portfolios"
 HOLDINGS_TABLE = "holdings"
 TRANSACTIONS_TABLE = "transactions"
 
+# Entity.kind values (c04_knowledge_entity.py's "Company | Security |
+# Person | Sector | Industry | Index | Geography") that represent
+# something a user could hold a position in — the manual-entry
+# dropdown's real filter (ADR-0044).
+_TRADEABLE_SECURITY_ENTITY_KINDS = ("Security", "Company")
+
 
 class DefaultUserPortfolio:
     """Real implementation of UserPortfolio.
@@ -236,6 +248,18 @@ class DefaultUserPortfolio:
     already stored — the two methods differ in whether they pull fresh
     data or read the current tracked state, matching what their names
     already imply.
+
+    `list_available_securities`/`add_holding_manually`/
+    `add_transaction_manually` (ADR-0044) are a second, parallel
+    onboarding path — real, `Infrastructure`-backed, entirely bypassing
+    `BrokerConnector` — for a user who picks securities directly rather
+    than connecting a broker. They are not part of the `UserPortfolio`
+    Protocol: manual entry is an implementation detail of how this
+    component gets its data, the same reasoning ADR-0029 already used
+    for `DefaultEvidenceLinker.link_with_context()`. `knowledge_entity`
+    is typed against the concrete `DefaultKnowledgeEntity`, not the
+    `KnowledgeEntity` Protocol, because `get_entity`/`search_entities`
+    (ADR-0044) aren't part of that Protocol either.
     """
 
     def __init__(
@@ -244,11 +268,13 @@ class DefaultUserPortfolio:
         broker_connector: BrokerConnector | None = None,
         boundary_gate: BoundaryGate | None = None,
         audit_manager: AuditManager | None = None,
+        knowledge_entity: DefaultKnowledgeEntity | None = None,
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
         self._broker_connector = broker_connector or PlaceholderBrokerConnector()
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._audit_manager = audit_manager or DefaultAuditManager()
+        self._knowledge_entity = knowledge_entity or DefaultKnowledgeEntity(infrastructure=self._infrastructure)
 
     def onboard_user(self, details: dict) -> User:
         with traced("DefaultUserPortfolio.onboard_user"):
@@ -400,6 +426,74 @@ class DefaultUserPortfolio:
                 if any(holding["security_id"] == event_security_id for holding in holdings):
                     return True
             return False
+
+    def list_available_securities(self, query: str = "") -> list[Entity]:
+        """The manual-entry path's answer to "what can a user pick
+        from" (ADR-0044) — every live entity Knowledge & Entity Model
+        (04) already knows about whose `kind` marks it as a tradeable
+        security or the company behind one, optionally narrowed by
+        `query` (substring match against name/aliases, same
+        normalization `DefaultKnowledgeEntity.search_entities` uses)
+        so a dropdown can filter as the user types. Merges results
+        across both tradeable kinds and dedups by entity id. A
+        registry with nothing registered yet — the honest state of a
+        fresh system before anything has seeded it — returns an empty
+        list; that is a correct answer, not a bug to paper over with
+        fake data."""
+        with traced("DefaultUserPortfolio.list_available_securities"):
+            securities_by_id: dict[str, Entity] = {}
+            for kind in _TRADEABLE_SECURITY_ENTITY_KINDS:
+                for entity in self._knowledge_entity.search_entities(kind=kind, query=query):
+                    securities_by_id[entity.id] = entity
+            return list(securities_by_id.values())
+
+    def add_holding_manually(self, portfolio: Portfolio, security_id: str, quantity: float) -> Holding:
+        """The manual-entry counterpart to `import_holdings` (ADR-0044):
+        adds one `Holding` by direct selection rather than a broker
+        round-trip, entirely bypassing `BrokerConnector`. `security_id`
+        must resolve to a real, live entity via
+        `DefaultKnowledgeEntity.get_entity` — a direct id lookup, not
+        `resolve_entity`'s mention/name fuzzy match, since `security_id`
+        is expected to be an id a caller already got from
+        `list_available_securities`, not free text — before any
+        `Holding` is built; an id that doesn't resolve fails loudly
+        (`ValueError`) rather than silently creating a holding for a
+        security nobody registered. Unlike broker-sourced holdings,
+        this is never tagged `Provenance.UNTRUSTED`: the data crossing
+        into this component is a direct user selection over an
+        already-validated internal registry entry, not an external
+        system's payload — the same reasoning `onboard_user`/
+        `manage_preferences` already apply to direct user input (ADR-0044
+        documents this contrast with ADR-0022's broker-data tagging)."""
+        with traced("DefaultUserPortfolio.add_holding_manually"):
+            security = self._knowledge_entity.get_entity(security_id)
+            if security is None:
+                raise ValueError(
+                    f"add_holding_manually: security_id {security_id!r} does not resolve to a known entity"
+                )
+            holding = Holding(portfolio_id=portfolio.id, security_id=security.id, quantity=quantity)
+            self._infrastructure.store(
+                HOLDINGS_TABLE,
+                {"id": f"{portfolio.id}:{holding.security_id}", **asdict(holding)},
+            )
+            return holding
+
+    def add_transaction_manually(self, portfolio: Portfolio, kind: str, amount: float) -> Transaction:
+        """The manual-entry counterpart to `import_transactions`
+        (ADR-0044), mirroring its shape (`kind`/`amount`) for
+        consistency. `Transaction` carries no `security_id` field, so
+        there is nothing here to validate against Knowledge & Entity
+        Model — unlike `add_holding_manually`, this is a plain,
+        directly-trusted record of a user-entered transaction, not
+        tagged `Provenance.UNTRUSTED` for the same reason
+        `add_holding_manually` isn't."""
+        with traced("DefaultUserPortfolio.add_transaction_manually"):
+            transaction = Transaction(portfolio_id=portfolio.id, kind=kind, amount=amount)
+            self._infrastructure.store(
+                TRANSACTIONS_TABLE,
+                {"id": str(uuid.uuid4()), **asdict(transaction)},
+            )
+            return transaction
 
     def _stored_holdings(self, portfolio_id: str) -> list[Holding]:
         records = self._infrastructure.query(HOLDINGS_TABLE, {"portfolio_id": portfolio_id})

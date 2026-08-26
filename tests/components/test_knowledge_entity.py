@@ -431,6 +431,65 @@ def test_update_knowledge_handles_an_entity_with_no_stored_record():
     assert service.resolve_entity("Phantom Corp") == phantom
 
 
+# --- get_entity / search_entities (ADR-0044) --------------------------------
+
+
+def test_get_entity_returns_a_real_entity_for_a_known_id():
+    service = _service()
+    created = service.create_entity({"kind": "Security", "name": "Apple Inc"})
+
+    assert service.get_entity(created.id) == created
+
+
+def test_get_entity_returns_none_for_an_unknown_id():
+    service = _service()
+
+    assert service.get_entity("never-created") is None
+
+
+def test_get_entity_redirects_a_merged_away_id_to_the_survivor():
+    service = _service()
+    survivor = service.create_entity({"kind": "Company", "name": "Apple Inc"})
+    loser = service.create_entity({"kind": "Company", "name": "Apple Computer Inc"})
+    service.merge_entities(survivor, loser)
+
+    assert service.get_entity(loser.id) == survivor
+
+
+def test_search_entities_on_an_empty_registry_returns_an_empty_list():
+    service = _service()
+
+    assert service.search_entities(kind="Security") == []
+
+
+def test_search_entities_filters_by_kind():
+    service = _service()
+    security = service.create_entity({"kind": "Security", "name": "Apple Inc"})
+    service.create_entity({"kind": "Sector", "name": "Technology"})
+
+    assert service.search_entities(kind="Security") == [security]
+
+
+def test_search_entities_filters_by_query_against_name_and_aliases():
+    service = _service()
+    apple = service.create_entity({"kind": "Security", "name": "Apple Inc", "aliases": ["AAPL"]})
+    service.create_entity({"kind": "Security", "name": "Microsoft Corp"})
+
+    assert service.search_entities(kind="Security", query="aapl") == [apple]
+    assert service.search_entities(kind="Security", query="app") == [apple]
+
+
+def test_search_entities_excludes_merge_tombstones():
+    service = _service()
+    survivor = service.create_entity({"kind": "Company", "name": "Apple Inc"})
+    loser = service.create_entity({"kind": "Company", "name": "Apple Computer Inc"})
+    service.merge_entities(survivor, loser)
+
+    results = service.search_entities(kind="Company")
+
+    assert results == [survivor]
+
+
 # --- Live Postgres integration (skips cleanly without docker-compose) ------
 
 
