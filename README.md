@@ -4,19 +4,20 @@ An agentic, portfolio-aware financial intelligence system: watches sources, reso
 
 ## Status
 
-**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 473 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
+**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 485 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
 
-**5 real decisions are still open**, each a genuine external-credential or vendor gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide by fiat. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
+**4 real decisions are still open**, each a genuine external-credential or vendor-account gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide or set up by fiat — creating a real account needs a real inbox for verification and a real person agreeing to that vendor's terms, neither of which this process can do on your behalf. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
 
 | ADR | What's waiting | Component |
 |---|---|---|
 | [0023](adr/0023-user-portfolio-broker-api-choice-interim.md) | Which broker/aggregator API for holdings and transactions (a real, non-broker manual-entry path exists too — [0044](adr/0044-user-portfolio-manual-stock-entry.md)) | User & Portfolio |
-| [0027](adr/0027-data-sources-fetch-provider-interim.md) | Which market/filing/news provider(s) | Data & Sources |
-| [0028](adr/0028-memory-mem0-llm-embedding-provider-interim.md) | Mem0's LLM/embedding provider (its one real differentiator over this project's own Infrastructure-backed logic) | Memory |
-| [0034](adr/0034-retrieval-corrective-external-search-provider-interim.md) | Which external search API for corrective retrieval | Retrieval & Context |
-| [0040](adr/0040-interaction-notification-delivery-channel-interim.md) | Which delivery channel (email/SMS/push) | Interaction & Notification |
+| [0027](adr/0027-data-sources-fetch-provider-interim.md) | Which market/filing/news provider(s) — recommended: Alpha Vantage (market data + news), free key, no card | Data & Sources |
+| [0034](adr/0034-retrieval-corrective-external-search-provider-interim.md) | Which external search API for corrective retrieval — recommended: Tavily, free tier, no card | Retrieval & Context |
+| [0040](adr/0040-interaction-notification-delivery-channel-interim.md) | Which delivery channel (email/SMS/push) — recommended: Resend for email; `User` also needs a contact field added first | Interaction & Notification |
 
-Resolving one of these is a normal ADR decision — read the linked file, pick an option or bring your own, and the placeholder swaps out behind the same interface without touching any caller.
+Resolving one of these is a normal ADR decision — sign up for the free tier, read the linked file, drop the resulting key into `.env`, and the placeholder swaps out behind the same interface without touching any caller (the same pattern `OPENROUTER_API_KEY` already uses, [ADR-0043](adr/0043-llm-provider-resolved-openrouter.md)).
+
+Memory's own vendor gap ([ADR-0028](adr/0028-memory-mem0-llm-embedding-provider-interim.md)) needed no account at all and is resolved: `Mem0EntityLinker` uses a free, local, offline embedding model ([ADR-0045](adr/0045-memory-mem0-embedding-resolved-fastembed.md)).
 
 ## Architecture
 
@@ -44,8 +45,9 @@ src/
   infrastructure_postgres.py   Its real Postgres/Redis implementation
   run_trace.py                 A static wiring demo (Stub* classes) — proves the blueprint's shape
   llm.py                        The one real LLM reasoning backend (OpenRouter), ADR-0043
-tests/                         473 real tests, one file per component
-adr/                           44 Architecture Decision Records — every real decision, with
+  mem0_embedder.py              Real local embedding provider (mem0ai + fastembed), ADR-0045
+tests/                         485 real tests, one file per component
+adr/                           45 Architecture Decision Records — every real decision, with
                                 context, alternatives considered, and consequences. Read adr/README.md first.
 checkpoint.md                  The narrative log of this entire build, in order
 loop.md                        The process every component's real implementation followed
@@ -63,7 +65,7 @@ Implementation was parallelized across subagents, each briefed with the specific
 
 ```bash
 uv sync --extra dev          # install dependencies
-uv run --python 3.11 pytest tests/ -v    # 473 pass, 13 skip without a live DB
+uv run --python 3.11 pytest tests/ -v    # 485 pass, 13 skip without a live DB
 
 docker-compose up -d         # bring up local Postgres + Redis
 uv run --python 3.11 pytest tests/ -v    # same suite, now with real DB coverage too

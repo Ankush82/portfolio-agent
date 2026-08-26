@@ -1,6 +1,6 @@
 # 0028 — Memory: Mem0 LLM/embedding provider interim, deferred to DefaultInfrastructure
 
-**Status:** Proposed — 2026-08-26
+**Status:** Superseded by [ADR-0045](0045-memory-mem0-embedding-resolved-fastembed.md) — 2026-08-26. The embedding-similarity half of the gap named below is resolved: `Mem0EntityLinker` (`src/components/c06_memory.py`), real cosine similarity via mem0ai's local `fastembed` embedder, no API key or account needed. The LLM-driven extraction/dedup half remains open, named as real future work in ADR-0045's own Consequences.
 **Component:** Memory (06)
 
 ## Context

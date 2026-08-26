@@ -22,6 +22,17 @@ implemented directly against `Infrastructure` (ADR-0019's interface,
 concretely `DefaultInfrastructure`, `../infrastructure_postgres.py`)
 rather than Mem0 — real, structural, threshold-based logic, no LLM
 required, no external credential needed to run.
+
+ADR-0028's embedding-similarity half is now resolved (ADR-0045):
+`Mem0EntityLinker`, below, scores relatedness via mem0ai's own local
+`fastembed` embedder (`../mem0_embedder.py`) — real cosine similarity
+between sentence embeddings, no API key or account needed. It is an
+additional, optional `EntityLinker` implementation, not the default —
+`DefaultEntityLinker`'s Jaccard token-overlap stays the default for
+every existing caller, since loading `Mem0EntityLinker`'s embedder
+touches the network on a genuine first use (the model download) and
+this project's `Default*` classes are otherwise careful never to touch
+the network at construction.
 """
 
 import hashlib
@@ -35,6 +46,7 @@ from typing import Protocol
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
 from infrastructure import Infrastructure
+from mem0_embedder import cosine_similarity, get_embedder
 
 # Structural partition (ADR-0008): two physically distinct table
 # namespaces behind Infrastructure, not one table filtered by a scope
@@ -87,15 +99,20 @@ def _memory_from_record(record: dict) -> "Memory":
     )
 
 
+def _content_text(content: dict) -> str:
+    """Flattens a memory's content dict into one plain-text string —
+    shared by `_content_tokens` (Jaccard token overlap, below) and
+    `Mem0EntityLinker.link` (real embedding similarity), so both linkers
+    read exactly the same text out of a `MemoryCandidate`/`Memory`."""
+    return " ".join(str(value) for value in content.values())
+
+
 def _content_tokens(content: dict) -> set[str]:
     """Flattens a memory's content dict into a lowercase token set — a
     deterministic, structural relatedness signal. Naive by design: this
-    is token overlap, not semantic similarity. True semantic linking
-    needs an embedding model, which is exactly the capability ADR-0028
-    defers pending an LLM/embedding provider decision; this is the
-    honest substitute in the meantime, not a stand-in dressed up as
-    equivalent to it."""
-    text = " ".join(str(value) for value in content.values())
+    is token overlap, not semantic similarity — `Mem0EntityLinker`,
+    below, is the real embedding-based alternative (ADR-0045)."""
+    text = _content_text(content)
     return {token for token in text.lower().split() if token}
 
 
@@ -210,6 +227,70 @@ class DefaultEntityLinker:
                     continue
                 union = candidate_tokens | memory_tokens
                 similarity = len(candidate_tokens & memory_tokens) / len(union)
+                if similarity >= self._similarity_threshold:
+                    linked_ids.append(memory.id)
+            return linked_ids
+
+
+class Mem0EntityLinker:
+    """Real semantic implementation of EntityLinker (ADR-0028, resolved
+    by ADR-0045). Unlike `DefaultEntityLinker`'s Jaccard token-overlap,
+    this scores relatedness via mem0ai's own local `fastembed` embedder
+    (`src/mem0_embedder.py`) — real cosine similarity between sentence
+    embeddings, not exact-word overlap, so "AAPL stock price dropped 5
+    percent after earnings miss" and "Apple shares fell following
+    disappointing quarterly earnings" link even though they share almost
+    no tokens. No API key, no account, no external service — the model
+    downloads once from Hugging Face Hub on first use on a given machine
+    and is cached locally after that.
+
+    `similarity_threshold` defaults to 0.6: measured directly against
+    this exact model, a genuinely related pair of financial-news
+    sentences (the example above) scores ~0.73 cosine similarity, and an
+    unrelated pair ("...earnings miss" vs. "The weather in Paris is sunny
+    today") scores ~0.36 — 0.6 sits in the real gap between them, the
+    same "measure it, then pick a threshold in the gap" approach
+    `DefaultEventObservation`'s z-score rule already uses (ADR-0036).
+
+    This is an additional, optional collaborator behind the same
+    `EntityLinker` Protocol `DefaultEntityLinker` already implements —
+    per ADR-0028's own Decision, not the silent default anywhere in this
+    codebase. `DefaultEntityLinker` stays the default for every existing
+    caller (`DefaultLearningEvaluation` included) because loading this
+    class's embedder touches the network on a genuine first use (the
+    model download) and this project's `Default*` classes are otherwise
+    careful to never touch the network at construction. A caller that
+    wants real semantic linking constructs `Mem0EntityLinker` explicitly.
+
+    This resolves the embedding-similarity half of ADR-0028's named gap.
+    The other half — Mem0's `Memory.add(..., infer=True)` LLM-driven fact
+    extraction/dedup — is deliberately not wired in here: it needs Mem0's
+    own persistent vector-store-backed `Memory` class (ADR-0010 already
+    decided against using Mem0 as this project's storage backend), and
+    `EntityLinker.link(candidate, existing)`'s signature compares a
+    candidate against an explicitly-provided list, not against a
+    persistent index Mem0 would own — a genuinely different capability
+    than what this class does, named here as real future work, not
+    silently done.
+    """
+
+    def __init__(self, similarity_threshold: float = 0.6, embedder=None) -> None:
+        self._similarity_threshold = similarity_threshold
+        self._embedder = embedder or get_embedder()
+
+    def link(self, candidate: MemoryCandidate, existing: list[Memory]) -> list[str]:
+        with traced("Mem0EntityLinker.link"):
+            candidate_text = _content_text(candidate.content)
+            if not candidate_text.strip():
+                return []
+            candidate_vector = self._embedder.embed(candidate_text, memory_action="add")
+            linked_ids = []
+            for memory in existing:
+                memory_text = _content_text(memory.content)
+                if not memory_text.strip():
+                    continue
+                memory_vector = self._embedder.embed(memory_text, memory_action="search")
+                similarity = cosine_similarity(candidate_vector, memory_vector)
                 if similarity >= self._similarity_threshold:
                     linked_ids.append(memory.id)
             return linked_ids

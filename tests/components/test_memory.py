@@ -26,6 +26,7 @@ from components.c06_memory import (
     DefaultMemoryManager,
     DefaultQuarantineGate,
     DefaultScopeRouter,
+    Mem0EntityLinker,
     Memory,
     MemoryCandidate,
     _table_for_scope,
@@ -164,6 +165,64 @@ def test_link_returns_empty_list_when_nothing_existing():
     candidate = MemoryCandidate(content={"text": "Acme Corp earnings"}, source="filing", provenance_verified=True)
 
     assert linker.link(candidate, []) == []
+
+
+# --- Mem0EntityLinker (ADR-0028, resolved by ADR-0045) --------------------
+
+
+def test_mem0_link_finds_semantically_related_memory_with_no_shared_tokens():
+    linker = Mem0EntityLinker()
+    candidate = MemoryCandidate(
+        content={"text": "AAPL stock price dropped 5 percent after earnings miss"},
+        source="filing",
+        provenance_verified=True,
+    )
+    existing = [
+        _memory("related", content={"text": "Apple shares fell following disappointing quarterly earnings"}),
+        _memory("unrelated", content={"text": "The weather in Paris is sunny today"}),
+    ]
+
+    links = linker.link(candidate, existing)
+
+    assert "related" in links
+    assert "unrelated" not in links
+
+
+def test_mem0_link_returns_empty_list_when_candidate_content_empty():
+    linker = Mem0EntityLinker()
+    candidate = MemoryCandidate(content={}, source="filing", provenance_verified=True)
+
+    assert linker.link(candidate, [_memory("m1", content={"text": "something"})]) == []
+
+
+def test_mem0_link_returns_empty_list_when_nothing_existing():
+    linker = Mem0EntityLinker()
+    candidate = MemoryCandidate(content={"text": "Acme Corp earnings"}, source="filing", provenance_verified=True)
+
+    assert linker.link(candidate, []) == []
+
+
+def test_mem0_link_skips_existing_memory_with_empty_content():
+    linker = Mem0EntityLinker()
+    candidate = MemoryCandidate(content={"text": "Acme Corp earnings"}, source="filing", provenance_verified=True)
+    existing = [_memory("empty", content={})]
+
+    assert linker.link(candidate, existing) == []
+
+
+def test_mem0_link_respects_a_custom_similarity_threshold():
+    candidate = MemoryCandidate(
+        content={"text": "AAPL stock price dropped 5 percent after earnings miss"},
+        source="filing",
+        provenance_verified=True,
+    )
+    existing = [_memory("m1", content={"text": "Apple shares fell following disappointing quarterly earnings"})]
+
+    lenient_linker = Mem0EntityLinker(similarity_threshold=0.0)
+    strict_linker = Mem0EntityLinker(similarity_threshold=0.999)
+
+    assert lenient_linker.link(candidate, existing) == ["m1"]
+    assert strict_linker.link(candidate, existing) == []
 
 
 # --- DefaultQuarantineGate -----------------------------------------------
