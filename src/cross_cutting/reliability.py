@@ -7,6 +7,8 @@ Decisions:
              (Agent Runtime's replan-first default no longer applies
              unconditionally)
   ADR-0016 — circuit breaker scope: per tool, not per trajectory
+  ADR-0025 — tool-interchangeability mapping (Tools & Environment,
+             component 11) wired into DefaultCircuitBreaker.find_alternative()
 
 Every component's Executor-equivalent calls FailureClassifier.classify()
 on any step failure before deciding what happens next. Transient
@@ -16,7 +18,7 @@ unchanged. Loop/cascade patterns get routed to CircuitBreaker instead.
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol
+from typing import Callable, Protocol
 
 from cross_cutting.observability import traced
 
@@ -83,8 +85,9 @@ class CircuitBreaker(Protocol):
 
     def find_alternative(self, tool_name: str) -> str | None:
         """Fig. 15.1's 'alternative exists?' branch. The mapping of
-        which tools are interchangeable is not yet designed — depends
-        on Tools & Environment (component 11)."""
+        which tools are interchangeable now comes from Tools &
+        Environment (component 11)'s DefaultToolsEnvironment
+        .alternatives_for() — see ADR-0025."""
         ...
 
 
@@ -109,16 +112,27 @@ class DefaultCircuitBreaker:
     """Real implementation of CircuitBreaker (ADR-0016): per-tool scope,
     with real trip state kept in this instance.
 
-    The tool-interchangeability mapping find_alternative would need is
-    not yet designed — it depends on Tools & Environment (component 11,
-    per the CircuitBreaker protocol docstring). Rather than invent one,
-    this accepts an optional caller-supplied mapping and is honest that
-    there is no alternative when nothing has been configured.
+    The tool-interchangeability mapping find_alternative needs is now
+    designed — Tools & Environment (component 11)'s DefaultToolsEnvironment
+    .alternatives_for() (ADR-0025). Rather than require every caller to
+    hand-maintain a static dict, find_alternative() accepts an optional
+    `alternative_source` callable — `DefaultToolsEnvironment` wires its
+    own `alternatives_for` in by default (see its __init__) — and only
+    returns a name that callable reports AND that is_available() still
+    considers up. The static `alternatives` dict is kept alongside it
+    for an explicit, caller-pinned override (checked first); with
+    neither configured this is still honest that there is no
+    alternative, exactly as before ADR-0025.
     """
 
-    def __init__(self, alternatives: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        alternatives: dict[str, str] | None = None,
+        alternative_source: Callable[[str], list[str]] | None = None,
+    ) -> None:
         self._tripped_tools: set[str] = set()
         self._alternatives = alternatives or {}
+        self._alternative_source = alternative_source
 
     def trip(self, tool_name: str) -> None:
         with traced("DefaultCircuitBreaker.trip"):
@@ -130,4 +144,10 @@ class DefaultCircuitBreaker:
 
     def find_alternative(self, tool_name: str) -> str | None:
         with traced("DefaultCircuitBreaker.find_alternative"):
-            return self._alternatives.get(tool_name)
+            if tool_name in self._alternatives:
+                return self._alternatives[tool_name]
+            if self._alternative_source is not None:
+                for candidate in self._alternative_source(tool_name):
+                    if self.is_available(candidate):
+                        return candidate
+            return None

@@ -371,10 +371,15 @@ class DefaultRecoveryManager:
     ADR-0015). Every failure is classified first via FailureClassifier;
     only FailureType.TRANSIENT is eligible for autonomous replan, and
     only while retry_budget hasn't been exhausted for that checkpoint.
-    FailureType.LOOP_OR_CASCADE trips the named tool's circuit breaker
-    and escalates instead of replanning, per ADR-0015 — retrying a
-    loop/cascade pattern is exactly what the underlying research found
-    makes it worse, not better.
+    FailureType.LOOP_OR_CASCADE trips the named tool's circuit breaker,
+    then — per ADR-0025, fig 15.1's own 'alternative exists?' branch,
+    completed now that Tools & Environment's DefaultToolsEnvironment
+    .alternatives_for() gives CircuitBreaker.find_alternative() a real
+    mapping to consult — checks for an alternative tool. If one is
+    available, this continues the checkpoint on that alternative
+    instead of escalating; escalation is reserved for when no
+    alternative exists, exactly as fig 15.1 diagrams it, not for every
+    loop/cascade unconditionally as before ADR-0025.
 
     Real replanning *content* (what to actually try differently) needs
     the same reasoning capability this whole task is being honest about
@@ -413,6 +418,20 @@ class DefaultRecoveryManager:
             if failure_type == FailureType.LOOP_OR_CASCADE:
                 if event.tool:
                     self._circuit_breaker.trip(event.tool)
+                    alternative = self._circuit_breaker.find_alternative(event.tool)
+                    if alternative is not None:
+                        self._audit_manager.record(
+                            "tool_switch_on_loop_or_cascade",
+                            {
+                                "checkpoint_id": checkpoint.id,
+                                "failed_tool": event.tool,
+                                "alternative_tool": alternative,
+                            },
+                        )
+                        return Checkpoint(
+                            id=checkpoint.id,
+                            subgoal={**checkpoint.subgoal, "preferred_tool": alternative},
+                        )
                 self.escalate(checkpoint, f"loop_or_cascade: {event.error}")
                 raise EscalationRequired(checkpoint, "loop_or_cascade")
 
