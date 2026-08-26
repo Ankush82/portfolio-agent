@@ -21,6 +21,7 @@ the architecture actually execute before any component has real
 behavior. Everything downstream of this file stays a traced no-op.
 """
 
+import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Protocol
 
 TRACE_LOG_PATH = Path("trace.log")
+AUDIT_LOG_PATH = Path("audit.log")
 
 
 @dataclass
@@ -79,3 +81,19 @@ class StubAuditManager:
     def record(self, event_type: str, detail: dict) -> None:
         with traced(f"StubAuditManager.record[{event_type}]"):
             return None
+
+
+class DefaultAuditManager:
+    """Real implementation of AuditManager: appends each event as one JSON line to AUDIT_LOG_PATH."""
+
+    def record(self, event_type: str, detail: dict) -> None:
+        with traced(f"DefaultAuditManager.record[{event_type}]"):
+            line = json.dumps(
+                {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "event_type": event_type,
+                    "detail": detail,
+                }
+            )
+            with AUDIT_LOG_PATH.open("a") as f:
+                f.write(line + "\n")
