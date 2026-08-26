@@ -47,6 +47,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0035](0035-knowledge-entity-real-mechanism.md) | Knowledge & Entity Model real mechanism: normalized exact match + edit-distance fuzzy fallback, Infrastructure-backed CRUD, documented merge transfer rule | Knowledge & Entity Model (04) |
 | [0036](0036-event-observation-real-mechanism.md) | Event & Observation real mechanism: percent-change floor, z-score anomaly rule, rule-based event aggregation/classification, real entity linking via component 04, time-windowed correlation | Event & Observation (07) |
 | [0037](0037-analysis-reasoning-real-mechanism-and-reasoning-seam.md) | Analysis & Reasoning real mechanism: fan-in orchestration across components 07/06/05/01, Evidence & Verification-backed hypothesis testing, injected reason_fn seam for cognitive methods | Analysis & Reasoning (08) |
+| [0038](0038-decision-policy-real-mechanism.md) | Decision & Policy real mechanism: verified-claim scoring contract, weighted relevance/significance/risk rules, actionability thresholds, rate-limit policy, real pending-approval mechanism | Decision & Policy (12) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
