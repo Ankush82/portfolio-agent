@@ -51,6 +51,26 @@ class StubFailureClassifier:
             return FailureType.TRANSIENT
 
 
+class DefaultFailureClassifier:
+    """Real implementation of FailureClassifier (ADR-0015). Detection
+    rule: the most recent entries in event.history form a tight,
+    same-component run — the last _LOOP_WINDOW entries were all
+    failures of the same component as the current event. That's a loop
+    or cascade; anything else is transient and still goes to that
+    component's own replan/recovery logic, per ADR-0015."""
+
+    _LOOP_WINDOW = 3
+
+    def classify(self, event: FailureEvent) -> FailureType:
+        with traced("DefaultFailureClassifier.classify"):
+            if len(event.history) < self._LOOP_WINDOW:
+                return FailureType.TRANSIENT
+            recent = event.history[-self._LOOP_WINDOW:]
+            if all(entry.component == event.component for entry in recent):
+                return FailureType.LOOP_OR_CASCADE
+            return FailureType.TRANSIENT
+
+
 class CircuitBreaker(Protocol):
     """Scope: per tool (ADR-0016), not per trajectory."""
 
@@ -83,3 +103,31 @@ class StubCircuitBreaker:
     def find_alternative(self, tool_name: str) -> str | None:
         with traced("StubCircuitBreaker.find_alternative"):
             return None
+
+
+class DefaultCircuitBreaker:
+    """Real implementation of CircuitBreaker (ADR-0016): per-tool scope,
+    with real trip state kept in this instance.
+
+    The tool-interchangeability mapping find_alternative would need is
+    not yet designed — it depends on Tools & Environment (component 11,
+    per the CircuitBreaker protocol docstring). Rather than invent one,
+    this accepts an optional caller-supplied mapping and is honest that
+    there is no alternative when nothing has been configured.
+    """
+
+    def __init__(self, alternatives: dict[str, str] | None = None) -> None:
+        self._tripped_tools: set[str] = set()
+        self._alternatives = alternatives or {}
+
+    def trip(self, tool_name: str) -> None:
+        with traced("DefaultCircuitBreaker.trip"):
+            self._tripped_tools.add(tool_name)
+
+    def is_available(self, tool_name: str) -> bool:
+        with traced("DefaultCircuitBreaker.is_available"):
+            return tool_name not in self._tripped_tools
+
+    def find_alternative(self, tool_name: str) -> str | None:
+        with traced("DefaultCircuitBreaker.find_alternative"):
+            return self._alternatives.get(tool_name)
