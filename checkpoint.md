@@ -1,5 +1,9 @@
 # Checkpoint — Portfolio Agent
 
+## Learning & Evaluation (14): scope question resolved (2026-08-26)
+
+The "is this component in scope for this build round" question, open since the Phase 0 cross-cutting round, is resolved: **yes, in scope.** Reason: the user's instruction to build the whole system through to completion, without pausing, settles it — a system with 17 of 18 components real and the 18th (the one that closes the feedback loop back to Memory) deliberately left out isn't "the whole thing." Decided here, in this file, rather than left dangling.
+
 `loop.md` is the code-phase counterpart to `design-framework.md` — what a coding subagent follows per component, once implementation starts. Written 2026-08-26, not yet used by any subagent.
 
 ## User & Portfolio (01): first real implementation (2026-08-26)
