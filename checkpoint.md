@@ -131,7 +131,7 @@ Full design (fig. 1 retrieval path, fig. 2 evidence path, knowns/unknowns) publi
 
 Full design (fig. 15.1 failure classification, fig. 16.1 tracing pipeline, fig. 17.1 boundary gate, fig. 18.1 infrastructure stack) published: [Phase 0 Cross-Cutting Design](https://claude.ai/code/artifact/f9146a5d-2770-4f33-9b20-1c029a0cf22f).
 
-Still open: authority-check granularity for Security & Privacy (per task vs. per tool call) — surfaced during research but not asked yet, not blocking anything designed so far.
+Still open: authority-check granularity for Security & Privacy (per task vs. per tool call) — surfaced during research but not asked yet, not blocking anything designed so far. Draft ADR-0020 (`adr/0020-security-authorize-interim-default.md`, Proposed) now proposes an interim fail-open, logged-but-not-enforced default for `DefaultBoundaryGate.authorize()` so implementation could proceed without deciding the real question — not yet decided by the user.
 
 ## Scaling to the remaining 10 components
 
@@ -140,3 +140,16 @@ Next, per Implementation Plan build-sequence order: User & Portfolio (01) — Ph
 ## Implementation plan
 
 Full build-sequence + technology plan published as an Artifact, "Implementation Plan." Covers all 18 components: concrete tech + build detail for Agent Runtime and Memory (the two with completed designs), and a dependency-ordered build sequence with design-readiness status for the other 16 — no technology invented for designs that don't exist yet.
+
+## First real implementation round (2026-08-26)
+
+- **Memory vendor resolved: Mem0** (ADR-0010 updated from "Accepted, partially" to "Accepted"). The per-decision fit check the ADR always called for (structural partition, quarantine-at-write, A-MEM-style linking, active working set) is deferred to component 06's own implementation round, not skipped.
+- **Minimal Python scaffolding added**: `pyproject.toml` (Python >=3.11, pytest as a dev extra, `src` on the test pythonpath). No LangGraph or DB drivers yet — those arrive with Agent Runtime's and System Infrastructure's own rounds.
+- **First real (non-stub) logic written**, three components in parallel, each following `loop.md` exactly:
+  - **Reliability & Resilience (15)**: `DefaultFailureClassifier` (real heuristic — 3+ same-component failures in a row in `FailureEvent.history` classifies as `LOOP_OR_CASCADE`, else `TRANSIENT`) and `DefaultCircuitBreaker` (real per-tool tripped-state; `find_alternative` takes an optional injectable mapping rather than inventing the Tools & Environment interchangeability data it doesn't have). 8 tests.
+  - **Observability & Governance (16)**: `DefaultAuditManager`, persisting real JSON-lines audit events to `audit.log`, mirroring the existing `trace.log` pattern. 1 test.
+  - **Security & Privacy (17)**: `DefaultBoundaryGate` — `tag_provenance` (fully specified, always UNTRUSTED) and `authenticate` (minimal non-empty-string placeholder) implemented directly; `authorize` hit the genuine open gap (authority-check granularity) and correctly produced **[ADR-0020](adr/0020-security-authorize-interim-default.md)** (Status: Proposed) instead of silently deciding — ships a fail-open, logged-but-not-enforced interim default. 8 tests. **This is a real decision now waiting on the user, not a sequencing item.**
+  - In every case the existing `Stub*` classes were left untouched (still the lightweight test doubles); the new `Default*` classes are additional adapters behind the same Protocol ports.
+- **Verified together, not just individually**: full `pytest tests/` run after all three landed — 17 passed, no conflicts between the parallel agents' work.
+- **Tooling note**: bare `python3`/`python3.11` on this machine has no pytest and is externally-managed (PEP 668); subagents used `uv` to create a project-local `.venv` and install pytest. `uv.lock` is committed for reproducibility; `.venv/` stays gitignored as before. This wasn't planned in `pyproject.toml` originally — flagged here rather than silently adopting a new tool without a note.
+- **Next**: System Infrastructure (18) — needs a real local Postgres/Redis to implement against; plan is docker-compose for local dev, cloud credentials deliberately not requested this round. Agent Runtime (10) — needs the LangGraph dependency added and its fig. 1/2 loop actually built as a graph, the largest remaining piece. Memory (06) — Mem0 now picked, real implementation (and the deferred fit-check) still to do. The other 10 components remain whiteboard-only and need a design-framework pass before real code, unchanged from before.
