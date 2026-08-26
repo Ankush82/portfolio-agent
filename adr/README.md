@@ -38,6 +38,12 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0026](0026-data-sources-real-mechanism.md) | Data & Sources real mechanism: single-table persistence, provenance/timestamp/reliability wiring, SourceFetcher seam | Data & Sources (02) |
 | [0027](0027-data-sources-fetch-provider-interim.md) | Data & Sources fetch provider interim: injectable, non-fetching placeholder (**Proposed**, not yet Accepted) | Data & Sources (02) |
 | [0028](0028-memory-mem0-llm-embedding-provider-interim.md) | Mem0 LLM/embedding provider interim: deferred to DefaultInfrastructure (**Proposed**, not yet Accepted) | Memory (06) |
+| [0029](0029-evidence-linking-relatedness-and-search-mechanism.md) | Evidence linking: Jaccard relatedness rule, MemoryManager/ContextPack search mechanism | Evidence & Verification (09) |
+| [0030](0030-evidence-contradiction-detection-and-resolution-weighting.md) | Contradiction detection rule (topic-gated field conflict) and resolution weighting (reliability × freshness) | Evidence & Verification (09) |
+| [0031](0031-claim-verification-citation-completeness-and-confidence-scoring.md) | Claim verification: independent-source citation completeness and confidence formula | Evidence & Verification (09) |
+| [0032](0032-data-processing-quality-real-mechanism.md) | Data Processing & Quality real mechanism: structural parse/extract, rule-based normalize/transform/dedup/validate, computed quality score, real staleness check, Infrastructure-backed lineage | Data Processing & Quality (03) |
+| [0033](0033-retrieval-gate-evaluator-and-retriever-real-mechanism.md) | Retrieval & Context real mechanism: keyword-overlap adaptive gate, retriever wiring to components 02/04, reliability/coverage/freshness sufficiency evaluator, evaluator-backed context assembly | Retrieval & Context (05) |
+| [0034](0034-retrieval-corrective-external-search-provider-interim.md) | Corrective retrieval external search provider interim: injectable, empty-by-default placeholder (**Proposed**, not yet Accepted) | Retrieval & Context (05) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
