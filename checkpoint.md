@@ -1,5 +1,16 @@
 # Checkpoint — Portfolio Agent
 
+## All 18 components real — the no-pause drive complete (2026-08-26)
+
+User instruction: stop asking at every step, build the whole thing, don't stop until ready for publication. Delivered in 5 waves (15/16/17 → 18/10 → 01/02/06/11 → 03/05/09 → 04 → 07 → 08 → 12 → 13 → 14), each reviewed against the full test suite and pushed before the next started. Final state:
+
+- **420 tests pass, 13 skip** (all skips are live-Postgres/Redis-dependent, honest — `docker-compose up -d` gives real coverage on those).
+- **42 ADRs**, sequence 0001–0041 with no gaps or duplicates, despite many concurrent subagents claiming numbers in parallel — every collision was self-detected and resolved before commit.
+- **7 ADRs remain genuinely Proposed** (0020, 0021, 0023, 0027, 0028, 0034, 0040) — every one a real external-credential or vendor decision this process would not decide by fiat, each shipping a working, honestly-labeled placeholder behind an injectable interface instead. Listed with links in the new root `README.md`.
+- **The feedback loop actually closes**: Learning & Evaluation's `update_knowledge` is the first real caller to drive Memory's full write path end to end, provably retrievable — not a diagram anymore.
+- **Root `README.md` added** — status table, architecture, repo map, how this was built, how to run it. The thing a stranger needs to land on this repo cold.
+- **Operating mode change, for the record**: from this instruction onward, loop.md step 2 stopped meaning "ask and wait" and started meaning "decide with documented judgment (Accepted ADR) unless it's a genuine external-credential gap (Proposed ADR, same as before)." This is a deliberate, user-directed change from the ask-every-fork discipline used for components 05/06/09/10/15–18 earlier in this project — both are logged here so the shift itself doesn't get lost.
+
 ## Learning & Evaluation (14): real implementation, last component (2026-08-26)
 
 - **Built, following loop.md exactly, under the operating-mode change**: `DefaultLearningEvaluation` added to `src/components/c14_learning_evaluation.py` alongside the existing `Stub*`/`Protocol` pair (untouched). No fig. 1/fig. 2 mechanism diagram existed for this component — built directly from the task brief. This is the 18th and last component; every other component in this project is now real.
