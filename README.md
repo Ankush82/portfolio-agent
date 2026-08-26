@@ -4,13 +4,12 @@ An agentic, portfolio-aware financial intelligence system: watches sources, reso
 
 ## Status
 
-**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 420 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
+**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 422 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
 
-**7 real decisions are still open**, each a genuine external-credential or vendor gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide by fiat. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
+**6 real decisions are still open**, each a genuine external-credential or vendor gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide by fiat. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
 
 | ADR | What's waiting | Component |
 |---|---|---|
-| [0020](adr/0020-security-authorize-interim-default.md) | Authorization granularity (per-task vs. per-tool-call) — currently fail-open and logged, nothing enforced | Security & Privacy |
 | [0021](adr/0021-agent-runtime-llm-provider-interim.md) | Which LLM backs actual reasoning — currently a non-cognitive placeholder | Agent Runtime, and by extension Analysis & Reasoning ([0037](adr/0037-analysis-reasoning-real-mechanism-and-reasoning-seam.md)) |
 | [0023](adr/0023-user-portfolio-broker-api-choice-interim.md) | Which broker/aggregator API for holdings and transactions | User & Portfolio |
 | [0027](adr/0027-data-sources-fetch-provider-interim.md) | Which market/filing/news provider(s) | Data & Sources |
@@ -64,7 +63,7 @@ Implementation was parallelized across subagents, each briefed with the specific
 
 ```bash
 uv sync --extra dev          # install dependencies
-uv run --python 3.11 pytest tests/ -v    # 420 pass, 13 skip without a live DB
+uv run --python 3.11 pytest tests/ -v    # 422 pass, 13 skip without a live DB
 
 docker-compose up -d         # bring up local Postgres + Redis
 uv run --python 3.11 pytest tests/ -v    # same suite, now with real DB coverage too

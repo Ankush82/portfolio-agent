@@ -6,16 +6,17 @@ Decisions:
   ADR-0003 — document content tagged untrusted at the point it enters
              Agent Runtime's loop
   ADR-0018 — extends that same tag to delegated sub-agent output
-
-Still open (checkpoint.md, loop.md): authority-check granularity, per
-task vs. per tool call. Do not resolve this by whatever authorize()
-happens to do below — that's a loop.md step 2 gap, not a default.
+  ADR-0042 — resolves the authority-check granularity question ADR-0020
+             left open: per-call, Infrastructure-backed grant table,
+             deny-by-default. Supersedes ADR-0020's fail-open interim.
 """
 
 from enum import Enum, auto
 from typing import Protocol
 
-from cross_cutting.observability import DefaultAuditManager, traced
+from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
+from infrastructure import Infrastructure
+from infrastructure_postgres import DefaultInfrastructure
 
 
 class Provenance(Enum):
@@ -28,7 +29,8 @@ class BoundaryGate(Protocol):
         ...
 
     def authorize(self, identity: str, action: str, resource: str) -> bool:
-        """Granularity not yet decided — see module docstring."""
+        """Per-call granularity (ADR-0042): every call is evaluated
+        independently against real policy data. No task-level caching."""
         ...
 
     def tag_provenance(self, content: dict, source: str) -> dict:
@@ -55,19 +57,28 @@ class StubBoundaryGate:
             return {}
 
 
+_AUTHORIZATION_GRANTS_TABLE = "security_authorization_grants"
+_WILDCARD = "*"  # matches any action or any resource within a grant; identity is always exact
+
+
 class DefaultBoundaryGate:
     """Real implementation of BoundaryGate.
 
     tag_provenance() and authenticate() are fully specified by
     existing ADRs / by "no real identity provider exists yet"; see
-    each method's docstring. authorize() is not: the authority-check
-    granularity question (per task vs. per tool call) has been open
-    since Phase 0 (loop.md "Still-open items", checkpoint.md's Phase 0
-    cross-cutting summary) and no ADR settled it before this class
-    needed to exist. Per loop.md step 2, that gap is documented in a
-    draft ADR (ADR-0020, status Proposed) rather than resolved here by
-    whatever the code happens to do — see authorize()'s docstring.
+    each method's docstring. authorize() now enforces for real
+    (ADR-0042, superseding ADR-0020's fail-open interim): per-call
+    granularity against an Infrastructure-backed grant table, deny by
+    default. See authorize()'s and grant()'s docstrings.
     """
+
+    def __init__(
+        self,
+        infrastructure: Infrastructure | None = None,
+        audit_manager: AuditManager | None = None,
+    ) -> None:
+        self._infrastructure = infrastructure or DefaultInfrastructure()
+        self._audit_manager = audit_manager or DefaultAuditManager()
 
     def authenticate(self, identity: str) -> bool:
         """Placeholder for a real identity provider — no such provider
@@ -78,29 +89,48 @@ class DefaultBoundaryGate:
         with traced("DefaultBoundaryGate.authenticate"):
             return bool(identity) and bool(identity.strip())
 
+    def grant(self, identity: str, action: str, resource: str) -> str:
+        """Adds one real authorization grant to the Infrastructure-backed
+        policy table (ADR-0042). `action` and/or `resource` may be the
+        wildcard "*" to grant every action, every resource, or both, to
+        `identity`; `identity` itself is always matched exactly — a
+        grant is always scoped to one principal, never broadcast to
+        every caller. Returns the new grant's id. Nothing seeds any
+        grants by default (same reasoning as ADR-0024's empty tool
+        registry): a caller must grant explicitly before authorize()
+        allows anything for that identity."""
+        with traced("DefaultBoundaryGate.grant"):
+            return self._infrastructure.store(
+                _AUTHORIZATION_GRANTS_TABLE,
+                {"identity": identity, "action": action, "resource": resource},
+            )
+
     def authorize(self, identity: str, action: str, resource: str) -> bool:
-        """Provisional, interim default — see ADR-0020
-        (adr/0020-security-authorize-interim-default.md, status
-        Proposed). This ALWAYS ALLOWS: it returns True for every call,
-        regardless of identity, action, or resource. The authority-check
-        granularity question (per task vs. per tool call) is unresolved,
-        so this does not attempt to enforce anything at either
-        granularity — it accepts whatever the caller passes and logs it.
-        Every call is recorded via DefaultAuditManager so a decision
-        trail exists, but nothing is actually blocked yet. Do not treat
-        this as a working authorization boundary; see ADR-0020's
-        Consequences section for exactly what is and isn't safe to rely
-        on here."""
+        """Real enforcement, per-call granularity (ADR-0042, superseding
+        ADR-0020's fail-open interim). Every call is evaluated
+        independently — no task-level caching — against the real grants
+        `grant()` has stored for `identity` in Infrastructure: allowed
+        only if at least one stored grant for this exact identity has
+        an action matching `action` (exact or "*") AND a resource
+        matching `resource` (exact or "*"). No matching grant means
+        deny; there is no fail-open path left. Every call is still
+        recorded via AuditManager, now with `enforced: True` and the
+        real decision, so the audit trail reflects what actually
+        happened rather than what was merely logged."""
         with traced("DefaultBoundaryGate.authorize"):
-            decision = True
-            DefaultAuditManager().record(
+            grants = self._infrastructure.query(_AUTHORIZATION_GRANTS_TABLE, {"identity": identity})
+            decision = any(
+                grant.get("action") in (action, _WILDCARD) and grant.get("resource") in (resource, _WILDCARD)
+                for grant in grants
+            )
+            self._audit_manager.record(
                 "authorization_decision",
                 {
                     "identity": identity,
                     "action": action,
                     "resource": resource,
                     "decision": decision,
-                    "enforced": False,
+                    "enforced": True,
                 },
             )
             return decision

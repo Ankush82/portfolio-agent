@@ -29,7 +29,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0017](0017-observability-infrastructure-tier-only.md) | Observability scope: infrastructure-level tier only | Observability & Governance (16) |
 | [0018](0018-security-peer-agent-untrusted-by-default.md) | Peer-agent output: untrusted by default | Security & Privacy (17) |
 | [0019](0019-infrastructure-unified-managed-stack.md) | System Infrastructure: unified, managed stack | System Infrastructure (18) |
-| [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Proposed**, not yet Accepted) | Security & Privacy (17) |
+| [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Superseded by [0042](0042-security-authorize-granularity-resolved.md)**) | Security & Privacy (17) |
 | [0021](0021-agent-runtime-llm-provider-interim.md) | Agent Runtime LLM provider interim: injectable, non-cognitive placeholder (**Proposed**, not yet Accepted) | Agent Runtime (10) |
 | [0022](0022-user-portfolio-broker-connector-interface.md) | Broker connector: injectable Protocol, broker data untrusted by default | User & Portfolio (01) |
 | [0023](0023-user-portfolio-broker-api-choice-interim.md) | Broker/aggregator API choice interim: placeholder connector (**Proposed**, not yet Accepted) | User & Portfolio (01) |
@@ -51,8 +51,9 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0039](0039-interaction-notification-real-mechanism.md) | Interaction & Notification real mechanism: decision-dict contract, DecisionPolicy-delegated scoring, prioritize/personalize rules, real pending-feedback/response mechanism | Interaction & Notification (13) |
 | [0040](0040-interaction-notification-delivery-channel-interim.md) | Delivery channel interim: injectable, non-sending placeholder (**Proposed**, not yet Accepted) | Interaction & Notification (13) |
 | [0041](0041-learning-evaluation-real-mechanism.md) | Learning & Evaluation real mechanism: DataSources-backed outcome measurement (inherits ADR-0027), tolerance-based comparison, multi-field trajectory replay, real Memory-write-path closure via update_knowledge | Learning & Evaluation (14) |
+| [0042](0042-security-authorize-granularity-resolved.md) | Authorize granularity resolved: per-call, real enforcement against an Infrastructure-backed grant table, deny-by-default — supersedes ADR-0020 now that Tools & Environment (11) exists | Security & Privacy (17) |
 
-ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
+ADR-0004 is partially superseded by ADR-0015, and ADR-0020 is superseded by ADR-0042 — see each pair for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
 ## Template
 

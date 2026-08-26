@@ -1,6 +1,6 @@
 # 0020 — Authorize interim default: fail-open, logged, per-call
 
-**Status:** Proposed — 2026-08-26
+**Status:** Superseded by [ADR-0042](0042-security-authorize-granularity-resolved.md) — 2026-08-26. The interim fail-open, log-only behavior described below is no longer what `DefaultBoundaryGate.authorize()` does; ADR-0042 resolves the granularity question this ADR deliberately left open (per-call, real enforcement) now that Tools & Environment (11) exists.
 **Component:** Security & Privacy (17)
 
 ## Context
