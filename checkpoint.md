@@ -26,6 +26,12 @@
 - **No TypeScript existed in the repo** — user asked for it removed; confirmed via search, nothing to do.
 - **Explicitly not implemented, per the user's own instruction to just note it**: the architecture should eventually support scaling from a single simple agent up to hundreds of agents deployed in the cloud (a "software factory"), and the system should eventually be self-improving. Nothing was built toward this now — noted here so it isn't forgotten, and so future design choices (e.g. keeping `Infrastructure` as an injected interface, keeping each component in its own module) stay compatible with it without adding complexity today.
 
+## Self-evolving harness — literature review only (2026-08-26)
+
+- User described a new concern, not yet designed: a self-evolving build harness — spec-driven "contract" → agent factory → multi-perspective QA (developer / agent-decoding / browser) → deploy → monitor → breakage requeued → the harness itself learns across generations (their "G1, G2, G3"). Explicit instruction: literature review only, no implementation, no design decisions yet.
+- Grounding written to `self-evolving-harness-literature-review.md` (not `blueprint.md` as literally requested — that name is already the code blueprint's index; flagged to the user, open to renaming). Seven areas: harness engineering (Weng 2026, the closest direct match to the user's own framing), spec-driven development & agent factories (MetaGPT, ADAS, AFlow), self-recursive/evolutionary improvement (Darwin Gödel Machine, AlphaEvolve, STOP, Red Queen Gödel Machine), multi-perspective QA (AHE's three pillars, FullStack-Agent, WebTestBench), context/graph engineering (ACE, MCE, code knowledge graphs), the deploy-monitor-requeue loop (ties to existing ADR-0015–0018), and — most load-bearing for this user's stated worry — the literature's own named failure modes (weak evaluators, diversity collapse, reward hacking) and how this project's existing ADR/Anti-Slop discipline already partially answers them.
+- Not yet decided: whether this becomes a 19th component or extends Agent Runtime's design. Open, per the review's own closing note.
+
 ## Ports & Adapters formalized across all 18 components (2026-08-26)
 
 - **Question asked directly**: whether the blueprint's structure used any deliberate design pattern. Honest answer at the time: package-by-component (implicit) plus a Ports & Adapters seam that only existed in `infrastructure.py` — not applied consistently, and never presented as a tradeoff the way other decisions in this project have been.
