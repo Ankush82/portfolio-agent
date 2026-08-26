@@ -1,0 +1,41 @@
+# 0040 — Interaction & Notification delivery channel interim: injectable, non-sending placeholder
+
+**Status:** Proposed — 2026-08-26
+**Component:** Interaction & Notification (13)
+
+## Context
+
+`deliver_notification` is now real orchestration end to end: `generate_notification` builds a real `Notification` from a `Decision`'s actual fields, `prioritize_notification`/`personalize_notification` are real rule-based logic over real actionability/significance/preference data, and `deliver_notification` itself calls through a real `NotificationChannel` seam and logs the outcome via `AuditManager` (ADR-0039).
+
+None of that reaches the one thing `deliver_notification` actually depends on to mean anything: getting the notification's content in front of the user, over email, SMS, or push. This project has never chosen a delivery provider anywhere — not in any ADR, not in `checkpoint.md`, not in `Thoughts.md`, not in the Implementation Plan, and `pyproject.toml` has never listed one as a dependency. This is the same shape of gap ADR-0021 (Agent Runtime's LLM provider), ADR-0023 (User & Portfolio's broker/aggregator API), ADR-0027 (Data & Sources' fetch provider), ADR-0028 (Memory's LLM/embedding provider), and ADR-0034 (Retrieval & Context's external search provider) already named: a real external service and a real credential this pass cannot obtain, not a design question this pass could resolve by more thinking.
+
+Per `loop.md` step 2 / this round's operating-mode instruction, a genuine external-credential gap gets exactly ADR-0021's treatment: Status Proposed, an injectable placeholder that makes the surrounding component genuinely runnable and testable today, and the real options named without picking one.
+
+## Decision
+
+Ship `PlaceholderNotificationChannel` as an explicitly non-sending stand-in, behind an injectable interface (`NotificationChannel.send(notification: Notification) -> bool`, a constructor parameter of `DefaultInteractionNotification`), so `deliver_notification` and everything upstream of it can be built, run, and tested today, and later handed a real delivery integration without changing `DefaultInteractionNotification`'s shape at all — only the one object passed into it.
+
+`PlaceholderNotificationChannel.send()` does no real delivery. It does not call any email, SMS, or push API. It records the attempted delivery via `Infrastructure` (`"notifications_sent"`: notification id, recipient, channel, timestamp, `delivered: False`) and always returns `False` — a notification was never actually delivered, so reporting `True` would be dishonest. This is what makes `deliver_notification` genuinely exercisable end to end without a live provider — it is also exactly what makes it unmistakably not real delivery. Anyone reading its name or docstring should not be able to mistake it for a working channel.
+
+## Alternatives considered
+
+- **A transactional email API** (e.g. SendGrid, Postmark, AWS SES). Real considerations the user would need to weigh: this project already stores no verified email address anywhere (`User` carries only `id`/`preferences`, no contact field), so wiring this in also requires deciding where a real email address is captured and how it's kept current; per-message cost at whatever notification volume `enforce_policy`'s rate limit (ADR-0038, up to 5/hour/identity today) ends up allowing; deliverability/spam-filtering risk for a financial-notification use case, which typically needs a verified sending domain and DKIM/SPF setup; latency is off `deliver_notification`'s critical path either way since nothing downstream currently blocks on delivery completing.
+- **SMS via a telephony API** (e.g. Twilio, a similar provider). Same missing-contact-field problem as email, for a phone number instead. Real considerations: per-message cost is typically higher than email and scales directly with `enforce_policy`'s rate limit; character-length constraints would force `Notification.content` to be truncated or restructured for SMS specifically, which the current single `content: str` field doesn't yet account for; carrier delivery reliability and international-number support (relevant given this project's own broker-choice ADR-0023 already anticipates an Indian brokerage/aggregator context) vary meaningfully by provider.
+- **Push via a mobile push service** (e.g. Firebase Cloud Messaging, Apple Push Notification service). Requires a registered device token per user — another field nowhere in `User` today — and, unlike email/SMS, requires this project to actually ship a mobile client capable of registering for and receiving push, which does not exist yet in any form. Real considerations: no per-message cost at typical volumes (unlike email/SMS), best latency of the three options, but the largest additional-infrastructure lift since the receiving app itself would need to be built first.
+
+None of these is picked here. The real considerations — the missing contact/device-token field on `User` regardless of which channel is chosen, per-message cost at `enforce_policy`'s rate-limit volume, deliverability/reliability tradeoffs, and whether one channel is enough or personalization's `notification_channel` preference (ADR-0039) implies multiple channels need to coexist — are named so the user has them, not resolved on the user's behalf.
+
+## Consequences
+
+- Nothing `deliver_notification` does right now reaches a real person. The orchestration around it — notification generation, prioritization, personalization, the `Alert`/`Interaction` bookkeeping, the `AuditManager` trail — is real and independently correct; whether the *content* actually reaches anyone is not. Anything that depends on a notification actually being seen is not yet safe to build on top of this implementation.
+- `PlaceholderNotificationChannel`'s "always records the attempt, never reports success" behavior is why `deliver_notification` is genuinely testable today (see `tests/components/test_interaction_notification.py`) — but those tests exercise the call-through and audit-logging control flow, not any real delivery, and should not be read as validating that notifications "work" in the sense of reaching a user.
+- Once a delivery provider is chosen, the fix is narrowly scoped by design: implement a real `NotificationChannel.send` matching the same `(notification: Notification) -> bool` contract and pass it into `DefaultInteractionNotification`'s `notification_channel` constructor parameter instead of `PlaceholderNotificationChannel`. No other method in this component needs to change for that swap — though, per the Alternatives above, `User` will also need a real contact field (email address, phone number, or device token) added before any real channel has anywhere to send to.
+- This is scoped to Interaction & Notification's `deliver_notification` only. It says nothing about whether other components will eventually need their own external-service credentials (Agent Runtime's LLM provider, ADR-0021; User & Portfolio's broker API, ADR-0023; Data & Sources' fetch provider, ADR-0027; Memory's LLM/embedding provider, ADR-0028; Retrieval & Context's external search provider, ADR-0034) — each of those is its own separate decision, already tracked in its own ADR.
+
+## Related
+
+- Depends on: [ADR-0039](0039-interaction-notification-real-mechanism.md) (the real `deliver_notification` orchestration this placeholder sits behind).
+- Extends the same "ask, don't decide" pattern as: [ADR-0021](0021-agent-runtime-llm-provider-interim.md) (this ADR's direct template), [ADR-0023](0023-user-portfolio-broker-api-choice-interim.md), [ADR-0027](0027-data-sources-fetch-provider-interim.md), [ADR-0028](0028-memory-mem0-llm-embedding-provider-interim.md), [ADR-0034](0034-retrieval-corrective-external-search-provider-interim.md).
+- Implemented by: `../src/components/c13_interaction_notification.py`, `PlaceholderNotificationChannel` and `DefaultInteractionNotification`.
+- Open question originates in: this round's task brief instruction that `deliver_notification` is the one genuine external-credential exception in this component, surfaced during this implementation pass per `loop.md` step 2.
+- Logged narratively in `../checkpoint.md`.
