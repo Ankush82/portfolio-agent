@@ -9,6 +9,8 @@ dependencies = [
     "requests>=2.31",
     "mem0ai>=2.0",
     "fastembed>=0.8",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
 ]
 
 [project.optional-dependencies]

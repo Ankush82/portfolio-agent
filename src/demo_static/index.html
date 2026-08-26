@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Portfolio Agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f0f3ef; --surface: #ffffff; --surface-2: #f8faf7;
+    --text: #131b16; --text-muted: #56685e; --text-faint: #8b9c92;
+    --border: #dde4dd; --border-strong: #c6d0c5;
+    --accent: #0e8f6f; --accent-soft: #e2f3ec;
+    --accent-2: #b5790a; --accent-2-soft: #fbf0dc;
+    --danger: #a2503b; --danger-soft: #f6e9e4;
+    --shadow: 0 1px 2px rgba(20,30,24,.06), 0 8px 24px -12px rgba(20,30,24,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a0f0c; --surface: #101813; --surface-2: #141f19;
+      --text: #e7eee9; --text-muted: #93a69c; --text-faint: #5c6e64;
+      --border: #223026; --border-strong: #2d3f33;
+      --accent: #4fd1ae; --accent-soft: #142822;
+      --accent-2: #e0a544; --accent-2-soft: #2b2213;
+      --danger: #d68b73; --danger-soft: #2a1913;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0f0c; --surface: #101813; --surface-2: #141f19;
+    --text: #e7eee9; --text-muted: #93a69c; --text-faint: #5c6e64;
+    --border: #223026; --border-strong: #2d3f33;
+    --accent: #4fd1ae; --accent-soft: #142822;
+    --accent-2: #e0a544; --accent-2-soft: #2b2213;
+    --danger: #d68b73; --danger-soft: #2a1913;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px -16px rgba(0,0,0,.6);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "IBM Plex Sans", system-ui, sans-serif; line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 40px 20px 96px; }
+  header.top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+  header.top h1 { font-family: "IBM Plex Sans Condensed", sans-serif; font-weight: 700; font-size: 24px; margin: 0; }
+  header.top .badge {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border-strong); color: var(--accent); background: var(--accent-soft);
+  }
+  p.sub { color: var(--text-muted); font-size: 14px; margin: 0 0 32px; }
+  section.panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 24px; margin-bottom: 18px; box-shadow: var(--shadow);
+  }
+  section.panel h2 {
+    font-family: "IBM Plex Sans Condensed", sans-serif; font-weight: 600; font-size: 16px; margin: 0 0 14px;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint);
+  }
+  label { display: block; font-size: 12.5px; color: var(--text-muted); margin-bottom: 6px; }
+  input {
+    width: 100%; font: inherit; font-size: 14px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text);
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .field { margin-bottom: 14px; }
+  button {
+    font: inherit; font-weight: 600; font-size: 13.5px; padding: 10px 18px; border-radius: 8px;
+    border: none; background: var(--accent); color: #06231b; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--text); border: 1px solid var(--border-strong); font-weight: 500;
+  }
+  .row-inline { display: flex; gap: 10px; align-items: flex-end; }
+  .row-inline .field { flex: 1; margin-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-faint); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em; }
+  td.num, th.num { text-align: right; font-family: "IBM Plex Mono", monospace; }
+
+  .search-results { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .search-hit {
+    display: flex; justify-content: space-between; align-items: center; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
+  }
+  .search-hit .name { font-size: 13.5px; }
+  .search-hit .sym { font-family: "IBM Plex Mono", monospace; color: var(--text-faint); font-size: 12px; margin-left: 6px; }
+
+  .empty { color: var(--text-faint); font-size: 13.5px; padding: 6px 0; }
+
+  #trace { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .step {
+    display: flex; gap: 10px; align-items: flex-start; font-size: 13px; opacity: 0; transform: translateY(4px);
+    animation: in .35s ease forwards;
+  }
+  @keyframes in { to { opacity: 1; transform: none; } }
+  .step .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-top: 6px; flex: none; }
+  .step .live-tag {
+    font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--accent); border: 1px solid transparent;
+    background: var(--accent-soft); border-radius: 5px; padding: 1px 6px; margin-left: 8px;
+  }
+  .step .detail { color: var(--text-muted); font-family: "IBM Plex Mono", monospace; font-size: 12px; margin-top: 3px; }
+
+  .notification {
+    margin-top: 16px; border-radius: 10px; padding: 16px 18px; border: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .notification .top-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .priority {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    padding: 3px 9px; border-radius: 999px;
+  }
+  .priority.critical { color: var(--accent-2); background: var(--accent-2-soft); }
+  .priority.high, .priority.normal { color: var(--accent); background: var(--accent-soft); }
+  .priority.low { color: var(--text-faint); background: var(--surface); }
+  .notification .content { font-size: 14.5px; margin-bottom: 10px; }
+  .notification .explain { font-size: 12.5px; color: var(--text-muted); font-family: "IBM Plex Mono", monospace; }
+  .delivery { font-size: 12px; margin-top: 10px; color: var(--danger); }
+  .delivery.ok { color: var(--accent); }
+
+  #onboard-screen, #app-screen { display: none; }
+  .hint { font-size: 12px; color: var(--text-faint); margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Portfolio Agent</h1>
+    <span class="badge">live &middot; real components, real providers</span>
+  </header>
+  <p class="sub">Not a mockup — every action below calls the real onboarding, retrieval, reasoning, and decision pipeline.</p>
+
+  <section class="panel" id="onboard-screen">
+    <h2>Get started</h2>
+    <div class="field">
+      <label for="email">Email</label>
+      <input id="email" type="email" placeholder="you@example.com" value="investor@example.com">
+    </div>
+    <button onclick="onboard()">Create my portfolio</button>
+  </section>
+
+  <div id="app-screen">
+    <section class="panel">
+      <h2>Your portfolio</h2>
+      <table id="holdings-table">
+        <thead><tr><th>Symbol</th><th>Name</th><th class="num">Qty</th><th class="num">Value</th><th class="num">Weight</th></tr></thead>
+        <tbody id="holdings-body"></tbody>
+      </table>
+      <div class="empty" id="holdings-empty">No holdings yet — add one below.</div>
+    </section>
+
+    <section class="panel">
+      <h2>Add a holding</h2>
+      <div class="row-inline">
+        <div class="field">
+          <label for="search">Search securities</label>
+          <input id="search" placeholder="Apple, AAPL, Microsoft..." oninput="search()">
+        </div>
+        <div class="field" style="max-width:110px">
+          <label for="qty">Quantity</label>
+          <input id="qty" type="number" value="25" min="1">
+        </div>
+      </div>
+      <div class="search-results" id="search-results"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Ask the agent to check on AAPL</h2>
+      <p class="hint" style="margin:0 0 14px">
+        Fetches a live Alpha Vantage quote, runs anomaly detection against tracked history,
+        retrieves context (real Tavily search if local data is insufficient), generates real
+        hypotheses via OpenRouter, verifies them against evidence, scores the decision against
+        your real exposure, and attempts real delivery.
+      </p>
+      <button id="check-btn" onclick="checkSignals()">Check AAPL for signals</button>
+      <div id="trace"></div>
+      <div id="notification-slot"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const store = {
+  get user() { return JSON.parse(localStorage.getItem("pa_user") || "null"); },
+  set user(v) { localStorage.setItem("pa_user", JSON.stringify(v)); },
+};
+
+function render() {
+  const user = store.user;
+  document.getElementById("onboard-screen").style.display = user ? "none" : "block";
+  document.getElementById("app-screen").style.display = user ? "block" : "none";
+  if (user) refreshPortfolio();
+}
+
+async function onboard() {
+  const email = document.getElementById("email").value.trim();
+  if (!email) return;
+  const res = await fetch("/api/users", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email})
+  });
+  store.user = await res.json();
+  render();
+}
+
+async function refreshPortfolio() {
+  const user = store.user;
+  const res = await fetch(`/api/portfolio/${user.portfolio_id}`);
+  const data = await res.json();
+  const body = document.getElementById("holdings-body");
+  const empty = document.getElementById("holdings-empty");
+  body.innerHTML = "";
+  if (!data.holdings.length) { empty.style.display = "block"; return; }
+  empty.style.display = "none";
+  for (const h of data.holdings) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="mono">${h.symbol}</td><td>${h.name}</td>
+      <td class="num">${h.quantity}</td><td class="num">$${h.market_value.toFixed(2)}</td>
+      <td class="num">${(h.weight * 100).toFixed(0)}%</td>`;
+    body.appendChild(tr);
+  }
+}
+
+let searchTimer;
+function search() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    const q = document.getElementById("search").value.trim();
+    const results = document.getElementById("search-results");
+    if (!q) { results.innerHTML = ""; return; }
+    const res = await fetch(`/api/securities?q=${encodeURIComponent(q)}`);
+    const hits = await res.json();
+    results.innerHTML = "";
+    for (const hit of hits) {
+      const div = document.createElement("div");
+      div.className = "search-hit";
+      div.innerHTML = `<span class="name">${hit.name}<span class="sym">${hit.symbol}</span></span>`;
+      const btn = document.createElement("button");
+      btn.className = "ghost"; btn.textContent = "Add";
+      btn.onclick = () => addHolding(hit.symbol);
+      div.appendChild(btn);
+      results.appendChild(div);
+    }
+  }, 250);
+}
+
+async function addHolding(symbol) {
+  const qty = parseFloat(document.getElementById("qty").value || "1");
+  const user = store.user;
+  await fetch("/api/holdings", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({portfolio_id: user.portfolio_id, symbol, quantity: qty})
+  });
+  document.getElementById("search").value = "";
+  document.getElementById("search-results").innerHTML = "";
+  refreshPortfolio();
+}
+
+async function checkSignals() {
+  const btn = document.getElementById("check-btn");
+  const trace = document.getElementById("trace");
+  const slot = document.getElementById("notification-slot");
+  btn.disabled = true; btn.textContent = "Working — calling real providers...";
+  trace.innerHTML = ""; slot.innerHTML = "";
+
+  const user = store.user;
+  const res = await fetch(`/api/check-signals/${user.portfolio_id}?symbol=AAPL`, {method: "POST"});
+  const data = await res.json();
+
+  data.trace.forEach((step, i) => {
+    setTimeout(() => {
+      const div = document.createElement("div");
+      div.className = "step";
+      const liveTag = step.detail.live ? '<span class="live-tag">live call</span>' : "";
+      const detailParts = Object.entries(step.detail).filter(([k]) => k !== "live")
+        .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("  ");
+      div.innerHTML = `<span class="dot"></span><div><div>${step.title}${liveTag}</div>${detailParts ? `<div class="detail">${detailParts}</div>` : ""}</div>`;
+      trace.appendChild(div);
+
+      if (i === data.trace.length - 1) {
+        btn.disabled = false; btn.textContent = "Check AAPL for signals";
+        if (data.notification) {
+          const n = data.notification;
+          const div = document.createElement("div");
+          div.className = "notification";
+          div.innerHTML = `
+            <div class="top-row"><strong>Notification</strong><span class="priority ${n.priority}">${n.priority}</span></div>
+            <div class="content">${n.content}</div>
+            <div class="explain">${n.explanation}</div>
+            <div class="delivery ${n.delivered ? 'ok' : ''}">${n.delivered ? '✓ delivered via Resend' : '✗ delivery attempted via Resend, not yet deliverable (sandbox domain unverified)'}</div>`;
+          slot.appendChild(div);
+        } else {
+          slot.innerHTML = '<p class="hint">Nothing rose to the level of a notification this time.</p>';
+        }
+      }
+    }, i * 450);
+  });
+}
+
+render();
+</script>
+</body>
+</html>
