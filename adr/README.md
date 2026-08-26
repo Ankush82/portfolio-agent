@@ -44,6 +44,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0032](0032-data-processing-quality-real-mechanism.md) | Data Processing & Quality real mechanism: structural parse/extract, rule-based normalize/transform/dedup/validate, computed quality score, real staleness check, Infrastructure-backed lineage | Data Processing & Quality (03) |
 | [0033](0033-retrieval-gate-evaluator-and-retriever-real-mechanism.md) | Retrieval & Context real mechanism: keyword-overlap adaptive gate, retriever wiring to components 02/04, reliability/coverage/freshness sufficiency evaluator, evaluator-backed context assembly | Retrieval & Context (05) |
 | [0034](0034-retrieval-corrective-external-search-provider-interim.md) | Corrective retrieval external search provider interim: injectable, empty-by-default placeholder (**Proposed**, not yet Accepted) | Retrieval & Context (05) |
+| [0035](0035-knowledge-entity-real-mechanism.md) | Knowledge & Entity Model real mechanism: normalized exact match + edit-distance fuzzy fallback, Infrastructure-backed CRUD, documented merge transfer rule | Knowledge & Entity Model (04) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
