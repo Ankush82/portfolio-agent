@@ -36,3 +36,14 @@ src/
 - **The other 10** only have whiteboard-level detail (sub-components and capabilities, no mechanism design yet). Their stubs are one class per component with one method per capability — real signatures, but no branch structure, because that hasn't been designed.
 
 Every file's module docstring names the ADRs and design artifact it implements. Read those before writing anything inside a method body.
+
+## Ports & Adapters, everywhere
+
+Every capability class in this blueprint is split in two, the same way `infrastructure.py`'s `Infrastructure` always was:
+
+- **`Foo(Protocol)`** — the port. Signatures and docstrings only; every method body is `...`. This is what the rest of the codebase is allowed to depend on.
+- **`StubFoo`** — the adapter. A traced no-op today; a real implementation (LangGraph for Agent Runtime, Mem0 or Supermemory for Memory, Postgres for `infrastructure.py`, ...) later, swapped in behind the same port without touching any caller.
+
+Real logic, when it eventually gets written, replaces a `Stub*` class — or adds a new adapter alongside it — never the Protocol. Changing a Protocol's signature is an architectural decision (`loop.md` step 2), not a routine edit, exactly like changing `infrastructure.py` already was.
+
+The one exception is `cross_cutting/observability.py`'s `Span` and `traced()` — real, working code, not a stub, since tracing every call is what makes the rest of this blueprint watchable at all.
