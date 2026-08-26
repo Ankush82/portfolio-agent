@@ -2,7 +2,7 @@
 
 This folder logs every architecturally significant decision made in the Portfolio Agent design phase, one file per decision, in the order they were made. Each ADR states the context that forced the decision, what was decided, what else was considered and why it wasn't chosen, and what the decision costs going forward.
 
-These are the same decisions logged narratively in [`../checkpoint.md`](../checkpoint.md); this folder holds the same information in a standard, one-decision-per-file format for later reference. Every ADR below is **Accepted**; none has been reversed.
+These are the same decisions logged narratively in [`../checkpoint.md`](../checkpoint.md); this folder holds the same information in a standard, one-decision-per-file format for later reference. Every ADR below is **Accepted** except where the index notes otherwise (a **Proposed** ADR is a draft, raised per `loop.md` step 2 when implementation surfaced a gap no prior ADR settled — it is not yet a binding decision); none has been reversed.
 
 Scope: this covers engineering/architecture decisions only, not process choices like "which component do we design next" — those stay in `checkpoint.md`, since they're sequencing, not architecture.
 
@@ -29,6 +29,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0017](0017-observability-infrastructure-tier-only.md) | Observability scope: infrastructure-level tier only | Observability & Governance (16) |
 | [0018](0018-security-peer-agent-untrusted-by-default.md) | Peer-agent output: untrusted by default | Security & Privacy (17) |
 | [0019](0019-infrastructure-unified-managed-stack.md) | System Infrastructure: unified, managed stack | System Infrastructure (18) |
+| [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Proposed**, not yet Accepted) | Security & Privacy (17) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
