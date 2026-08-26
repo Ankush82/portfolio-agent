@@ -14,8 +14,12 @@ Decisions:
              prioritize/personalize rules, and the real
              pending-feedback/pending-response mechanism.
   ADR-0040 — which real delivery channel (email/SMS/push) eventually
-             backs NotificationChannel (Status: Proposed — genuine
-             external-credential gap, not decided here).
+             backs NotificationChannel (Status: Superseded by
+             ADR-0048 — real email via Resend, see
+             ResendNotificationChannel below).
+  ADR-0048 — Resend resolved as the real delivery channel; User.email
+             (component 01) added as the missing contact field
+             ADR-0040 flagged.
 
 Interfaces: <- Decision & Policy (12), -> User, -> Learning &
 Evaluation (14).
@@ -30,6 +34,7 @@ from components.c12_decision_policy import DecisionPolicy, DefaultDecisionPolicy
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+from resend_client import get_api_key as get_resend_api_key, send_email
 
 
 @dataclass
@@ -41,6 +46,7 @@ class Notification:
     actionability: str = ""
     significance: float = 0.0
     channel: str = "default"
+    email: str = ""
 
 
 @dataclass
@@ -218,7 +224,7 @@ def _render_explanation(explanation: Explanation) -> str:
 
 class NotificationChannel(Protocol):
     """The seam `deliver_notification` calls through instead of talking
-    to an email/SMS/push API directly (ADR-0039/ADR-0040)."""
+    to an email/SMS/push API directly (ADR-0039/ADR-0040/ADR-0048)."""
 
     def send(self, notification: Notification) -> bool:
         """Attempts delivery. Returns whether it actually succeeded."""
@@ -226,11 +232,11 @@ class NotificationChannel(Protocol):
 
 
 class PlaceholderNotificationChannel:
-    """NOT a real delivery channel (ADR-0040). No live email/SMS/push
-    credential exists in this project — ADR-0040 names the real options
-    (a transactional-email API, an SMS/telephony API, a mobile push
-    service) without choosing one, since that requires a live external
-    credential this pass cannot obtain. Records the attempted delivery
+    """NOT a real delivery channel — used whenever `RESEND_API_KEY`
+    isn't configured (ADR-0040, resolved by ADR-0048). ADR-0040 named
+    the real options (a transactional-email API, an SMS/telephony API,
+    a mobile push service); ADR-0048 picked Resend, real, below
+    (`ResendNotificationChannel`). Records the attempted delivery
     via Infrastructure ("notifications_sent") — timestamp, notification
     id, recipient, channel — without actually sending anything, and
     always returns False: nothing was really delivered, so reporting
@@ -256,6 +262,79 @@ class PlaceholderNotificationChannel:
                 },
             )
             return False
+
+
+class ResendNotificationChannel:
+    """Real `NotificationChannel` (ADR-0048) — resolves ADR-0040's
+    delivery-channel gap via Resend's real email API
+    (`src/resend_client.py`). Sends real email when `notification.email`
+    is populated (`personalize_notification`, above, is what populates
+    it — from `User.email`, component 01, ADR-0048); when it isn't (no
+    contact info reached this notification), honestly cannot deliver —
+    records the attempt the same way `PlaceholderNotificationChannel`
+    already does and returns `False`, rather than guessing at a
+    recipient or silently dropping the record.
+
+    Real, named limitation, not hidden: verified live against this
+    project's own Resend account (ADR-0048), every send currently fails
+    with a real `403` ("The resend.com domain is not verified") until a
+    domain is added and verified at resend.com/domains — Resend's own
+    anti-abuse restriction on unverified accounts, documented in
+    `src/resend_client.py`. That failure is caught here and recorded/
+    returned as `False` like any other genuine delivery failure, not
+    specially handled — this class is real and correct, and will start
+    actually delivering the moment a domain is verified, with no code
+    change needed."""
+
+    def __init__(self, infrastructure: Infrastructure | None = None) -> None:
+        self._infrastructure = infrastructure or DefaultInfrastructure()
+
+    def send(self, notification: Notification) -> bool:
+        with traced("ResendNotificationChannel.send"):
+            delivered = False
+            if notification.email:
+                try:
+                    send_email(
+                        to=notification.email,
+                        subject=f"Portfolio Agent: {notification.priority} priority notification",
+                        text=notification.content,
+                    )
+                    delivered = True
+                except Exception:
+                    delivered = False
+            self._infrastructure.store(
+                _NOTIFICATIONS_SENT_TABLE,
+                {
+                    "id": str(uuid.uuid4()),
+                    "notification_id": notification.id,
+                    "user_id": notification.user_id,
+                    "channel": notification.channel,
+                    "attempted_at": time.strftime(_TIMESTAMP_FORMAT),
+                    "delivered": delivered,
+                },
+            )
+            return delivered
+
+
+def get_notification_channel(
+    placeholder: "NotificationChannel | None" = None,
+    infrastructure: Infrastructure | None = None,
+) -> "NotificationChannel":
+    """Selection function — the same key-gated shape every other vendor
+    seam in this project already established (`get_reason_fn`,
+    `get_source_fetcher`, `get_external_search_provider`). Returns
+    `ResendNotificationChannel` (sharing `infrastructure` — the same
+    "share one backing store rather than two independent connections"
+    posture ADR-0044 already established) when `RESEND_API_KEY` is
+    configured, otherwise returns `placeholder`
+    (`PlaceholderNotificationChannel` by default) unchanged.
+    Constructing `ResendNotificationChannel` never touches the network
+    — only calling `.send()` does — so it is safe for
+    `DefaultInteractionNotification` to resolve this automatically at
+    construction time."""
+    if get_resend_api_key() is not None:
+        return ResendNotificationChannel(infrastructure=infrastructure)
+    return placeholder or PlaceholderNotificationChannel(infrastructure=infrastructure)
 
 
 class DefaultInteractionNotification:
@@ -287,7 +366,7 @@ class DefaultInteractionNotification:
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
         self._decision_policy = decision_policy or DefaultDecisionPolicy(infrastructure=self._infrastructure)
-        self._notification_channel = notification_channel or PlaceholderNotificationChannel(
+        self._notification_channel = notification_channel or get_notification_channel(
             infrastructure=self._infrastructure
         )
         self._audit_manager = audit_manager or DefaultAuditManager()
@@ -382,10 +461,15 @@ class DefaultInteractionNotification:
         appends a pointer to `explain_decision`; `quiet_mode` downgrades
         priority to "low" for anything short of an escalation, never for
         one — quiet hours are a real personalization, not a bypass of a
-        genuine risk escalation. Returns a new Notification rather than
-        mutating the input, since this method rebuilds the recipient-
-        specific fields fully from `user`, not incrementally from
-        `notification`."""
+        genuine risk escalation. Also carries `user["email"]`
+        (`User.email`, component 01, ADR-0048) onto the rebuilt
+        `Notification` — the one field `deliver_notification`'s real
+        channel (`ResendNotificationChannel`) needs to actually address
+        an email, and the only point in this component that ever sees a
+        full `user: dict` to read it from. Returns a new Notification
+        rather than mutating the input, since this method rebuilds the
+        recipient-specific fields fully from `user`, not incrementally
+        from `notification`."""
         with traced("DefaultInteractionNotification.personalize_notification"):
             preferences = user.get("preferences", {})
             channel = preferences.get("notification_channel", notification.channel)
@@ -403,6 +487,7 @@ class DefaultInteractionNotification:
                 actionability=notification.actionability,
                 significance=notification.significance,
                 channel=channel,
+                email=user.get("email", notification.email),
             )
 
     def deliver_notification(self, notification: Notification) -> bool:

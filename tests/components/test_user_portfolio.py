@@ -109,6 +109,35 @@ def test_onboard_user_generates_distinct_ids_for_distinct_users():
     assert first.id != second.id
 
 
+def test_onboard_user_persists_email_when_given():
+    infra = _InMemoryInfrastructure()
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+
+    user = portfolio_component.onboard_user({"email": "real@example.com"})
+
+    assert user.email == "real@example.com"
+    assert infra.retrieve("users", user.id)["email"] == "real@example.com"
+
+
+def test_onboard_user_defaults_email_to_empty_string_when_omitted():
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+
+    user = portfolio_component.onboard_user({})
+
+    assert user.email == ""
+
+
+def test_manage_preferences_preserves_stored_email_across_a_preference_update():
+    infra = _InMemoryInfrastructure()
+    portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+    user = portfolio_component.onboard_user({"email": "real@example.com", "preferences": {"risk_tolerance": "low"}})
+
+    updated = portfolio_component.manage_preferences(User(id=user.id, preferences={}), {"notify_on_drift": True})
+
+    assert updated.email == "real@example.com"
+    assert infra.retrieve("users", user.id)["email"] == "real@example.com"
+
+
 def test_manage_preferences_merges_updates_onto_stored_preferences_not_just_the_passed_in_user():
     infra = _InMemoryInfrastructure()
     portfolio_component = DefaultUserPortfolio(infrastructure=infra)

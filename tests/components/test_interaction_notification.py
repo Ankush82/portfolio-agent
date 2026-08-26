@@ -11,6 +11,9 @@ mock the logic away. AuditManager is exercised against a spy double so
 exact event hand-offs are directly assertable.
 """
 
+import pytest
+
+import resend_client
 from components.c12_decision_policy import DefaultDecisionPolicy
 from components.c13_interaction_notification import (
     Alert,
@@ -18,9 +21,25 @@ from components.c13_interaction_notification import (
     Interaction,
     Notification,
     PlaceholderNotificationChannel,
+    ResendNotificationChannel,
     StubInteractionNotification,
     UserFeedback,
+    get_notification_channel,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_resend_key_by_default(monkeypatch):
+    """This file's `_service()` helper always passes an explicit
+    `notification_channel`, so no existing test's default actually
+    depends on `RESEND_API_KEY` today — but `get_notification_channel`
+    reads it, and this repo's own `.env` may carry a real key for
+    actual use elsewhere in this project. Isolating it here guards any
+    future test in this file the same way `tests/components/test_data_sources.py`
+    and `tests/components/test_retrieval_context.py` already isolate
+    their own vendor keys."""
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.setattr(resend_client, "_ENV_FILE_PATH", resend_client._ENV_FILE_PATH.parent / "does-not-exist.env")
 
 
 class _InMemoryInfrastructure:
@@ -290,6 +309,128 @@ def test_placeholder_notification_channel_records_attempt_and_returns_false():
     assert sent_records[0]["notification_id"] == "n-1"
     assert sent_records[0]["delivered"] is False
     assert sent_records[0]["channel"] == "email"
+
+
+# --- get_notification_channel / ResendNotificationChannel (ADR-0048) -------
+
+
+def test_get_notification_channel_returns_placeholder_when_key_unset():
+    infra = _InMemoryInfrastructure()
+
+    channel = get_notification_channel(infrastructure=infra)
+
+    assert isinstance(channel, PlaceholderNotificationChannel)
+
+
+def test_get_notification_channel_returns_resend_channel_when_key_set(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_demo_key")
+    infra = _InMemoryInfrastructure()
+
+    channel = get_notification_channel(infrastructure=infra)
+
+    assert isinstance(channel, ResendNotificationChannel)
+
+
+def test_default_interaction_notification_resolves_resend_channel_when_key_set(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_demo_key")
+    infra = _InMemoryInfrastructure()
+
+    service = DefaultInteractionNotification(
+        infrastructure=infra, decision_policy=DefaultDecisionPolicy(infrastructure=infra)
+    )
+
+    assert isinstance(service._notification_channel, ResendNotificationChannel)
+
+
+def test_resend_channel_sends_real_email_when_notification_has_an_address(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_demo_key")
+    captured = {}
+
+    def fake_send_email(to, subject, text, from_address=resend_client.DEFAULT_FROM_ADDRESS):
+        captured["to"] = to
+        captured["subject"] = subject
+        captured["text"] = text
+        return {"id": "real-message-id"}
+
+    monkeypatch.setattr("components.c13_interaction_notification.send_email", fake_send_email)
+
+    infra = _InMemoryInfrastructure()
+    channel = ResendNotificationChannel(infrastructure=infra)
+    notification = Notification(
+        user_id="u", content="AAPL beat earnings", priority="high", id="n-1", email="user@example.com"
+    )
+
+    delivered = channel.send(notification)
+
+    assert delivered is True
+    assert captured["to"] == "user@example.com"
+    assert "AAPL beat earnings" in captured["text"]
+    sent_records = list(infra._tables.get("notifications_sent", {}).values())
+    assert sent_records[0]["delivered"] is True
+
+
+def test_resend_channel_honestly_fails_when_notification_has_no_address(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_demo_key")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should not call Resend with no recipient email")
+
+    monkeypatch.setattr("components.c13_interaction_notification.send_email", fail_if_called)
+
+    infra = _InMemoryInfrastructure()
+    channel = ResendNotificationChannel(infrastructure=infra)
+    notification = Notification(user_id="u", content="c", priority="normal", id="n-1", email="")
+
+    delivered = channel.send(notification)
+
+    assert delivered is False
+    sent_records = list(infra._tables.get("notifications_sent", {}).values())
+    assert sent_records[0]["delivered"] is False
+
+
+def test_resend_channel_returns_false_and_records_attempt_when_send_raises(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_demo_key")
+
+    def raising_send_email(*args, **kwargs):
+        raise resend_client.MissingResendAPIKeyError("simulated failure")
+
+    monkeypatch.setattr("components.c13_interaction_notification.send_email", raising_send_email)
+
+    infra = _InMemoryInfrastructure()
+    channel = ResendNotificationChannel(infrastructure=infra)
+    notification = Notification(user_id="u", content="c", priority="normal", id="n-1", email="user@example.com")
+
+    delivered = channel.send(notification)
+
+    assert delivered is False
+    sent_records = list(infra._tables.get("notifications_sent", {}).values())
+    assert sent_records[0]["delivered"] is False
+
+
+def test_personalize_notification_carries_user_email_onto_notification():
+    infra = _InMemoryInfrastructure()
+    service = DefaultInteractionNotification(
+        infrastructure=infra, decision_policy=DefaultDecisionPolicy(infrastructure=infra)
+    )
+    notification = Notification(user_id="stale", content="c", priority="normal", id="n-1", actionability="notify")
+
+    personalized = service.personalize_notification(notification, {"id": "u-1", "email": "real@example.com"})
+
+    assert personalized.email == "real@example.com"
+
+
+def test_personalize_notification_defaults_to_existing_email_when_user_has_none():
+    infra = _InMemoryInfrastructure()
+    service = DefaultInteractionNotification(
+        infrastructure=infra, decision_policy=DefaultDecisionPolicy(infrastructure=infra)
+    )
+    notification = Notification(
+        user_id="u-1", content="c", priority="normal", id="n-1", actionability="notify", email="kept@example.com"
+    )
+
+    personalized = service.personalize_notification(notification, {"id": "u-1"})
+
+    assert personalized.email == "kept@example.com"
 
 
 # --- collect_feedback / collect_user_response: real, honest pending state --

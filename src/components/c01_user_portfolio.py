@@ -39,6 +39,7 @@ from infrastructure_postgres import DefaultInfrastructure
 class User:
     id: str
     preferences: dict = field(default_factory=dict)
+    email: str = ""
 
 
 @dataclass
@@ -278,8 +279,14 @@ class DefaultUserPortfolio:
 
     def onboard_user(self, details: dict) -> User:
         with traced("DefaultUserPortfolio.onboard_user"):
-            user = User(id=str(uuid.uuid4()), preferences=dict(details.get("preferences", {})))
-            self._infrastructure.store(USERS_TABLE, {"id": user.id, "preferences": user.preferences})
+            user = User(
+                id=str(uuid.uuid4()),
+                preferences=dict(details.get("preferences", {})),
+                email=details.get("email", ""),
+            )
+            self._infrastructure.store(
+                USERS_TABLE, {"id": user.id, "preferences": user.preferences, "email": user.email}
+            )
             return user
 
     def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
@@ -403,8 +410,16 @@ class DefaultUserPortfolio:
             stored = self._infrastructure.retrieve(USERS_TABLE, user.id)
             current_preferences = dict(stored["preferences"]) if stored else dict(user.preferences)
             current_preferences.update(updates)
-            self._infrastructure.store(USERS_TABLE, {"id": user.id, "preferences": current_preferences})
-            return User(id=user.id, preferences=current_preferences)
+            # `store()` replaces the whole record, not just `preferences`
+            # (same semantics DefaultInfrastructure/_FakeInfrastructure
+            # both use everywhere in this project) -- email has to be
+            # carried forward explicitly here, or a preference update
+            # would silently erase it.
+            email = stored.get("email", "") if stored else user.email
+            self._infrastructure.store(
+                USERS_TABLE, {"id": user.id, "preferences": current_preferences, "email": email}
+            )
+            return User(id=user.id, preferences=current_preferences, email=email)
 
     def determine_user_relevance(self, user: User, event: dict) -> bool:
         """Structural lookup, not cognition: does event["security_id"]

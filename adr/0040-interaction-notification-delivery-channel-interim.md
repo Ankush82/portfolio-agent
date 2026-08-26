@@ -1,6 +1,6 @@
 # 0040 — Interaction & Notification delivery channel interim: injectable, non-sending placeholder
 
-**Status:** Proposed — 2026-08-26
+**Status:** Superseded by [ADR-0048](0048-interaction-notification-resend-delivery-resolved.md) — 2026-08-27. Both the vendor question and the missing-contact-field gap named below are resolved: Resend, via `ResendNotificationChannel`, with `User.email` added as the real contact field. `PlaceholderNotificationChannel` and the injectable `NotificationChannel` seam described below are unchanged — real delivery currently fails on this project's own account pending domain verification at resend.com/domains (see ADR-0048's own findings), but the code and the account are both real.
 **Component:** Interaction & Notification (13)
 
 ## Context
