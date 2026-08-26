@@ -7,6 +7,7 @@ low-level design or ADRs yet. Interfaces: <- Decision & Policy (12),
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -24,31 +25,57 @@ class UserFeedback:
     response: dict
 
 
-class InteractionNotification:
+class InteractionNotification(Protocol):
     def generate_notification(self, decision: dict) -> Notification:
-        with traced("InteractionNotification.generate_notification"):
+        ...
+
+    def prioritize_notification(self, notification: Notification) -> str:
+        ...
+
+    def personalize_notification(self, notification: Notification, user: dict) -> Notification:
+        ...
+
+    def deliver_notification(self, notification: Notification) -> bool:
+        ...
+
+    def explain_decision(self, decision: dict) -> str:
+        ...
+
+    def collect_feedback(self, notification: Notification) -> UserFeedback:
+        ...
+
+    def collect_user_response(self, notification: Notification) -> dict:
+        ...
+
+
+class StubInteractionNotification:
+    """Structural implementation of InteractionNotification. Every
+    method is a traced no-op — see cross_cutting/observability.py."""
+
+    def generate_notification(self, decision: dict) -> Notification:
+        with traced("StubInteractionNotification.generate_notification"):
             return Notification(user_id="stub-id", content="", priority="")
 
     def prioritize_notification(self, notification: Notification) -> str:
-        with traced("InteractionNotification.prioritize_notification"):
+        with traced("StubInteractionNotification.prioritize_notification"):
             return ""
 
     def personalize_notification(self, notification: Notification, user: dict) -> Notification:
-        with traced("InteractionNotification.personalize_notification"):
+        with traced("StubInteractionNotification.personalize_notification"):
             return Notification(user_id="stub-id", content="", priority="")
 
     def deliver_notification(self, notification: Notification) -> bool:
-        with traced("InteractionNotification.deliver_notification"):
+        with traced("StubInteractionNotification.deliver_notification"):
             return True
 
     def explain_decision(self, decision: dict) -> str:
-        with traced("InteractionNotification.explain_decision"):
+        with traced("StubInteractionNotification.explain_decision"):
             return ""
 
     def collect_feedback(self, notification: Notification) -> UserFeedback:
-        with traced("InteractionNotification.collect_feedback"):
+        with traced("StubInteractionNotification.collect_feedback"):
             return UserFeedback(notification_id="stub-id", response={})
 
     def collect_user_response(self, notification: Notification) -> dict:
-        with traced("InteractionNotification.collect_user_response"):
+        with traced("StubInteractionNotification.collect_user_response"):
             return {}

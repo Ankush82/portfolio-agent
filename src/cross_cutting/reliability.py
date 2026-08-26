@@ -16,6 +16,7 @@ unchanged. Loop/cascade patterns get routed to CircuitBreaker instead.
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -33,30 +34,52 @@ class FailureEvent:
     history: list["FailureEvent"]
 
 
-class FailureClassifier:
+class FailureClassifier(Protocol):
     def classify(self, event: FailureEvent) -> FailureType:
         """Fig. 15.1's 'failure type?' branch. Detection mechanism for
         distinguishing transient from loop/cascade is not yet designed
         — see ADR-0015's consequences."""
-        with traced("FailureClassifier.classify"):
+        ...
+
+
+class StubFailureClassifier:
+    """Structural implementation of FailureClassifier. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def classify(self, event: FailureEvent) -> FailureType:
+        with traced("StubFailureClassifier.classify"):
             return FailureType.TRANSIENT
 
 
-class CircuitBreaker:
+class CircuitBreaker(Protocol):
     """Scope: per tool (ADR-0016), not per trajectory."""
 
     def trip(self, tool_name: str) -> None:
         """Marks a tool temporarily unavailable."""
-        with traced("CircuitBreaker.trip"):
-            return None
+        ...
 
     def is_available(self, tool_name: str) -> bool:
-        with traced("CircuitBreaker.is_available"):
-            return True
+        ...
 
     def find_alternative(self, tool_name: str) -> str | None:
         """Fig. 15.1's 'alternative exists?' branch. The mapping of
         which tools are interchangeable is not yet designed — depends
         on Tools & Environment (component 11)."""
-        with traced("CircuitBreaker.find_alternative"):
+        ...
+
+
+class StubCircuitBreaker:
+    """Structural implementation of CircuitBreaker. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def trip(self, tool_name: str) -> None:
+        with traced("StubCircuitBreaker.trip"):
+            return None
+
+    def is_available(self, tool_name: str) -> bool:
+        with traced("StubCircuitBreaker.is_available"):
+            return True
+
+    def find_alternative(self, tool_name: str) -> str | None:
+        with traced("StubCircuitBreaker.find_alternative"):
             return None

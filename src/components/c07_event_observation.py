@@ -6,6 +6,7 @@ low-level design or ADRs yet. Interfaces: <- Knowledge & Entity Model
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -36,35 +37,64 @@ class Event:
     entity_ids: list[str]
 
 
-class EventObservation:
+class EventObservation(Protocol):
     def observe(self, raw: dict) -> Observation:
-        with traced("EventObservation.observe"):
+        ...
+
+    def detect_change(self, current: Observation, prior: Observation) -> Change | None:
+        ...
+
+    def detect_anomaly(self, observation: Observation) -> Anomaly | None:
+        ...
+
+    def detect_event(self, observations: list[Observation]) -> Event | None:
+        ...
+
+    def classify_event(self, event: Event) -> str:
+        ...
+
+    def link_event_to_entities(self, event: Event) -> list[str]:
+        ...
+
+    def correlate_events(self, events: list[Event]) -> list[tuple[Event, Event]]:
+        ...
+
+    def retrieve_events(self, filters: dict) -> list[Event]:
+        ...
+
+
+class StubEventObservation:
+    """Structural implementation of EventObservation. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def observe(self, raw: dict) -> Observation:
+        with traced("StubEventObservation.observe"):
             return Observation(entity_id="stub-id", metric="stub", value=0.0)
 
     def detect_change(self, current: Observation, prior: Observation) -> Change | None:
-        with traced("EventObservation.detect_change"):
+        with traced("StubEventObservation.detect_change"):
             return None
 
     def detect_anomaly(self, observation: Observation) -> Anomaly | None:
-        with traced("EventObservation.detect_anomaly"):
+        with traced("StubEventObservation.detect_anomaly"):
             return None
 
     def detect_event(self, observations: list[Observation]) -> Event | None:
-        with traced("EventObservation.detect_event"):
+        with traced("StubEventObservation.detect_event"):
             return None
 
     def classify_event(self, event: Event) -> str:
-        with traced("EventObservation.classify_event"):
+        with traced("StubEventObservation.classify_event"):
             return ""
 
     def link_event_to_entities(self, event: Event) -> list[str]:
-        with traced("EventObservation.link_event_to_entities"):
+        with traced("StubEventObservation.link_event_to_entities"):
             return []
 
     def correlate_events(self, events: list[Event]) -> list[tuple[Event, Event]]:
-        with traced("EventObservation.correlate_events"):
+        with traced("StubEventObservation.correlate_events"):
             return []
 
     def retrieve_events(self, filters: dict) -> list[Event]:
-        with traced("EventObservation.retrieve_events"):
+        with traced("StubEventObservation.retrieve_events"):
             return []

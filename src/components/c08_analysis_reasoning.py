@@ -6,6 +6,7 @@ low-level design or ADRs yet. Interfaces: <- Memory (06),
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -22,41 +23,73 @@ class Analysis:
     impact_estimate: dict | None = None
 
 
-class AnalysisReasoning:
+class AnalysisReasoning(Protocol):
     def analyze(self, event: dict, context: dict, memory: dict) -> Analysis:
         """Converges Event, Observations, Context, Memory, and Evidence
         into one step — see the Component Whiteboards fan-in figure."""
-        with traced("AnalysisReasoning.analyze"):
+        ...
+
+    def compare(self, a: dict, b: dict) -> dict:
+        ...
+
+    def infer(self, premises: list[dict]) -> Hypothesis:
+        ...
+
+    def generate_hypotheses(self, analysis_input: dict) -> list[Hypothesis]:
+        ...
+
+    def test_hypotheses(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        ...
+
+    def estimate_impact(self, hypothesis: Hypothesis) -> dict:
+        ...
+
+    def generate_explanations(self, hypothesis: Hypothesis) -> str:
+        ...
+
+    def generate_counterarguments(self, hypothesis: Hypothesis) -> list[str]:
+        ...
+
+    def synthesize_findings(self, hypotheses: list[Hypothesis]) -> Analysis:
+        ...
+
+
+class StubAnalysisReasoning:
+    """Structural implementation of AnalysisReasoning. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def analyze(self, event: dict, context: dict, memory: dict) -> Analysis:
+        with traced("StubAnalysisReasoning.analyze"):
             return Analysis(hypotheses=[], impact_estimate=None)
 
     def compare(self, a: dict, b: dict) -> dict:
-        with traced("AnalysisReasoning.compare"):
+        with traced("StubAnalysisReasoning.compare"):
             return {}
 
     def infer(self, premises: list[dict]) -> Hypothesis:
-        with traced("AnalysisReasoning.infer"):
+        with traced("StubAnalysisReasoning.infer"):
             return Hypothesis(claim="stub", basis={})
 
     def generate_hypotheses(self, analysis_input: dict) -> list[Hypothesis]:
-        with traced("AnalysisReasoning.generate_hypotheses"):
+        with traced("StubAnalysisReasoning.generate_hypotheses"):
             return []
 
     def test_hypotheses(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
-        with traced("AnalysisReasoning.test_hypotheses"):
+        with traced("StubAnalysisReasoning.test_hypotheses"):
             return []
 
     def estimate_impact(self, hypothesis: Hypothesis) -> dict:
-        with traced("AnalysisReasoning.estimate_impact"):
+        with traced("StubAnalysisReasoning.estimate_impact"):
             return {}
 
     def generate_explanations(self, hypothesis: Hypothesis) -> str:
-        with traced("AnalysisReasoning.generate_explanations"):
+        with traced("StubAnalysisReasoning.generate_explanations"):
             return ""
 
     def generate_counterarguments(self, hypothesis: Hypothesis) -> list[str]:
-        with traced("AnalysisReasoning.generate_counterarguments"):
+        with traced("StubAnalysisReasoning.generate_counterarguments"):
             return []
 
     def synthesize_findings(self, hypotheses: list[Hypothesis]) -> Analysis:
-        with traced("AnalysisReasoning.synthesize_findings"):
+        with traced("StubAnalysisReasoning.synthesize_findings"):
             return Analysis(hypotheses=[], impact_estimate=None)

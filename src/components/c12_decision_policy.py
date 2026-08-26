@@ -9,6 +9,7 @@ escalate-when-no-alternative-tool path (component 15, fig. 15.1).
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -19,35 +20,64 @@ class Decision:
     actionability: str  # "notify" | "escalate" | "suppress"
 
 
-class DecisionPolicy:
+class DecisionPolicy(Protocol):
     def assess_relevance(self, verified_claim: dict, portfolio: dict) -> float:
-        with traced("DecisionPolicy.assess_relevance"):
+        ...
+
+    def assess_significance(self, verified_claim: dict) -> float:
+        ...
+
+    def assess_risk(self, verified_claim: dict) -> float:
+        ...
+
+    def determine_actionability(self, decision: Decision) -> str:
+        ...
+
+    def authorize_action(self, action: dict) -> bool:
+        ...
+
+    def enforce_policy(self, action: dict) -> bool:
+        ...
+
+    def escalate(self, reason: str, context: dict) -> None:
+        ...
+
+    def request_approval(self, action: dict) -> bool:
+        ...
+
+
+class StubDecisionPolicy:
+    """Structural implementation of DecisionPolicy. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def assess_relevance(self, verified_claim: dict, portfolio: dict) -> float:
+        with traced("StubDecisionPolicy.assess_relevance"):
             return 0.0
 
     def assess_significance(self, verified_claim: dict) -> float:
-        with traced("DecisionPolicy.assess_significance"):
+        with traced("StubDecisionPolicy.assess_significance"):
             return 0.0
 
     def assess_risk(self, verified_claim: dict) -> float:
-        with traced("DecisionPolicy.assess_risk"):
+        with traced("StubDecisionPolicy.assess_risk"):
             return 0.0
 
     def determine_actionability(self, decision: Decision) -> str:
-        with traced("DecisionPolicy.determine_actionability"):
+        with traced("StubDecisionPolicy.determine_actionability"):
             return ""
 
     def authorize_action(self, action: dict) -> bool:
-        with traced("DecisionPolicy.authorize_action"):
+        with traced("StubDecisionPolicy.authorize_action"):
             return True
 
     def enforce_policy(self, action: dict) -> bool:
-        with traced("DecisionPolicy.enforce_policy"):
+        with traced("StubDecisionPolicy.enforce_policy"):
             return True
 
     def escalate(self, reason: str, context: dict) -> None:
-        with traced("DecisionPolicy.escalate"):
+        with traced("StubDecisionPolicy.escalate"):
             return None
 
     def request_approval(self, action: dict) -> bool:
-        with traced("DecisionPolicy.request_approval"):
+        with traced("StubDecisionPolicy.request_approval"):
             return True

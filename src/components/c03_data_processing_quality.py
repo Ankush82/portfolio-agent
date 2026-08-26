@@ -7,6 +7,7 @@ low-level design or ADRs yet. Interfaces: <- Data & Sources (02),
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -41,39 +42,71 @@ class DataLineage:
     steps: list[str]
 
 
-class DataProcessingQuality:
+class DataProcessingQuality(Protocol):
     def parse(self, raw: RawDocument) -> ParsedDocument:
-        with traced("DataProcessingQuality.parse"):
+        ...
+
+    def extract(self, parsed: ParsedDocument) -> StructuredData:
+        ...
+
+    def normalize(self, data: StructuredData) -> StructuredData:
+        ...
+
+    def transform(self, data: StructuredData) -> StructuredData:
+        ...
+
+    def deduplicate(self, data: StructuredData) -> StructuredData:
+        ...
+
+    def validate(self, data: StructuredData) -> bool:
+        ...
+
+    def score_data_quality(self, data: StructuredData) -> DataQualityScore:
+        ...
+
+    def detect_stale_data(self, data: StructuredData) -> bool:
+        ...
+
+    def track_data_lineage(self, data: StructuredData) -> DataLineage:
+        ...
+
+
+class StubDataProcessingQuality:
+    """Structural implementation of DataProcessingQuality. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def parse(self, raw: RawDocument) -> ParsedDocument:
+        with traced("StubDataProcessingQuality.parse"):
             return ParsedDocument(source_id="stub-id", structure={})
 
     def extract(self, parsed: ParsedDocument) -> StructuredData:
-        with traced("DataProcessingQuality.extract"):
+        with traced("StubDataProcessingQuality.extract"):
             return StructuredData(source_id="stub-id", fields={})
 
     def normalize(self, data: StructuredData) -> StructuredData:
-        with traced("DataProcessingQuality.normalize"):
+        with traced("StubDataProcessingQuality.normalize"):
             return StructuredData(source_id="stub-id", fields={})
 
     def transform(self, data: StructuredData) -> StructuredData:
-        with traced("DataProcessingQuality.transform"):
+        with traced("StubDataProcessingQuality.transform"):
             return StructuredData(source_id="stub-id", fields={})
 
     def deduplicate(self, data: StructuredData) -> StructuredData:
-        with traced("DataProcessingQuality.deduplicate"):
+        with traced("StubDataProcessingQuality.deduplicate"):
             return StructuredData(source_id="stub-id", fields={})
 
     def validate(self, data: StructuredData) -> bool:
-        with traced("DataProcessingQuality.validate"):
+        with traced("StubDataProcessingQuality.validate"):
             return True
 
     def score_data_quality(self, data: StructuredData) -> DataQualityScore:
-        with traced("DataProcessingQuality.score_data_quality"):
+        with traced("StubDataProcessingQuality.score_data_quality"):
             return DataQualityScore(document_id="stub-id", score=0.0)
 
     def detect_stale_data(self, data: StructuredData) -> bool:
-        with traced("DataProcessingQuality.detect_stale_data"):
+        with traced("StubDataProcessingQuality.detect_stale_data"):
             return True
 
     def track_data_lineage(self, data: StructuredData) -> DataLineage:
-        with traced("DataProcessingQuality.track_data_lineage"):
+        with traced("StubDataProcessingQuality.track_data_lineage"):
             return DataLineage(document_id="stub-id", steps=[])

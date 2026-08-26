@@ -9,6 +9,7 @@ loop.md) — do not assume it's included by writing code against it.
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -32,9 +33,42 @@ class Evaluation:
     error: dict | None = None
 
 
-class LearningEvaluation:
+class LearningEvaluation(Protocol):
     def evaluate(self, prediction: Prediction, outcome: Outcome) -> Evaluation:
-        with traced("LearningEvaluation.evaluate"):
+        ...
+
+    def replay(self, trajectory_id: str) -> list[dict]:
+        ...
+
+    def measure_outcome(self, prediction: Prediction) -> Outcome:
+        ...
+
+    def compare_prediction_vs_outcome(self, prediction: Prediction, outcome: Outcome) -> dict:
+        ...
+
+    def analyze_errors(self, evaluation: Evaluation) -> dict:
+        ...
+
+    def collect_feedback(self, evaluation: Evaluation) -> dict:
+        ...
+
+    def update_knowledge(self, evaluation: Evaluation) -> None:
+        """→ Memory (06)."""
+        ...
+
+    def detect_regression(self, current: Evaluation, baseline: Evaluation) -> bool:
+        ...
+
+    def evaluate_versions(self, a: dict, b: dict) -> dict:
+        ...
+
+
+class StubLearningEvaluation:
+    """Structural implementation of LearningEvaluation. Every method is
+    a traced no-op — see cross_cutting/observability.py."""
+
+    def evaluate(self, prediction: Prediction, outcome: Outcome) -> Evaluation:
+        with traced("StubLearningEvaluation.evaluate"):
             return Evaluation(
                 outcome=Outcome(prediction=Prediction(claim="stub", confidence=0.0), actual={}),
                 correct=True,
@@ -42,34 +76,33 @@ class LearningEvaluation:
             )
 
     def replay(self, trajectory_id: str) -> list[dict]:
-        with traced("LearningEvaluation.replay"):
+        with traced("StubLearningEvaluation.replay"):
             return []
 
     def measure_outcome(self, prediction: Prediction) -> Outcome:
-        with traced("LearningEvaluation.measure_outcome"):
+        with traced("StubLearningEvaluation.measure_outcome"):
             return Outcome(prediction=Prediction(claim="stub", confidence=0.0), actual={})
 
     def compare_prediction_vs_outcome(self, prediction: Prediction, outcome: Outcome) -> dict:
-        with traced("LearningEvaluation.compare_prediction_vs_outcome"):
+        with traced("StubLearningEvaluation.compare_prediction_vs_outcome"):
             return {}
 
     def analyze_errors(self, evaluation: Evaluation) -> dict:
-        with traced("LearningEvaluation.analyze_errors"):
+        with traced("StubLearningEvaluation.analyze_errors"):
             return {}
 
     def collect_feedback(self, evaluation: Evaluation) -> dict:
-        with traced("LearningEvaluation.collect_feedback"):
+        with traced("StubLearningEvaluation.collect_feedback"):
             return {}
 
     def update_knowledge(self, evaluation: Evaluation) -> None:
-        """→ Memory (06)."""
-        with traced("LearningEvaluation.update_knowledge"):
+        with traced("StubLearningEvaluation.update_knowledge"):
             return None
 
     def detect_regression(self, current: Evaluation, baseline: Evaluation) -> bool:
-        with traced("LearningEvaluation.detect_regression"):
+        with traced("StubLearningEvaluation.detect_regression"):
             return True
 
     def evaluate_versions(self, a: dict, b: dict) -> dict:
-        with traced("LearningEvaluation.evaluate_versions"):
+        with traced("StubLearningEvaluation.evaluate_versions"):
             return {}

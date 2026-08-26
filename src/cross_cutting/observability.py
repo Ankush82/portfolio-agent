@@ -25,6 +25,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 TRACE_LOG_PATH = Path("trace.log")
 
@@ -63,10 +64,18 @@ def traced(name: str, parent: Span | None = None):
         _write_trace_line(f"{time.strftime('%H:%M:%S')} | {name} | finished {span.metrics}")
 
 
-class AuditManager:
+class AuditManager(Protocol):
     def record(self, event_type: str, detail: dict) -> None:
         """Audit-relevant events: quarantine decisions (Memory, fig.
         1), blocked claims (Evidence & Verification, fig. 2), circuit
         breaker trips (Reliability & Resilience, fig. 15.1)."""
-        with traced(f"AuditManager.record[{event_type}]"):
+        ...
+
+
+class StubAuditManager:
+    """Structural implementation of AuditManager. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def record(self, event_type: str, detail: dict) -> None:
+        with traced(f"StubAuditManager.record[{event_type}]"):
             return None

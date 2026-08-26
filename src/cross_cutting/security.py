@@ -13,6 +13,7 @@ happens to do below — that's a loop.md step 2 gap, not a default.
 """
 
 from enum import Enum, auto
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -22,19 +23,33 @@ class Provenance(Enum):
     UNTRUSTED = auto()  # documents (ADR-0003) or peer-agent output (ADR-0018)
 
 
-class BoundaryGate:
+class BoundaryGate(Protocol):
     def authenticate(self, identity: str) -> bool:
-        with traced("BoundaryGate.authenticate"):
-            return True
+        ...
 
     def authorize(self, identity: str, action: str, resource: str) -> bool:
         """Granularity not yet decided — see module docstring."""
-        with traced("BoundaryGate.authorize"):
-            return True
+        ...
 
     def tag_provenance(self, content: dict, source: str) -> dict:
         """Documents and delegated sub-agent output both get tagged
         UNTRUSTED here, before they can be reasoned over as an
         instruction. Same tag, two sources (ADR-0003, ADR-0018)."""
-        with traced("BoundaryGate.tag_provenance"):
+        ...
+
+
+class StubBoundaryGate:
+    """Structural implementation of BoundaryGate. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def authenticate(self, identity: str) -> bool:
+        with traced("StubBoundaryGate.authenticate"):
+            return True
+
+    def authorize(self, identity: str, action: str, resource: str) -> bool:
+        with traced("StubBoundaryGate.authorize"):
+            return True
+
+    def tag_provenance(self, content: dict, source: str) -> dict:
+        with traced("StubBoundaryGate.tag_provenance"):
             return {}

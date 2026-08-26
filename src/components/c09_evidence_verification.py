@@ -6,6 +6,7 @@ Decisions: ADR-0013 (mandatory evidence per claim, ALCE), ADR-0014
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from cross_cutting.observability import traced
 
@@ -32,41 +33,82 @@ class VerifiedClaim:
     was_contradictory: bool = False
 
 
-class EvidenceLinker:
+class EvidenceLinker(Protocol):
     def link(self, claim: Claim) -> list[Evidence]:
         """Searches Context Pack (component 05) and Memory (06)."""
-        with traced("EvidenceLinker.link"):
+        ...
+
+
+class StubEvidenceLinker:
+    """Structural implementation of EvidenceLinker. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def link(self, claim: Claim) -> list[Evidence]:
+        with traced("StubEvidenceLinker.link"):
             return []
 
 
-class MandatoryEvidenceGate:
+class MandatoryEvidenceGate(Protocol):
     def has_evidence(self, evidence: list[Evidence]) -> bool:
         """Fig. 2's 'evidence found?' gate (ADR-0013)."""
-        with traced("MandatoryEvidenceGate.has_evidence"):
-            return True
+        ...
 
     def block(self, claim: Claim) -> None:
         """Logged, not forwarded to Decision & Policy (component 12)."""
-        with traced("MandatoryEvidenceGate.block"):
+        ...
+
+
+class StubMandatoryEvidenceGate:
+    """Structural implementation of MandatoryEvidenceGate. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def has_evidence(self, evidence: list[Evidence]) -> bool:
+        with traced("StubMandatoryEvidenceGate.has_evidence"):
+            return True
+
+    def block(self, claim: Claim) -> None:
+        with traced("StubMandatoryEvidenceGate.block"):
             return None
 
 
-class ContradictionResolver:
+class ContradictionResolver(Protocol):
     def sources_agree(self, evidence: list[Evidence]) -> bool:
-        with traced("ContradictionResolver.sources_agree"):
-            return True
+        ...
 
     def resolve(self, evidence: list[Evidence]) -> Evidence:
         """Weight by source reliability and freshness, pick the
         higher-confidence side (ADR-0014)."""
-        with traced("ContradictionResolver.resolve"):
+        ...
+
+
+class StubContradictionResolver:
+    """Structural implementation of ContradictionResolver. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def sources_agree(self, evidence: list[Evidence]) -> bool:
+        with traced("StubContradictionResolver.sources_agree"):
+            return True
+
+    def resolve(self, evidence: list[Evidence]) -> Evidence:
+        with traced("StubContradictionResolver.resolve"):
             return Evidence(content={}, source="stub", reliability=0.0, freshness=0.0)
 
 
-class ClaimVerifier:
+class ClaimVerifier(Protocol):
     def verify(self, claim: Claim, evidence: list[Evidence]) -> VerifiedClaim:
         """Citation quality and completeness (ALCE)."""
-        with traced("ClaimVerifier.verify"):
+        ...
+
+    def score_confidence(self, verified: VerifiedClaim) -> float:
+        ...
+
+
+class StubClaimVerifier:
+    """Structural implementation of ClaimVerifier. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def verify(self, claim: Claim, evidence: list[Evidence]) -> VerifiedClaim:
+        with traced("StubClaimVerifier.verify"):
             return VerifiedClaim(
                 claim=Claim(text="stub", source_component="stub"),
                 evidence=[],
@@ -74,5 +116,5 @@ class ClaimVerifier:
             )
 
     def score_confidence(self, verified: VerifiedClaim) -> float:
-        with traced("ClaimVerifier.score_confidence"):
+        with traced("StubClaimVerifier.score_confidence"):
             return 0.0
