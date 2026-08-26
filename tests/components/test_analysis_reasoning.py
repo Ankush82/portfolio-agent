@@ -161,7 +161,7 @@ def test_infer_calls_reason_fn_and_wraps_result_in_hypothesis():
 
 
 def test_infer_with_default_placeholder_is_honestly_low_confidence():
-    service = _service()
+    service = _service(reason_fn=placeholder_reason_fn)
     hypothesis = service.infer([{"signal": "revenue_up"}])
     assert hypothesis.claim == "insufficient basis to hypothesize"
 
@@ -185,7 +185,7 @@ def test_generate_hypotheses_converts_reason_fn_list_into_hypothesis_objects():
 
 
 def test_generate_hypotheses_with_default_placeholder_returns_empty_list():
-    service = _service()
+    service = _service(reason_fn=placeholder_reason_fn)
     assert service.generate_hypotheses({"event": {}}) == []
 
 
@@ -307,7 +307,7 @@ def test_estimate_impact_without_snapshot_reports_no_exposure_but_still_gets_jud
 
 
 def test_estimate_impact_default_placeholder_is_honest_about_significance():
-    service = _service()
+    service = _service(reason_fn=placeholder_reason_fn)
     hypothesis = Hypothesis(claim="AAPL earnings surprise", basis={})
     result = service.estimate_impact(hypothesis)
     assert result["significance"] == "unknown"
@@ -335,7 +335,7 @@ def test_synthesize_findings_persists_the_resulting_analysis_via_infrastructure(
 
 
 def test_synthesize_findings_default_placeholder_returns_empty_analysis():
-    service = _service()
+    service = _service(reason_fn=placeholder_reason_fn)
     analysis = service.synthesize_findings([Hypothesis(claim="x", basis={})])
     assert analysis == Analysis(hypotheses=[], impact_estimate=None)
 
@@ -417,6 +417,6 @@ def test_analyze_end_to_end_with_default_placeholder_is_honestly_empty():
     real pipeline end to end without error, but — honestly, per
     ADR-0037/ADR-0021 — produces no real hypotheses, since nothing
     cognitive backs generate_hypotheses/synthesize_findings yet."""
-    service = _service()
+    service = _service(reason_fn=placeholder_reason_fn)
     analysis = service.analyze({"entity_ids": ["AAPL"]}, {}, memory={})
     assert analysis == Analysis(hypotheses=[], impact_estimate=None)

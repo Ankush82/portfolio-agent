@@ -4,14 +4,13 @@ An agentic, portfolio-aware financial intelligence system: watches sources, reso
 
 ## Status
 
-**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 422 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
+**All 18 components have real implementations** — not stubs, not mocks pretending to be logic. 473 tests pass; 13 skip cleanly where a live Postgres/Redis isn't running (see [Running it](#running-it)).
 
-**6 real decisions are still open**, each a genuine external-credential or vendor gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide by fiat. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
+**5 real decisions are still open**, each a genuine external-credential or vendor gap this project's own process (see [How this was built](#how-this-was-built)) refuses to decide by fiat. Every one ships with a working, honestly-labeled placeholder behind an injectable interface, so nothing downstream is blocked — but none of these are safe to treat as production behavior until resolved:
 
 | ADR | What's waiting | Component |
 |---|---|---|
-| [0021](adr/0021-agent-runtime-llm-provider-interim.md) | Which LLM backs actual reasoning — currently a non-cognitive placeholder | Agent Runtime, and by extension Analysis & Reasoning ([0037](adr/0037-analysis-reasoning-real-mechanism-and-reasoning-seam.md)) |
-| [0023](adr/0023-user-portfolio-broker-api-choice-interim.md) | Which broker/aggregator API for holdings and transactions | User & Portfolio |
+| [0023](adr/0023-user-portfolio-broker-api-choice-interim.md) | Which broker/aggregator API for holdings and transactions (a real, non-broker manual-entry path exists too — [0044](adr/0044-user-portfolio-manual-stock-entry.md)) | User & Portfolio |
 | [0027](adr/0027-data-sources-fetch-provider-interim.md) | Which market/filing/news provider(s) | Data & Sources |
 | [0028](adr/0028-memory-mem0-llm-embedding-provider-interim.md) | Mem0's LLM/embedding provider (its one real differentiator over this project's own Infrastructure-backed logic) | Memory |
 | [0034](adr/0034-retrieval-corrective-external-search-provider-interim.md) | Which external search API for corrective retrieval | Retrieval & Context |
@@ -44,8 +43,9 @@ src/
   infrastructure.py            The Infrastructure port (component 18)
   infrastructure_postgres.py   Its real Postgres/Redis implementation
   run_trace.py                 A static wiring demo (Stub* classes) — proves the blueprint's shape
-tests/                         420 real tests, one file per component
-adr/                           42 Architecture Decision Records — every real decision, with
+  llm.py                        The one real LLM reasoning backend (OpenRouter), ADR-0043
+tests/                         473 real tests, one file per component
+adr/                           44 Architecture Decision Records — every real decision, with
                                 context, alternatives considered, and consequences. Read adr/README.md first.
 checkpoint.md                  The narrative log of this entire build, in order
 loop.md                        The process every component's real implementation followed
@@ -63,7 +63,7 @@ Implementation was parallelized across subagents, each briefed with the specific
 
 ```bash
 uv sync --extra dev          # install dependencies
-uv run --python 3.11 pytest tests/ -v    # 422 pass, 13 skip without a live DB
+uv run --python 3.11 pytest tests/ -v    # 473 pass, 13 skip without a live DB
 
 docker-compose up -d         # bring up local Postgres + Redis
 uv run --python 3.11 pytest tests/ -v    # same suite, now with real DB coverage too
@@ -71,4 +71,4 @@ uv run --python 3.11 pytest tests/ -v    # same suite, now with real DB coverage
 PYTHONPATH=src uv run --python 3.11 python src/run_trace.py   # static wiring demo, writes trace.log
 ```
 
-No LLM provider is configured — see ADR-0021. Nothing in this repo calls a real model, sends real money, or reaches a real broker/market-data/news/search/delivery API; every one of those is the honestly-labeled placeholder named in the table above until you resolve its ADR.
+Set `OPENROUTER_API_KEY` (environment variable or a `.env` file at the repo root) to turn on real reasoning for Agent Runtime and Analysis & Reasoning — see [ADR-0043](adr/0043-llm-provider-resolved-openrouter.md). Without it, both fall back to their honest, non-cognitive placeholders, unchanged. Nothing else in this repo calls a real model, sends real money, or reaches a real broker/market-data/news/search/delivery API; every one of those is the honestly-labeled placeholder named in the table above until you resolve its ADR.

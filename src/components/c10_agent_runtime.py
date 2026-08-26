@@ -17,13 +17,16 @@ is out of scope for this pass, not forgotten.
 
 `build_agent_runtime_graph()` is the real LangGraph implementation of
 fig. 2 (ADR-0009). Its reason/assess-stakes nodes call an injected
-`reason_fn` rather than any hardcoded model call — no ADR, and no
-other document in this project, has ever chosen an LLM provider for
-Agent Runtime's actual reasoning. That gap is documented, not papered
-over, in ADR-0021 (`adr/0021-agent-runtime-llm-provider-interim.md`,
-status Proposed). `placeholder_reason_fn` is the explicitly
-non-cognitive stand-in that ships behind that interface so the graph
-itself is buildable, runnable, and testable now.
+`reason_fn` rather than a hardcoded model call. The LLM-provider gap
+ADR-0021 named (status: superseded) is now resolved by ADR-0043
+(`adr/0043-llm-provider-resolved-openrouter.md`): `get_reason_fn()`
+(`src/llm.py`) returns a real OpenRouter-backed `reason_fn` when
+`OPENROUTER_API_KEY` is set, and `placeholder_reason_fn` below
+otherwise — the graph's own shape never had to change for that swap,
+exactly as ADR-0021's Consequences predicted it wouldn't.
+`placeholder_reason_fn` stays as the explicitly non-cognitive stand-in
+used whenever no key is configured, or whenever a caller/test injects
+it directly for deterministic, no-network behavior.
 """
 
 import uuid
@@ -42,6 +45,7 @@ from cross_cutting.reliability import (
     FailureType,
 )
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
+from llm import get_reason_fn
 
 
 @dataclass
@@ -573,7 +577,7 @@ def placeholder_reason_fn(request: dict) -> dict:
 def build_agent_runtime_graph(
     recovery_manager: RecoveryManager,
     delegation_manager: DelegationManager,
-    reason_fn: Callable[[dict], dict],
+    reason_fn: Callable[[dict], dict] | None = None,
     boundary_gate: BoundaryGate | None = None,
     audit_manager: AuditManager | None = None,
 ):
@@ -590,11 +594,20 @@ def build_agent_runtime_graph(
              -> [not stakes_high]          -> [subgoal met? -> finish : -> reason]
 
     `reason` and `assess_stakes` are the two nodes that call `reason_fn`
-    — see this module's docstring and ADR-0021 for why that's an
-    injected callable rather than a hardcoded model call.
+    — see this module's docstring and ADR-0021/ADR-0043 for why that's
+    an injected callable rather than a hardcoded model call. Leaving
+    `reason_fn` unspecified (`None`) resolves it via `get_reason_fn`
+    (`src/llm.py`) at call time — the real OpenRouter-backed function
+    when `OPENROUTER_API_KEY` is set, `placeholder_reason_fn`
+    otherwise — the same `Default*`-vs-`Stub*` selection pattern
+    `DefaultInfrastructure`/`StubInfrastructure` already establishes.
+    Passing `reason_fn` explicitly (as every existing test in
+    `tests/components/test_agent_runtime.py` does with
+    `placeholder_reason_fn`) always wins, regardless of environment.
     """
     boundary_gate = boundary_gate or DefaultBoundaryGate()
     audit_manager = audit_manager or DefaultAuditManager()
+    reason_fn = reason_fn or get_reason_fn(placeholder_reason_fn, audit_manager=audit_manager)
 
     def reason_node(state: LoopState) -> dict:
         with traced("agent_runtime_graph.reason"):

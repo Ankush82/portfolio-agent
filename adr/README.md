@@ -30,7 +30,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0018](0018-security-peer-agent-untrusted-by-default.md) | Peer-agent output: untrusted by default | Security & Privacy (17) |
 | [0019](0019-infrastructure-unified-managed-stack.md) | System Infrastructure: unified, managed stack | System Infrastructure (18) |
 | [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Superseded by [0042](0042-security-authorize-granularity-resolved.md)**) | Security & Privacy (17) |
-| [0021](0021-agent-runtime-llm-provider-interim.md) | Agent Runtime LLM provider interim: injectable, non-cognitive placeholder (**Proposed**, not yet Accepted) | Agent Runtime (10) |
+| [0021](0021-agent-runtime-llm-provider-interim.md) | Agent Runtime LLM provider interim: injectable, non-cognitive placeholder (**Superseded by [0043](0043-llm-provider-resolved-openrouter.md)**) | Agent Runtime (10) |
 | [0022](0022-user-portfolio-broker-connector-interface.md) | Broker connector: injectable Protocol, broker data untrusted by default | User & Portfolio (01) |
 | [0023](0023-user-portfolio-broker-api-choice-interim.md) | Broker/aggregator API choice interim: placeholder connector (**Proposed**, not yet Accepted) | User & Portfolio (01) |
 | [0024](0024-tools-environment-registry-and-dispatch-mechanism.md) | Registry/dispatch mechanism: parallel invocable registry, capability-tag matching, empty by default | Tools & Environment (11) |
@@ -52,9 +52,10 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0040](0040-interaction-notification-delivery-channel-interim.md) | Delivery channel interim: injectable, non-sending placeholder (**Proposed**, not yet Accepted) | Interaction & Notification (13) |
 | [0041](0041-learning-evaluation-real-mechanism.md) | Learning & Evaluation real mechanism: DataSources-backed outcome measurement (inherits ADR-0027), tolerance-based comparison, multi-field trajectory replay, real Memory-write-path closure via update_knowledge | Learning & Evaluation (14) |
 | [0042](0042-security-authorize-granularity-resolved.md) | Authorize granularity resolved: per-call, real enforcement against an Infrastructure-backed grant table, deny-by-default — supersedes ADR-0020 now that Tools & Environment (11) exists | Security & Privacy (17) |
+| [0043](0043-llm-provider-resolved-openrouter.md) | LLM provider resolved: OpenRouter (anthropic/claude-haiku-4.5), one shared get_reason_fn seam for Agent Runtime (10) and Analysis & Reasoning (08) — supersedes ADR-0021, also resolves ADR-0037's restated gap | Agent Runtime (10), Analysis & Reasoning (08) |
 | [0044](0044-user-portfolio-manual-stock-entry.md) | Manual stock entry: real parallel onboarding path bypassing BrokerConnector, backed by Knowledge & Entity Model's registry (get_entity/search_entities added to DefaultKnowledgeEntity) | User & Portfolio (01), Knowledge & Entity Model (04) |
 
-ADR-0004 is partially superseded by ADR-0015, and ADR-0020 is superseded by ADR-0042 — see each pair for the full picture; superseded ADRs stay in the folder rather than being deleted.
+ADR-0004 is partially superseded by ADR-0015, ADR-0020 is superseded by ADR-0042, and ADR-0021 is superseded by ADR-0043 — see each pair for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
 ## Template
 

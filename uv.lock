@@ -537,6 +537,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "psycopg", extra = ["binary"] },
     { name = "redis" },
+    { name = "requests" },
 ]
 
 [package.optional-dependencies]
@@ -550,6 +551,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "redis", specifier = ">=5.0" },
+    { name = "requests", specifier = ">=2.31" },
 ]
 provides-extras = ["dev"]
 

@@ -14,14 +14,18 @@ component's entire job — `infer`, `generate_hypotheses`,
 inference and synthesis, not orchestration or a lookup. There is no
 honest rule-based/statistical substitute for "what does this evidence
 suggest" the way ADR-0033/ADR-0036 found real heuristic substitutes for
-retrieval sufficiency or anomaly detection — this project has never
-chosen an LLM provider anywhere (ADR-0021's original gap, restated
-here rather than duplicated), so those methods are built the same way
-Agent Runtime's `reason`/`assess_stakes` were: behind an injected
-`reason_fn: Callable[[dict], dict]`, with `placeholder_reason_fn` as
-the explicitly non-cognitive stand-in that ships by default. See
-ADR-0037 for exactly which methods are real orchestration and which
-sit behind that seam, and why.
+retrieval sufficiency or anomaly detection, so those methods are built
+the same way Agent Runtime's `reason`/`assess_stakes` were: behind an
+injected `reason_fn: Callable[[dict], dict]`, with `placeholder_reason_fn`
+as the explicitly non-cognitive stand-in. ADR-0021's original
+LLM-provider gap (restated here rather than duplicated, per ADR-0037)
+is now resolved by ADR-0043
+(`adr/0043-llm-provider-resolved-openrouter.md`): `get_reason_fn()`
+(`src/llm.py`) is `DefaultAnalysisReasoning`'s real default whenever
+`OPENROUTER_API_KEY` is set, falling back to this file's own
+`placeholder_reason_fn` otherwise. See ADR-0037 for exactly which
+methods are real orchestration and which sit behind the `reason_fn`
+seam, and why.
 """
 
 import time
@@ -46,6 +50,7 @@ from components.c09_evidence_verification import (
 from cross_cutting.observability import traced
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+from llm import get_reason_fn
 
 
 @dataclass
@@ -214,10 +219,12 @@ class DefaultAnalysisReasoning:
     Genuinely cognitive methods — `infer`, `generate_hypotheses`,
     `generate_explanations`, `generate_counterarguments`,
     `synthesize_findings`, and the judgment half of `estimate_impact`
-    — call through the injected `reason_fn` (`placeholder_reason_fn` by
-    default; see ADR-0037 and ADR-0021 for why no real one exists yet).
-    `estimate_impact`'s other half (actual portfolio exposure to the
-    entity a hypothesis's `basis` references) is real, computed via
+    — call through the injected `reason_fn`: the real OpenRouter-backed
+    function (`get_reason_fn`, `src/llm.py`) whenever
+    `OPENROUTER_API_KEY` is set, `placeholder_reason_fn` otherwise (see
+    ADR-0037 and ADR-0043). `estimate_impact`'s other half (actual
+    portfolio exposure to the entity a hypothesis's `basis` references)
+    is real, computed via
     `UserPortfolio.calculate_exposure` before `reason_fn` is ever
     called, so a caller gets the real number even while the
     significance judgment next to it is honestly a placeholder.
@@ -241,7 +248,7 @@ class DefaultAnalysisReasoning:
         evidence_linker: EvidenceLinker | None = None,
         claim_verifier: ClaimVerifier | None = None,
         mandatory_evidence_gate: MandatoryEvidenceGate | None = None,
-        reason_fn: Callable[[dict], dict] = placeholder_reason_fn,
+        reason_fn: Callable[[dict], dict] | None = None,
         memory_scopes: tuple[str, ...] = ("user", "shared"),
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
@@ -256,7 +263,14 @@ class DefaultAnalysisReasoning:
             contradiction_resolver=DefaultContradictionResolver()
         )
         self._mandatory_evidence_gate = mandatory_evidence_gate or DefaultMandatoryEvidenceGate()
-        self._reason_fn = reason_fn
+        # Unspecified (None) resolves via get_reason_fn (src/llm.py) at
+        # construction time: the real OpenRouter-backed reason_fn when
+        # OPENROUTER_API_KEY is set, this file's own placeholder_reason_fn
+        # otherwise (ADR-0043). Passing reason_fn explicitly — as every
+        # "default placeholder" test in
+        # tests/components/test_analysis_reasoning.py now does — always
+        # wins, regardless of environment.
+        self._reason_fn = reason_fn or get_reason_fn(placeholder_reason_fn)
         self._memory_scopes = memory_scopes
 
     def _gather_analysis_input(self, event: dict, context: dict, memory: dict) -> dict:

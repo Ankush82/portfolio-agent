@@ -1,6 +1,6 @@
 # 0021 — Agent Runtime LLM provider interim: injectable, non-cognitive placeholder
 
-**Status:** Proposed — 2026-08-26
+**Status:** Superseded by [ADR-0043](0043-llm-provider-resolved-openrouter.md) — 2026-08-26. The provider question deliberately left open below is resolved: OpenRouter, `anthropic/claude-haiku-4.5`, via `src/llm.py`'s `get_reason_fn`. `placeholder_reason_fn` and the injectable `reason_fn` seam described below are unchanged — only the "which provider" gap is closed.
 **Component:** Agent Runtime (10)
 
 ## Context
