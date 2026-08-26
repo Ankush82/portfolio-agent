@@ -9,6 +9,13 @@
 - **Blueprint built**: `src/` — 18 component stubs, `infrastructure.py` (component 18's interface), `cross_cutting/{reliability,observability,security}.py` (components 15–17). No implementation logic; every signature traces to an ADR or a Component Whiteboards capability. Syntax-checked, all files parse. Index: `src/README.md`.
 - **Roadmap built**: `roadmap.md` (rationale) and `roadmap.csv` (import-ready — Jira/Linear/Trello). Groups A–G by integration dependency, flags the 4 fully-designed components (05, 06, 09, 10) as lower-friction starting points, and keeps the three still-open items (Mem0-vs-Supermemory, Security & Privacy's authority granularity, Learning & Evaluation's scope) as visible blocking tasks rather than resolved dependencies.
 
+## GitHub repo (2026-08-26)
+
+- **https://github.com/Ankush82/portfolio-agent** — public, personal account. User chose public over the private default this session recommended (unresolved design decisions and internal reasoning are visible); their call.
+- Local repo is scoped to the `Portfolio Agent` folder only — the home directory itself sits inside its own separate, uninitialized git repo; the two are deliberately not connected.
+- 40 GitHub issues created from `roadmap.csv`: 8 epics (#33–40), 32 stories/tasks (#1–32), each epic body a checklist linking its children by issue number. Labels: `epic`, `story`, `task`, `blocked` (the two open-decision tasks), `done`. SETUP-1–4 and their epic-children-complete state closed automatically; EPIC-0 stays open since SETUP-5 (freeze confirmation) is still To Do.
+- Script used: not kept in the repo (scratchpad only) — it's a one-shot CSV-to-issues generator, re-run `roadmap.csv` → GitHub manually if the roadmap changes significantly rather than assuming the script still matches.
+
 Every engineering decision below also has a standalone ADR in [`adr/`](adr/README.md) (context, alternatives considered, consequences). This file is the narrative log of the whole process, including scoping choices that aren't architecture decisions; `adr/` is the subset worth citing on its own.
 
 Running log of decisions, approaches, and reasons for the low-level design pass that follows `portfolio_ai_three_literature_reviews.md`. Append-only. Each entry states the reason, not just the outcome, so it's readable cold later.
