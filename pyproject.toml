@@ -2,7 +2,11 @@
 name = "portfolio-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "langgraph>=0.2",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
