@@ -1,0 +1,35 @@
+# 0034 — Corrective retrieval external search provider interim: injectable, empty-by-default placeholder
+
+**Status:** Proposed — 2026-08-26
+**Component:** Retrieval & Context (05)
+
+## Context
+
+ADR-0012 (corrective retrieval, CRAG) decided that insufficient retrieval results trigger bounded corrective/external search rather than proceeding on weak documents, and named the resulting "no useful evidence found" state as a legitimate terminal state, not a silent failure. `CorrectiveRetriever.retrieve_externally` genuinely needs a live external search API to do real work — a web search API, a financial-news-specific search API, or similar — and this project has never chosen one anywhere: not in any ADR, not in `checkpoint.md`, not in `pyproject.toml`'s dependencies. This is the identical shape of gap ADR-0021 (Agent Runtime's LLM provider), ADR-0023 (User & Portfolio's broker API), ADR-0027 (Data & Sources' fetch provider), and ADR-0028 (Memory's Mem0 LLM/embedding provider) already named and left open: a real external credential this project doesn't have, surfaced by an implementation pass that needed *something* callable to exist, not a design gap this pass should silently resolve by picking a vendor.
+
+## Decision
+
+Ship `PlaceholderExternalSearchProvider` as an explicitly non-searching stand-in, behind an injectable `ExternalSearchProvider` Protocol (`search(query: Query, attempt: int) -> list[dict]`), so `DefaultCorrectiveRetriever.retrieve_externally` can be built, called, and tested today, and later handed a real search backend without changing `DefaultCorrectiveRetriever`'s shape at all — only the one object injected into it. Same pattern as `SourceFetcher`/`PlaceholderSourceFetcher` in component 02 (ADR-0026/0027).
+
+`PlaceholderExternalSearchProvider.search` always returns an empty list, for every query and every attempt. Unlike `PlaceholderSourceFetcher` (which had to invent an unmistakable non-empty marker so a real empty response from a real API couldn't be mistaken for a synthetic one), an empty result here needs no such marker: CRAG's own design (ADR-0012, fig. 1) already treats "no useful evidence found" as the correct terminal state once the retry budget is exhausted, and an empty list is the literal, honest shape of that state. `DefaultCorrectiveRetriever` still enforces its own bounded retry budget (default 3 attempts, mirroring Agent Runtime's replan budget shape, ADR-0004) independently of what the provider returns — attempts beyond the budget short-circuit to an empty list without even calling the provider.
+
+## Alternatives considered
+
+- **A general web search API** (e.g., a Bing/Google-style search API, or a purpose-built agent search product). Real considerations the user would need to weigh: broad coverage across arbitrary corrective queries (the failure case that got the agent here could be about anything), but low precision for finance-specific claims, and no domain-specific ranking for source reliability the way a financial-data vendor might offer — `DefaultRetrievalEvaluator` (ADR-0033) would need to score whatever comes back the same way it scores component 02's own documents, and a general web result has no natural analog to component 02's `SourceMetadata.reliability`.
+- **A financial-news-specific search API** (e.g., a news/filings-focused search product). Better precision and reliability signal for this project's actual domain (portfolio/financial analysis), narrower coverage for corrective queries that fall outside financial news specifically — and a second, different vendor relationship/cost profile from whatever component 02 eventually picks for `SourceFetcher` (ADR-0027), raising the same "one provider per concern or shared" question ADR-0021 already named for LLM provider choice across components.
+- **Reusing whatever provider component 02 eventually picks for `SourceFetcher`.** Would avoid a second vendor integration, but conflates two different capabilities — component 02's `SourceFetcher` fetches a *specific known* source; corrective retrieval needs to *discover* new sources matching a query it didn't have before. A fetch-shaped API is not necessarily a search-shaped one. Whether these end up being the same vendor is a real question for whoever picks both, not decided here.
+
+None of these is picked here. The real considerations — coverage vs. precision, reliability-signal availability for `DefaultRetrievalEvaluator` to use, cost, and whether this shares a vendor with component 02's `SourceFetcher` — are named so the user has them, not resolved on the user's behalf.
+
+## Consequences
+
+- `DefaultCorrectiveRetriever.retrieve_externally` is real orchestration (bounded retry budget, `BoundaryGate.tag_provenance` tagging, bookkeeping logged to `retrieval_corrective_log`) around a search step that currently does nothing. Anything that depends on corrective retrieval actually finding evidence is not yet safe to build on top of this implementation — it will honestly report empty results, which is correct behavior for "no provider exists," not a bug.
+- Because `DefaultRetrievalEvaluator` (ADR-0033) will honestly judge most retrieval as insufficient today (component 02's own reliability signal is capped at 0.3 with only `PlaceholderSourceFetcher` wired in, per ADR-0027), corrective retrieval will be invoked more often, in practice, than it would once a real `SourceFetcher` exists — and will consistently return "no useful evidence found" until `ExternalSearchProvider` is real too. This is the honest, compounding consequence of two still-open provider gaps (ADR-0027 and this one) meeting at the same fig. 1 boundary, not a new problem introduced here.
+- Once an external search provider is chosen, the fix is narrowly scoped by design: implement a real `ExternalSearchProvider.search` matching the same `(query: Query, attempt: int) -> list[dict]` contract and pass it into `DefaultCorrectiveRetriever`'s constructor instead of `PlaceholderExternalSearchProvider`. No other method in `DefaultCorrectiveRetriever` needs to change for that swap.
+
+## Related
+
+- Depends on: [ADR-0012](0012-retrieval-corrective-retrieval.md) (corrective retrieval's shape — this ADR is about what backs the *search* inside that loop, not its existence), [ADR-0033](0033-retrieval-gate-evaluator-and-retriever-real-mechanism.md) (the sibling ADR for this same implementation pass, covering the gate/evaluator/retriever/context-builder mechanisms that didn't hit an external-credential gap).
+- Extends the same "ask, don't decide" pattern as: [ADR-0021](0021-agent-runtime-llm-provider-interim.md) (Agent Runtime LLM provider — this ADR's direct template), [ADR-0023](0023-user-portfolio-broker-api-choice-interim.md), [ADR-0027](0027-data-sources-fetch-provider-interim.md), [ADR-0028](0028-memory-mem0-llm-embedding-provider-interim.md).
+- Implemented by: `../src/components/c05_retrieval_context.py`, `ExternalSearchProvider`, `PlaceholderExternalSearchProvider`, `DefaultCorrectiveRetriever`.
+- Logged narratively in `../checkpoint.md`.
