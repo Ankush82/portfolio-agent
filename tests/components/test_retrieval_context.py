@@ -29,8 +29,26 @@ from components.c05_retrieval_context import (
     DefaultRetriever,
     PlaceholderExternalSearchProvider,
     Query,
+    TavilySearchProvider,
+    get_external_search_provider,
 )
 from cross_cutting.security import DefaultBoundaryGate
+import tavily_client
+
+
+@pytest.fixture(autouse=True)
+def _no_tavily_key_by_default(monkeypatch):
+    """Several tests in this file construct a bare `DefaultCorrectiveRetriever`
+    and rely on `PlaceholderExternalSearchProvider` being its default —
+    `get_external_search_provider()` (ADR-0047) reads `TAVILY_API_KEY`,
+    and this repo's own `.env` may carry a real key for actual use
+    elsewhere in this project. Without this fixture, that would make
+    those tests silently issue real network calls to Tavily (or make
+    their placeholder-identity assertions machine-dependent) instead of
+    deterministic — the same hygiene `tests/components/test_data_sources.py`
+    already established for `ALPHA_VANTAGE_API_KEY`."""
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(tavily_client, "_ENV_FILE_PATH", tavily_client._ENV_FILE_PATH.parent / "does-not-exist.env")
 
 
 class _FakeInfrastructure:
@@ -353,6 +371,62 @@ def test_default_corrective_retriever_uses_placeholder_when_none_injected():
     retriever = DefaultCorrectiveRetriever(infrastructure=_FakeInfrastructure())
 
     assert isinstance(retriever._external_search_provider, PlaceholderExternalSearchProvider)
+
+
+# --- get_external_search_provider / TavilySearchProvider (ADR-0047) ----------
+
+
+def test_get_external_search_provider_returns_placeholder_when_key_unset():
+    placeholder = PlaceholderExternalSearchProvider()
+
+    assert get_external_search_provider(placeholder) is placeholder
+
+
+def test_get_external_search_provider_returns_tavily_provider_when_key_set(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "demo-key")
+
+    provider = get_external_search_provider()
+
+    assert isinstance(provider, TavilySearchProvider)
+
+
+def test_default_corrective_retriever_resolves_tavily_provider_when_key_set(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "demo-key")
+
+    retriever = DefaultCorrectiveRetriever(infrastructure=_FakeInfrastructure())
+
+    assert isinstance(retriever._external_search_provider, TavilySearchProvider)
+
+
+def test_tavily_provider_search_returns_real_results_list(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "demo-key")
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"results": [{"title": "Apple Q3 earnings", "url": "https://example.com/a", "content": "..."}]}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _FakeResponse()
+
+    monkeypatch.setattr(tavily_client.requests, "post", fake_post)
+
+    results = TavilySearchProvider().search(Query(text="Apple Q3 earnings", context={}), attempt=1)
+
+    assert captured["url"] == tavily_client.TAVILY_SEARCH_URL
+    assert captured["json"] == {"api_key": "demo-key", "query": "Apple Q3 earnings", "max_results": 5}
+    assert results == [{"title": "Apple Q3 earnings", "url": "https://example.com/a", "content": "..."}]
+
+
+def test_tavily_provider_search_raises_specific_error_when_key_missing():
+    with pytest.raises(tavily_client.MissingTavilyAPIKeyError):
+        TavilySearchProvider().search(Query(text="anything", context={}), attempt=1)
 
 
 class _StaticExternalSearchProvider:

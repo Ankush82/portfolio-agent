@@ -1,6 +1,6 @@
 # 0034 — Corrective retrieval external search provider interim: injectable, empty-by-default placeholder
 
-**Status:** Proposed — 2026-08-26
+**Status:** Superseded by [ADR-0047](0047-retrieval-tavily-corrective-search-resolved.md) — 2026-08-27. The vendor question below is resolved: Tavily, via `TavilySearchProvider` (`src/components/c05_retrieval_context.py`). `PlaceholderExternalSearchProvider` and the injectable `ExternalSearchProvider` seam described below are unchanged — only "which provider" is closed.
 **Component:** Retrieval & Context (05)
 
 ## Context

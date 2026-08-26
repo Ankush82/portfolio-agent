@@ -5,7 +5,9 @@ Design: Retrieval & Evidence Design, fig. 1 (retrieval path)
 Decisions: ADR-0011 (adaptive retrieval, Self-RAG), ADR-0012
 (corrective retrieval, CRAG), ADR-0033 (real mechanism: gate/evaluator
 heuristics, retriever wiring to components 02/04, context assembly),
-ADR-0034 (external search provider interim — placeholder, Proposed)
+ADR-0034 (external search provider interim — placeholder, partially
+superseded by ADR-0047: real Tavily-backed search, see
+TavilySearchProvider below)
 
 ADR-0011 and ADR-0012 settled the *shape* of the adaptive gate and the
 corrective-retrieval loop but explicitly left the mechanism open
@@ -28,6 +30,7 @@ from cross_cutting.observability import traced
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+from tavily_client import get_api_key as get_tavily_api_key, search_tavily
 
 
 @dataclass
@@ -427,14 +430,12 @@ _DEFAULT_MAX_CORRECTIVE_ATTEMPTS = 3
 class ExternalSearchProvider(Protocol):
     """The one seam `DefaultCorrectiveRetriever.retrieve_externally`
     calls through to reach the outside world — same pattern as
-    component 02's `SourceFetcher` (ADR-0026/0027). A real
-    implementation needs a live external search credential this
-    project does not have; see ADR-0034 (status Proposed) for the real
-    options and their honest tradeoffs — none of them is picked there,
-    on purpose. Swapping `PlaceholderExternalSearchProvider` for a real
-    implementation behind this same interface is the entire fix once
-    a credential exists: nothing in `DefaultCorrectiveRetriever` needs
-    to change."""
+    component 02's `SourceFetcher` (ADR-0026/0027). See ADR-0034 (status
+    partially superseded) for the real options considered and their
+    honest tradeoffs. `TavilySearchProvider` (ADR-0047, below) is now
+    the real implementation behind this interface when `TAVILY_API_KEY`
+    is configured; nothing in `DefaultCorrectiveRetriever` needed to
+    change for that swap."""
 
     def search(self, query: Query, attempt: int) -> list[dict]:
         ...
@@ -442,7 +443,8 @@ class ExternalSearchProvider(Protocol):
 
 class PlaceholderExternalSearchProvider:
     """Explicitly NOT a real external search — see `ExternalSearchProvider`'s
-    docstring and ADR-0034 (status Proposed). Always returns an empty
+    docstring and ADR-0034 (status partially superseded by ADR-0047).
+    Used whenever `TAVILY_API_KEY` isn't configured. Always returns an empty
     result list for every query/attempt. That emptiness is itself
     meaningful here, not a stand-in masquerading as a real answer:
     CRAG's fig. 1 "no useful evidence found" terminal state (ADR-0012)
@@ -455,9 +457,45 @@ class PlaceholderExternalSearchProvider:
             return []
 
 
+class TavilySearchProvider:
+    """Real `ExternalSearchProvider` (ADR-0047) — resolves ADR-0034's
+    corrective-retrieval search-provider gap via Tavily's real search
+    API (`src/tavily_client.py`). Returns Tavily's own `results` list
+    verbatim (a list of dicts); `DefaultCorrectiveRetriever` is what
+    tags each one `UNTRUSTED` before returning it, exactly as it already
+    does for `PlaceholderExternalSearchProvider`'s output — this class
+    changes nothing about that contract, only what `search()` actually
+    returns. `attempt` is accepted (Protocol conformance) but not used:
+    Tavily's `/search` endpoint has no attempt-numbered variant, and
+    `DefaultCorrectiveRetriever` already enforces the retry budget
+    before this method is ever called."""
+
+    def search(self, query: Query, attempt: int) -> list[dict]:
+        with traced("TavilySearchProvider.search"):
+            return search_tavily(query.text)
+
+
+def get_external_search_provider(placeholder: "ExternalSearchProvider | None" = None) -> "ExternalSearchProvider":
+    """Selection function — the same key-gated shape `src/llm.py`'s
+    `get_reason_fn` and `src/components/c02_data_sources.py`'s
+    `get_source_fetcher` already established. Returns
+    `TavilySearchProvider` when `TAVILY_API_KEY` is configured,
+    otherwise returns `placeholder` (`PlaceholderExternalSearchProvider`
+    by default) unchanged. Constructing `TavilySearchProvider` never
+    touches the network — only calling `.search()` does — so it is safe
+    for `DefaultCorrectiveRetriever` to resolve this automatically at
+    construction time."""
+    placeholder = placeholder or PlaceholderExternalSearchProvider()
+    if get_tavily_api_key() is not None:
+        return TavilySearchProvider()
+    return placeholder
+
+
 class DefaultCorrectiveRetriever:
     """Real implementation of CorrectiveRetriever (ADR-0012's shape,
-    ADR-0033's mechanism, ADR-0034's placeholder search seam).
+    ADR-0033's mechanism, ADR-0034/ADR-0047's search seam — real via
+    `TavilySearchProvider` when `TAVILY_API_KEY` is configured,
+    `PlaceholderExternalSearchProvider` otherwise).
 
     Bounded retry budget (ADR-0012's Consequences, mirroring Agent
     Runtime's replan budget shape, ADR-0004): `attempt` values beyond
@@ -486,7 +524,7 @@ class DefaultCorrectiveRetriever:
         infrastructure: Infrastructure | None = None,
         max_attempts: int = _DEFAULT_MAX_CORRECTIVE_ATTEMPTS,
     ) -> None:
-        self._external_search_provider = external_search_provider or PlaceholderExternalSearchProvider()
+        self._external_search_provider = external_search_provider or get_external_search_provider()
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._infrastructure = infrastructure or DefaultInfrastructure()
         self._max_attempts = max_attempts
