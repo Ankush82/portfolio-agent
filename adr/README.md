@@ -30,6 +30,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0018](0018-security-peer-agent-untrusted-by-default.md) | Peer-agent output: untrusted by default | Security & Privacy (17) |
 | [0019](0019-infrastructure-unified-managed-stack.md) | System Infrastructure: unified, managed stack | System Infrastructure (18) |
 | [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Proposed**, not yet Accepted) | Security & Privacy (17) |
+| [0021](0021-agent-runtime-llm-provider-interim.md) | Agent Runtime LLM provider interim: injectable, non-cognitive placeholder (**Proposed**, not yet Accepted) | Agent Runtime (10) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
