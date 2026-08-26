@@ -19,7 +19,7 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0007](0007-memory-quarantine-at-write.md) | Memory poisoning defense: quarantine at write | Memory (06) |
 | [0008](0008-memory-structural-partition.md) | Memory scope: structural partition | Memory (06) |
 | [0009](0009-agent-runtime-technology-langgraph.md) | Agent Runtime technology: LangGraph | Agent Runtime (10) |
-| [0010](0010-memory-technology-purpose-built-layer.md) | Memory technology: purpose-built memory layer (Mem0 or Supermemory) | Memory (06) |
+| [0010](0010-memory-technology-purpose-built-layer.md) | Memory technology: Mem0 chosen; per-decision fit check now resolved, three of four decisions implemented directly against DefaultInfrastructure | Memory (06) |
 | [0011](0011-retrieval-adaptive-gate.md) | Adaptive retrieval (Self-RAG) | Retrieval & Context (05) |
 | [0012](0012-retrieval-corrective-retrieval.md) | Corrective retrieval (CRAG) | Retrieval & Context (05) |
 | [0013](0013-evidence-mandatory-per-claim.md) | Evidence requirement: mandatory per claim (ALCE) | Evidence & Verification (09) |
@@ -31,6 +31,13 @@ Scope: this covers engineering/architecture decisions only, not process choices 
 | [0019](0019-infrastructure-unified-managed-stack.md) | System Infrastructure: unified, managed stack | System Infrastructure (18) |
 | [0020](0020-security-authorize-interim-default.md) | Authorize interim default: fail-open, logged, per-call (**Proposed**, not yet Accepted) | Security & Privacy (17) |
 | [0021](0021-agent-runtime-llm-provider-interim.md) | Agent Runtime LLM provider interim: injectable, non-cognitive placeholder (**Proposed**, not yet Accepted) | Agent Runtime (10) |
+| [0022](0022-user-portfolio-broker-connector-interface.md) | Broker connector: injectable Protocol, broker data untrusted by default | User & Portfolio (01) |
+| [0023](0023-user-portfolio-broker-api-choice-interim.md) | Broker/aggregator API choice interim: placeholder connector (**Proposed**, not yet Accepted) | User & Portfolio (01) |
+| [0024](0024-tools-environment-registry-and-dispatch-mechanism.md) | Registry/dispatch mechanism: parallel invocable registry, capability-tag matching, empty by default | Tools & Environment (11) |
+| [0025](0025-tools-environment-interchangeability-closes-circuit-breaker-gap.md) | Tool interchangeability mapping wired into CircuitBreaker.find_alternative() and DefaultRecoveryManager | Tools & Environment (11), Reliability & Resilience (15), Agent Runtime (10) |
+| [0026](0026-data-sources-real-mechanism.md) | Data & Sources real mechanism: single-table persistence, provenance/timestamp/reliability wiring, SourceFetcher seam | Data & Sources (02) |
+| [0027](0027-data-sources-fetch-provider-interim.md) | Data & Sources fetch provider interim: injectable, non-fetching placeholder (**Proposed**, not yet Accepted) | Data & Sources (02) |
+| [0028](0028-memory-mem0-llm-embedding-provider-interim.md) | Mem0 LLM/embedding provider interim: deferred to DefaultInfrastructure (**Proposed**, not yet Accepted) | Memory (06) |
 
 ADR-0004 is partially superseded by ADR-0015 — see both for the full picture; superseded ADRs stay in the folder rather than being deleted.
 
