@@ -21,6 +21,7 @@ import json
 import pytest
 import requests
 
+import api_error_logging
 import yahoo_finance_client
 from yahoo_finance_client import (
     YAHOO_FINANCE_BASE_URL,
@@ -52,10 +53,11 @@ class _FakeResponse:
 
 
 def _fake_get_factory(captured: dict, response: _FakeResponse):
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, params=None, headers=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers
         captured["timeout"] = timeout
+        captured["params"] = params
         return response
 
     return fake_get
@@ -71,7 +73,7 @@ def test_fetch_yahoo_finance_quote_hits_chart_endpoint_with_symbol_verbatim(monk
     point for the `.NS` / `.BO` suffix elsewhere in this codebase."""
     captured: dict = {}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory(captured, _FakeResponse(json_payload=_VALID_LIVE_PAYLOAD)),
     )
 
@@ -89,7 +91,7 @@ def test_fetch_yahoo_finance_quote_uses_five_second_timeout(monkeypatch):
     is slower)."""
     captured: dict = {}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory(captured, _FakeResponse(json_payload=_VALID_LIVE_PAYLOAD)),
     )
 
@@ -107,7 +109,7 @@ def test_fetch_yahoo_finance_quote_sets_browser_user_agent(monkeypatch):
     without a live network call."""
     captured: dict = {}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory(captured, _FakeResponse(json_payload=_VALID_LIVE_PAYLOAD)),
     )
 
@@ -168,7 +170,7 @@ _VALID_LIVE_PAYLOAD = _valid_payload()
 
 def test_fetch_yahoo_finance_quote_returns_parsed_real_fields(monkeypatch):
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=_VALID_LIVE_PAYLOAD)),
     )
 
@@ -203,7 +205,7 @@ def test_fetch_yahoo_finance_quote_does_not_invent_market_cap_for_bse_symbol(mon
     bse_meta["fullExchangeName"] = "BSE"
     bse_meta["currency"] = "INR"
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=_valid_payload(bse_meta))),
     )
 
@@ -219,8 +221,15 @@ def test_fetch_yahoo_finance_quote_does_not_invent_market_cap_for_bse_symbol(mon
 
 
 def test_fetch_yahoo_finance_quote_raises_on_non_2xx(monkeypatch):
+    # STORY-12: status_code=429 now triggers the retry loop (3 retries
+    # with 1s/2s/4s backoffs = 7s of sleeps). Monkeypatch the retry
+    # helper's `time.sleep` to make the test instant — the retry
+    # loop STILL RUNS, we just don't wait for real seconds.
+    import api_error_logging as ael
+    monkeypatch.setattr(ael.time, "sleep", lambda *_a, **_k: None)
+
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(status_code=429)),
     )
 
@@ -230,7 +239,7 @@ def test_fetch_yahoo_finance_quote_raises_on_non_2xx(monkeypatch):
 
 def test_fetch_yahoo_finance_quote_raises_on_non_json_body(monkeypatch):
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(body=b"<html>oops</html>", raise_json=True)),
     )
 
@@ -248,7 +257,7 @@ def test_fetch_yahoo_finance_quote_raises_on_error_payload(monkeypatch):
         }
     }
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=payload)),
     )
 
@@ -259,7 +268,7 @@ def test_fetch_yahoo_finance_quote_raises_on_error_payload(monkeypatch):
 def test_fetch_yahoo_finance_quote_raises_on_empty_results(monkeypatch):
     payload = {"chart": {"result": [], "error": None}}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=payload)),
     )
 
@@ -285,7 +294,7 @@ def test_fetch_yahoo_finance_quote_raises_on_unrecognised_symbol(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=payload)),
     )
 
@@ -296,7 +305,7 @@ def test_fetch_yahoo_finance_quote_raises_on_unrecognised_symbol(monkeypatch):
 def test_fetch_yahoo_finance_quote_raises_on_missing_chart_result(monkeypatch):
     payload = {"chart": {"result": None, "error": None}}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=payload)),
     )
 
@@ -310,7 +319,7 @@ def test_fetch_yahoo_finance_quote_raises_on_malformed_body(monkeypatch):
     `KeyError`."""
     payload = {"oops": "completely different shape"}
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _fake_get_factory({}, _FakeResponse(json_payload=payload)),
     )
 
@@ -414,10 +423,11 @@ def _story5_recording_fake_get(response: _FakeResponse):
     timeout) it was called with so we can assert against them below."""
     captured: dict = {}
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, params=None, headers=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers or {}
         captured["timeout"] = timeout
+        captured["params"] = params
         return response
 
     return fake_get, captured
@@ -476,7 +486,7 @@ def test_story5_acceptance_criteria(monkeypatch):
     fake_get, captured = _story5_recording_fake_get(
         _FakeResponse(json_payload=_story5_payload()),
     )
-    monkeypatch.setattr(yahoo_finance_client.requests, "get", fake_get)
+    monkeypatch.setattr(api_error_logging.requests, "get", fake_get)
 
     # --- AC5: timeout is exactly 5 -----------------------------------
     # Assert this *before* the call so the timeout assertion is part
@@ -516,7 +526,7 @@ def test_story5_acceptance_criteria(monkeypatch):
     # is not hardcoding INR.
     usd_meta = dict(_STORY5_META, currency="USD", symbol="AAPL")
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _story5_recording_fake_get(
             _FakeResponse(json_payload=_story5_payload(usd_meta)),
         )[0],
@@ -531,7 +541,7 @@ def test_story5_http_error_raises_yahoo_finance_error_not_fabricated_fallback(mo
     non-2xx response specifically: the function must NOT return a
     dict full of `None`s as a silent fallback."""
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _story5_recording_fake_get(_FakeResponse(status_code=500))[0],
     )
 
@@ -551,7 +561,7 @@ def test_story5_json_decode_error_raises_yahoo_finance_error(monkeypatch):
     HTML captcha pages, etc.) must raise a real exception, not be
     swallowed and returned as fabricated data."""
     monkeypatch.setattr(
-        yahoo_finance_client.requests, "get",
+        api_error_logging.requests, "get",
         _story5_recording_fake_get(
             _FakeResponse(body=b"<html>not json</html>", raise_json=True),
         )[0],

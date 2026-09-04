@@ -42,6 +42,7 @@ from pathlib import Path
 
 import requests
 
+from api_error_logging import http_get_with_retry
 from infrastructure import Infrastructure
 
 # `DefaultInfrastructure` is intentionally NOT imported at module top:
@@ -75,7 +76,7 @@ def _default_infrastructure() -> Infrastructure:
 EXCHANGE_RATE_API_URL = "https://open.er-api.com/v6/latest/USD"
 EXCHANGE_RATE_FALLBACK_URL = "https://data.fixer.io/api/latest"
 
-_REQUEST_TIMEOUT_SECONDS = 30
+_REQUEST_TIMEOUT_SECONDS = 5
 _CACHE_TTL_SECONDS = 3600  # 1 hour, per acceptance criteria
 _CACHE_KEY = "exchange_rate:inr_usd"
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -254,10 +255,18 @@ def _fetch_primary() -> Decimal:
             "a .env file at the repo root)."
         )
     url = get_primary_api_url()
-    response = requests.get(
-        url,
+    # STORY-12: wrap the real HTTP GET in genuine exponential-backoff
+    # retry (1s, 2s, 4s -- 3 retries, total possible wait = 7s) on
+    # HTTP 429 and `requests.exceptions.Timeout`. Other failures
+    # (5xx, JSON decode, missing field) propagate normally so the
+    # caller's primary→fallback fallback decision can take over.
+    response = http_get_with_retry(
+        logger=_LOGGER,
+        url=url,
         params={"apikey": api_key},
         timeout=_REQUEST_TIMEOUT_SECONDS,
+        error_code_prefix="EXCHANGE_RATE_PRIMARY",
+        extra_fields={"vendor": "primary", "endpoint": url},
     )
     response.raise_for_status()
     body = response.json()
@@ -278,10 +287,17 @@ def _fetch_fallback() -> Decimal:
             "repo root)."
         )
     url = get_fallback_api_url()
-    response = requests.get(
-        url,
+    # STORY-12: same retry wrapping as the primary source — 429 and
+    # Timeout failures trigger exponential backoff before the
+    # primary→fallback fallback decision has even been considered for
+    # this vendor.
+    response = http_get_with_retry(
+        logger=_LOGGER,
+        url=url,
         params={"access_key": api_key},
         timeout=_REQUEST_TIMEOUT_SECONDS,
+        error_code_prefix="EXCHANGE_RATE_FALLBACK",
+        extra_fields={"vendor": "fallback", "endpoint": url},
     )
     response.raise_for_status()
     body = response.json()
@@ -314,9 +330,13 @@ def fetch_exchange_rate(
     exception is chained via `__cause__` so a real debugging
     trace is preserved.
 
-    Every real HTTP request uses a 30-second `timeout`, and the cache
+    Every real HTTP request uses a 5-second `timeout`, and the cache
     is keyed `exchange_rate:inr_usd` with a 1-hour TTL — matching the
-    acceptance criteria exactly."""
+    acceptance criteria exactly. STORY-12: each HTTP call is wrapped
+    in `http_get_with_retry` so 429 (rate limit) and Timeout failures
+    are retried with exponential backoff (1s, 2s, 4s — 3 retries,
+    total possible wait = 7s) BEFORE the primary→fallback decision is
+    made, per the AC."""
     # Honour the README's "Real-vs-Placeholder seam, never a silent
     # no-op" principle for the case where neither vendor has a key
     # configured at all: don't try either vendor (both will fail with
@@ -359,6 +379,11 @@ def fetch_exchange_rate(
             "Primary exchange-rate source failed (%s: %s); attempting fallback",
             type(exc).__name__,
             exc,
+            extra={
+                "error_code": "EXCHANGE_RATE_PRIMARY_FAILED",
+                "vendor": "primary",
+                "exception_type": type(exc).__name__,
+            },
         )
     else:
         infrastructure.cache_set(
@@ -376,11 +401,26 @@ def fetch_exchange_rate(
             type(exc).__name__,
             exc,
             primary_error,
+            extra={
+                "error_code": "EXCHANGE_RATE_BOTH_FAILED",
+                "vendor": "fallback",
+                "exception_type": type(exc).__name__,
+                "primary_exception_type": (
+                    type(primary_error).__name__ if primary_error else None
+                ),
+            },
         )
+        # STORY-12: genuinely user-friendly message — names the
+        # condition (both sources failed) and what the caller can
+        # do (try again shortly), but does NOT dump raw exception
+        # text or vendor JSON into the message. The original
+        # exceptions stay accessible via `__cause__` (primary was
+        # the immediate predecessor in the `try: rate = _fetch_primary()`
+        # block above, so it's already chained via `__context__`).
         raise ExchangeRateFetchError(
-            "Both exchange-rate sources failed: "
-            f"primary ({type(primary_error).__name__}: {primary_error}), "
-            f"fallback ({type(exc).__name__}: {exc})"
+            "Exchange-rate service is currently unavailable. "
+            "Both primary and fallback sources failed. "
+            "Please try again shortly."
         ) from exc
 
     infrastructure.cache_set(
