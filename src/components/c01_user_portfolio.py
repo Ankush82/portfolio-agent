@@ -183,6 +183,21 @@ class Holding:
         # here, only the NSE/BSE format rules from STORY-3 are enforced.
         if self.symbol_suffix in (".NS", ".BO"):
             validate_stock_symbol(f"{self.security_id}{self.symbol_suffix}")
+        # Exchange auto-detection from symbol_suffix (STORY-4). Runs
+        # AFTER symbol_suffix validation (so an invalid suffix has
+        # already been rejected) but BEFORE the exchange ENUM check
+        # below (so an auto-detected 'NSE'/'BSE' still passes that
+        # check normally). .NS always means NSE, .BO always means BSE --
+        # these are unambiguous conventions the suffix itself encodes,
+        # so any value the caller passed for `exchange` is overridden
+        # rather than left to silently disagree with the suffix. When
+        # symbol_suffix is None, exchange is left exactly as the caller
+        # passed it (preserves existing US behavior -- 'NYSE'/'NASDAQ'/
+        # None -- and no new rule is invented for US symbols here).
+        if self.symbol_suffix == ".NS":
+            self.exchange = "NSE"
+        elif self.symbol_suffix == ".BO":
+            self.exchange = "BSE"
         # Quantity is Decimal, not float — see _coerce_quantity_to_decimal.
         # Always coerce/quantize, even when the caller already passed a
         # Decimal: a Decimal with more than 4 places (e.g. Decimal("12.123456789"))
