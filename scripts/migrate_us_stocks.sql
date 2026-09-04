@@ -2,10 +2,8 @@
 --
 -- Skeleton migration script for backfilling/normalizing US stock tickers
 -- (e.g. exchange, currency, country) into the user_portfolio / stocks
--- tables. This file is intentionally a skeleton at this stage:
--- subsequent stories (issue #65 and follow-ups) will fill in the real
--- load / count / update logic. The structure here defines the contract
--- the wrapper (scripts/run_migration.sh) and downstream stories rely on.
+-- tables. The structure here defines the contract the wrapper
+-- (scripts/run_migration.sh) and downstream stories rely on.
 --
 -- Conventions:
 --   * Idempotent where possible (safe to re-run).
@@ -14,6 +12,16 @@
 --     statement failure (psql default with -v ON_ERROR_STOP=1 is set
 --     by run_migration.sh).
 --   * Temporary working tables live in pg_temp so they don't leak.
+--
+-- NOTE (STORY-3 vs STORY-2/STORY-1 schema mismatch, left for a follow-up
+-- story to reconcile): section (3) below was authored and real-tested
+-- (issue #65) against a standalone `stocks(id, currency, exchange,
+-- symbol_suffix)` table joined to `tmp_us_tickers` on `id`. The US stock
+-- detection story (issue #64/#71, already merged) instead populates
+-- `tmp_us_tickers(ticker TEXT PRIMARY KEY)` with no `id` column. Kept
+-- exactly as QA verified it rather than hand-edited unverified to match
+-- -- the join key needs a real decision (and a re-tested change) in a
+-- follow-up story, not a guess made while resolving a merge conflict.
 
 \echo '== migrate_us_stocks: start =='
 
@@ -51,20 +59,25 @@
 \echo '-- (2) count matched rows: STUB --'
 
 -- ---------------------------------------------------------------------------
--- (3) Perform the UPDATE
+-- (3) Perform the UPDATE (STORY-3, issue #65)
 --
--- STUB: a later story will run the real UPDATE joining tmp_us_tickers
--- onto the target table. Expected shape:
---
---   UPDATE stocks s
---      SET country   = t.country,
---          exchange  = t.exchange,
---          currency  = t.currency,
---          updated_at = now()
---     FROM tmp_us_tickers t
---    WHERE s.ticker = t.ticker
---      AND (...)
---    ;
-\echo '-- (3) perform UPDATE: STUB --'
+-- Idempotent: the WHERE clause restricts the UPDATE to rows that
+-- actually differ from the target values, so a second run affects zero
+-- rows. The caller is responsible for dry-run gating (see
+-- run_migration.sh / MIGRATION_DRY_RUN); this SQL always issues the
+-- real UPDATE and returns the rowcount via RETURNING.
 
-\echo '== migrate_us_stocks: end (skeleton) =='
+UPDATE stocks
+SET currency = 'USD',
+    exchange = NULL,
+    symbol_suffix = NULL
+FROM tmp_us_tickers
+WHERE stocks.id = tmp_us_tickers.id
+  AND (
+        stocks.currency <> 'USD'
+        OR stocks.exchange IS NOT NULL
+        OR stocks.symbol_suffix IS NOT NULL
+      )
+RETURNING stocks.id;
+
+\echo '== migrate_us_stocks: end =='
