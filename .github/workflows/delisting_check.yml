@@ -1,0 +1,79 @@
+name: Delisting Detection
+
+# Story STORY-13: daily batch job that detects delisted / suspended
+# stocks across every held symbol (NSE/BSE and US) and logs any
+# status CHANGE to migration_log.
+#
+# Mirrors .github/workflows/migration.yml's real Postgres-service-
+# container + workflow_dispatch pattern, but on a `schedule` trigger
+# (1:00 AM UTC daily) instead of a `push` trigger, since this is a
+# genuinely recurring job rather than a one-time migration. The
+# `concurrency` group below is distinct from `us-stock-migration`
+# and `holdings-currency-backfill` so an in-flight delisting check
+# never blocks the one-shot migrations (and vice versa).
+
+on:
+  schedule:
+    # 1:00 AM UTC daily. The cron expression is UTC by GitHub Actions
+    # convention; no timezone conversion is applied. workflow_dispatch
+    # below covers manual re-runs for incident response / debugging
+    # without waiting for the next cron tick.
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in dry-run mode (no real UPDATE / store issued)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: delisting-check
+  cancel-in-progress: false
+
+jobs:
+  detect-delistings:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: portfolio_agent
+          POSTGRES_PASSWORD: portfolio_agent
+          POSTGRES_DB: portfolio_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent
+      DELISTING_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync real dependencies
+        run: uv sync --extra dev
+
+      - name: Run the real delisting-detection batch
+        # No `continue-on-error` -- a non-zero exit here fails this
+        # step, which fails the job, which fails the whole workflow
+        # run. GitHub Actions' own failure notifications are the
+        # alerting channel here, same as the migration workflow.
+        # The script itself contains the API failure isolation
+        # (one bad symbol is logged + skipped, the batch continues),
+        # so a non-zero exit means the whole batch genuinely could
+        # not run -- not that one symbol hiccupped.
+        run: python -m scripts.detect_delisted_stocks
+
+      - name: Upload delisting-check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delisting-check-log
+          path: /tmp/detect_delisted_stocks.log
+          retention-days: 90
