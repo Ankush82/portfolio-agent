@@ -305,3 +305,153 @@ def test_ensure_schema_does_not_alter_existing_tables(infra):
         assert sched_row is not None and sched_row[0]["job"] == "gamma", (
             f"scheduled_tasks row altered/lost: {sched_row}"
         )
+@requires_postgres
+def test_load_us_tickers_and_count_us_stocks(tmp_path, infra):
+    """Test loading US tickers from a CSV and counting US stocks."""
+    # Create a temporary CSV file with test data
+    csv_content = """AAPL
+MSFT
+GOOGL
+BRK.B
+BRK-B
+TSLA
+AAPL  # duplicate
+"""
+    csv_file = tmp_path / "us_tickers.csv"
+    csv_file.write_text(csv_content)
+    
+    # Load the tickers
+    infra.load_us_tickers(str(csv_file))
+    
+    # Insert some test holdings data
+    holdings_table = "holdings"
+    # Insert a holding with a US ticker (should be counted)
+    infra.store(holdings_table, {
+        "id": "holding1",
+        "security_id": "AAPL",
+        "portfolio_id": "portfolio1"
+    })
+    # Insert a holding with another US ticker (should be counted)
+    infra.store(holdings_table, {
+        "id": "holding2",
+        "security_id": "MSFT",
+        "portfolio_id": "portfolio1"
+    })
+    # Insert a holding with a non-US ticker (should NOT be counted - has dot)
+    infra.store(holdings_table, {
+        "id": "holding3",
+        "security_id": "BRK.B",
+        "portfolio_id": "portfolio1"
+    })
+    # Insert a holding with a non-US ticker (should NOT be counted - has hyphen)
+    infra.store(holdings_table, {
+        "id": "holding4",
+        "security_id": "BRK-B",
+        "portfolio_id": "portfolio1"
+    })
+    # Insert a holding with a ticker not in CSV (should NOT be counted)
+    infra.store(holdings_table, {
+        "id": "holding5",
+        "security_id": "XYZ",
+        "portfolio_id": "portfolio1"
+    })
+    # Insert a holding for a different portfolio (should be counted in total but not portfolio-specific)
+    infra.store(holdings_table, {
+        "id": "holding6",
+        "security_id": "GOOGL",
+        "portfolio_id": "portfolio2"
+    })
+    
+    # Count US stocks for portfolio1 (should be 2: AAPL and MSFT)
+    count_portfolio1 = infra.count_us_stocks("portfolio1")
+    assert count_portfolio1 == 2
+    
+    # Count US stocks for all portfolios (should be 3: AAPL, MSFT, GOOGL)
+    count_all = infra.count_us_stocks()
+    assert count_all == 3
+
+
+@requires_postgres
+def test_load_us_tickers_file_not_found(infra):
+    """Test that load_us_tickers handles missing CSV file gracefully."""
+    # This should not raise an exception
+    infra.load_us_tickers("/nonexistent/path/us_tickers.csv")
+    # Count should be 0 since table is empty
+    count = infra.count_us_stocks()
+    assert count == 0
+
+
+@requires_postgres
+def test_load_us_tickers_duplicates_and_empty_lines(tmp_path, infra):
+    """Test that duplicates are deduplicated and empty lines are skipped."""
+    # Create a temporary CSV file with duplicates, empty lines, and whitespace
+    csv_content = """AAPL
+
+MSFT
+AAPL
+  TSLA  
+MSFT
+"""
+    csv_file = tmp_path / "us_tickers.csv"
+    csv_file.write_text(csv_content)
+    
+    # Load the tickers
+    infra.load_us_tickers(str(csv_file))
+    
+    # Insert holdings for each unique ticker
+    infra.store("holdings", {"id": "h1", "security_id": "AAPL", "portfolio_id": "p1"})
+    infra.store("holdings", {"id": "h2", "security_id": "MSFT", "portfolio_id": "p1"})
+    infra.store("holdings", {"id": "h3", "security_id": "TSLA", "portfolio_id": "p1"})
+    infra.store("holdings", {"id": "h4", "security_id": "XYZ", "portfolio_id": "p1"})  # not in CSV
+    
+    # Should count 3 US stocks (duplicates removed)
+    count = infra.count_us_stocks("p1")
+    assert count == 3
+
+
+@requires_postgres
+def test_load_us_tickers_truncates_and_reloads(tmp_path, infra):
+    """Test that load_us_tickers truncates the temporary table and reloads the CSV each time."""
+    # Create a temporary CSV file with initial data
+    csv_content = """AAPL
+MSFT
+"""
+    csv_file = tmp_path / "us_tickers.csv"
+    csv_file.write_text(csv_content)
+
+    # Load the tickers for the first time
+    infra.load_us_tickers(str(csv_file))
+
+    # Check that the temporary table has the two tickers
+    with infra._connection().cursor() as cursor:
+        cursor.execute("SELECT ticker FROM tmp_us_tickers ORDER BY ticker")
+        rows = cursor.fetchall()
+        assert [r[0] for r in rows] == ["AAPL", "MSFT"]
+
+    # Now, without changing the CSV, load again (should truncate and reload the same)
+    infra.load_us_tickers(str(csv_file))
+
+    # Check again: still two
+    with infra._connection().cursor() as cursor:
+        cursor.execute("SELECT ticker FROM tmp_us_tickers ORDER BY ticker")
+        rows = cursor.fetchall()
+        assert [r[0] for r in rows] == ["AAPL", "MSFT"]
+
+    # Now, insert an extra ticker directly into the temporary table
+    with infra._connection().cursor() as cursor:
+        cursor.execute("INSERT INTO tmp_us_tickers (ticker) VALUES (%s)", ("GOOGL",))
+
+    # Check that we now have three
+    with infra._connection().cursor() as cursor:
+        cursor.execute("SELECT ticker FROM tmp_us_tickers ORDER BY ticker")
+        rows = cursor.fetchall()
+        assert set([r[0] for r in rows]) == {"AAPL", "MSFT", "GOOGL"}
+
+    # Load the CSV again (should truncate and reload, removing the direct insert)
+    infra.load_us_tickers(str(csv_file))
+
+    # Check that we are back to two
+    with infra._connection().cursor() as cursor:
+        cursor.execute("SELECT ticker FROM tmp_us_tickers ORDER BY ticker")
+        rows = cursor.fetchall()
+        assert [r[0] for r in rows] == ["AAPL", "MSFT"]
