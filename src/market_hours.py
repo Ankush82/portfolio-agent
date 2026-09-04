@@ -12,6 +12,18 @@ make that distinction. That's the only reason this module exists: to
 give the caching layer (and any future consumer) a real, DST-aware,
 configuration-driven answer.
 
+Holidays (issue #55) are layered on top of the trading-hours answer
+here via ``src/market_holidays.py`` rather than mixed into the
+``config/market_hours.json`` file. The split keeps the two concerns
+editable independently (ops adjusts session hours vs. ops adds a
+one-off exchange closure), keeps each module testable in isolation,
+and lets this module's single public question — "is this market open
+right now?" — incorporate the holiday calendar as a single override
+applied after the weekday/session-block computation rather than as a
+third axis the caller has to remember to check. See
+``src/market_holidays.py`` for the calendar loading and the
+``holiday_name`` key added to :func:`market_status`'s returned dict.
+
 Design notes:
 
 * **DST awareness via stdlib zoneinfo.** Python 3.9+ ships
@@ -300,7 +312,9 @@ def _local_now(now_utc: datetime, zone_name: str) -> datetime:
     return now_utc.astimezone(ZoneInfo(zone_name))
 
 
-def _compute_status(now_utc: datetime, zone_name: str, market_def: dict) -> dict:
+def _compute_status(
+    now_utc: datetime, zone_name: str, market_def: dict, exchange: str
+) -> dict:
     """The shared inner computation for `is_market_open` and
     `market_status`. Returns a dict with at minimum:
 
@@ -312,6 +326,7 @@ def _compute_status(now_utc: datetime, zone_name: str, market_def: dict) -> dict
           "timezone": <zone name>,
           "next_transition_utc": <ISO-8601 string> | None,
           "next_status": "open" | "closed" | None,
+          "holiday_name": <str> | None,
         }
 
     `next_transition_utc` is the next moment the market will switch
@@ -323,7 +338,17 @@ def _compute_status(now_utc: datetime, zone_name: str, market_def: dict) -> dict
 
     The function does NOT raise on weekends or after-hours; it just
     returns `status="closed"` and points `next_transition_utc` at the
-    next open time. The caller decides what to do with that."""
+    next open time. The caller decides what to do with that.
+
+    Holiday handling: when the local date is a market holiday per
+    ``src/market_holidays.py``, ``status`` is forced to
+    ``STATUS_CLOSED`` regardless of weekday or session-block math,
+    and ``holiday_name`` is set to the observed holiday's name. The
+    holiday override is layered ON TOP of the trading-hours answer
+    rather than mixed into it, so a bug in the holiday module
+    surfaces as "always says open on a holiday" (the existing
+    session-block answer) rather than masking the trading-hours
+    logic entirely."""
     local_now = _local_now(now_utc, zone_name)
     weekday = local_now.weekday()  # 0=Monday .. 6=Sunday
     trading_days = market_def["trading_days"]
@@ -342,6 +367,20 @@ def _compute_status(now_utc: datetime, zone_name: str, market_def: dict) -> dict
     )
     status = STATUS_OPEN if open_now else STATUS_CLOSED
 
+    # Holiday override: layered on top of the session-block answer
+    # so a holiday on a normal trading day (e.g. NSE Diwali, US
+    # Thanksgiving) closes the market even at 12:00 local. The
+    # import is local because (a) market_hours must remain
+    # importable without market_holidays present in pathological
+    # test environments, and (b) market_holidays itself imports
+    # nothing from market_hours so there's no real cycle — the
+    # local import is purely about import-time safety.
+    from market_holidays import is_market_holiday
+
+    holiday_name = is_market_holiday(exchange, local_now.date())
+    if holiday_name is not None:
+        status = STATUS_CLOSED
+
     next_transition_utc, next_status = _next_transition(
         now_utc, local_now, weekday, trading_days, session_blocks
     )
@@ -354,6 +393,7 @@ def _compute_status(now_utc: datetime, zone_name: str, market_def: dict) -> dict
         "timezone": zone_name,
         "next_transition_utc": next_transition_utc.isoformat() if next_transition_utc else None,
         "next_status": next_status,
+        "holiday_name": holiday_name,
     }
 
 
@@ -438,6 +478,15 @@ def is_market_open(exchange: str, now_utc: datetime | None = None) -> bool:
     correctly for `America/New_York`) but the parameter and the
     price-cache layer see only UTC.
 
+    Returns `False` whenever the market is closed — including when
+    the local date is a market holiday per
+    ``src/market_holidays.py`` (e.g. NSE on Diwali, NYSE on
+    Thanksgiving). Holiday closure is layered on top of the
+    weekday/session-block answer, so a holiday on a normal trading
+    day returns `False` even at noon local time. To get the holiday
+    name in addition to the closed status, use
+    :func:`market_status` and read its `holiday_name` key.
+
     Raises `UnknownMarketError` if `exchange` isn't in the config, and
     `MarketHoursConfigError` if the config itself is malformed. Both
     are real, named exceptions so callers can distinguish "I asked
@@ -452,7 +501,7 @@ def is_market_open(exchange: str, now_utc: datetime | None = None) -> bool:
     """
     zone_name, market_def = _resolve_market(exchange)
     normalized = _normalize_now(now_utc)
-    return _compute_status(normalized, zone_name, market_def)["status"] == STATUS_OPEN
+    return _compute_status(normalized, zone_name, market_def, exchange)["status"] == STATUS_OPEN
 
 
 def market_status(exchange: str, now_utc: datetime | None = None) -> dict:
@@ -467,6 +516,7 @@ def market_status(exchange: str, now_utc: datetime | None = None) -> dict:
           "timezone":   "<IANA zone name>",
           "next_transition_utc": "<ISO-8601 UTC timestamp>" | None,
           "next_status":         "open" | "closed" | None,
+          "holiday_name":        "<holiday name>" | None,
         }
 
     `next_transition_utc` is the moment the market will next switch
@@ -484,6 +534,15 @@ def market_status(exchange: str, now_utc: datetime | None = None) -> dict:
     caller should treat that as "ask the operator" rather than
     guessing.
 
+    `holiday_name` is the name of the market holiday observed today
+    (per ``src/market_holidays.py``) or ``None`` if today is not a
+    holiday. When set, `status` is forced to ``"closed"`` — the
+    holiday override is layered on top of the trading-hours answer
+    so a holiday on a normal trading day closes the market even
+    inside the normal session window. Callers displaying the market
+    status to a user should surface the holiday name alongside the
+    "closed" status.
+
     Raises the same `UnknownMarketError` / `MarketHoursConfigError`
     as `is_market_open`. Same DST handling. Same `now_utc`
     semantics."""
@@ -492,7 +551,7 @@ def market_status(exchange: str, now_utc: datetime | None = None) -> dict:
     # Carry the exchange *code* (the input key), not the display name,
     # so the dict round-trips: market_status("NSE", ...)["exchange"]
     # is "NSE" regardless of what the config calls it.
-    result = _compute_status(normalized, zone_name, market_def)
+    result = _compute_status(normalized, zone_name, market_def, exchange)
     result["exchange"] = exchange
     return result
 
