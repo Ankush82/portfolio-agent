@@ -18,6 +18,8 @@ on:
       - "scripts/migrate_us_stocks.sql"
       - "scripts/migrate_us_stocks.py"
       - "scripts/run_migration.sh"
+      - "scripts/backfill_holdings_currency.py"
+      - "scripts/verify_holdings_currency_backfill.py"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -74,3 +76,66 @@ jobs:
           name: migration-log
           path: /tmp/migrate_us_stocks.log
           retention-days: 90
+
+  # Story STORY-2 (issue #46): real CI trigger for
+  # scripts/backfill_holdings_currency.py. Follows the same shape as
+  # the `migrate` job above (Postgres service container,
+  # uv-managed deps, real exit-status gating via no
+  # `continue-on-error`), but invokes the backfill script directly
+  # with python instead of through run_migration.sh, because
+  # backfill_holdings_currency.py is single-language Python with no
+  # companion .sql file (the migrate job's wrapper exists to invoke
+  # psql against migrate_us_stocks.sql). Concurrency group is
+  # distinct from `us-stock-migration` so the two migrations don't
+  # block each other.
+  backfill-holdings-currency:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: holdings-currency-backfill
+      cancel-in-progress: false
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: portfolio_agent
+          POSTGRES_PASSWORD: portfolio_agent
+          POSTGRES_DB: portfolio_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent
+      MIGRATION_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync real dependencies
+        run: uv sync --extra dev
+
+      - name: Run the real holdings-currency backfill
+        # Same exit-code-gating contract as the `migrate` job: a
+        # non-zero exit here fails this step, which fails the job,
+        # which fails the whole workflow run. The backfill itself
+        # writes exactly one row to migration_log on every invocation
+        # (success/dry-run/failure) and a single schema_migrations row
+        # on success (idempotent via ON CONFLICT DO NOTHING) -- so
+        # rerunning this job on the same deployment is a real no-op,
+        # not a partial-state hazard.
+        run: python -m scripts.backfill_holdings_currency
+
+      - name: Verify the holdings-currency backfill
+        # Story acceptance criterion: "A real verification script
+        # validates migration success" (scripts/verify_holdings_currency_backfill.py).
+        # Runs unconditionally after the backfill so a successful
+        # backfill + a verification failure both surface as a
+        # workflow failure -- catching the case where the backfill's
+        # own logging says SUCCESS but the actual `records` rows
+        # weren't normalized.
+        run: python -m scripts.verify_holdings_currency_backfill
