@@ -100,6 +100,22 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS migration_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    migration_name VARCHAR NOT NULL,
+                    run_at TIMESTAMPTZ NOT NULL,
+                    status VARCHAR NOT NULL,
+                    rows_affected BIGINT,
+                    error_message TEXT,
+                    dry_run BOOLEAN NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_migration_log_name_run ON migration_log (migration_name, run_at)"
+            )
 
     def _redis(self) -> redis.Redis:
         if self._redis_client is None:

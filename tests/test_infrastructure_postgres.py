@@ -150,3 +150,158 @@ def test_constructing_default_infrastructure_does_not_touch_network():
     )
 
     assert infra is not None
+
+
+@requires_postgres
+def test_migration_log_table_has_required_columns_and_types(infra):
+    """STORY-1: the migration_log table exists with all required columns
+    and types after _ensure_schema runs (triggered lazily by a method call)."""
+    import psycopg
+    # Touching any Postgres method triggers _ensure_schema; we just need
+    # a side-effect-bearing call, store() is the simplest.
+    infra.store(f"test_migration_log_probe_{uuid.uuid4().hex}", {"id": "probe", "x": 1})
+
+    expected_columns = {
+        "id": "bigint",
+        "migration_name": "character varying",
+        "run_at": "timestamp with time zone",
+        "status": "character varying",
+        "rows_affected": "bigint",
+        "error_message": "text",
+        "dry_run": "boolean",
+    }
+
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        # 1. table exists with the expected columns and types
+        cursor.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = 'migration_log'
+            ORDER BY column_name
+            """
+        )
+        actual = dict(cursor.fetchall())
+
+    assert actual == expected_columns, (
+        f"migration_log columns mismatch.\n"
+        f"  expected: {expected_columns}\n"
+        f"  actual:   {actual}"
+    )
+
+
+@requires_postgres
+def test_migration_log_index_exists_on_migration_name_and_run_at(infra):
+    """STORY-1: index idx_migration_log_name_run exists on
+    (migration_name, run_at)."""
+    import psycopg
+    infra.store(f"test_migration_log_idx_{uuid.uuid4().hex}", {"id": "probe", "x": 1})
+
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public' AND tablename = 'migration_log'
+            """
+        )
+        rows = cursor.fetchall()
+
+    names = {row[0] for row in rows}
+    defs = {row[1] for row in rows}
+    assert "idx_migration_log_name_run" in names, (
+        f"idx_migration_log_name_run not found; pg_indexes returned: {rows}"
+    )
+    # Confirm it covers exactly the required columns in the required order
+    matching = [d for d in defs if "idx_migration_log_name_run" in d]
+    assert any(
+        "(migration_name, run_at)" in d.lower() for d in matching
+    ), f"index definition does not match required columns: {matching}"
+
+
+@requires_postgres
+def test_ensure_schema_is_idempotent_for_migration_log(infra):
+    """STORY-1: running _ensure_schema twice does not raise and leaves
+    the migration_log table usable. Insert a sentinel row after the
+    first run, re-trigger schema creation, and confirm the row is
+    still there."""
+    import psycopg
+    sentinel_id = f"idem-{uuid.uuid4().hex}"
+
+    # First run + insert a sentinel row.
+    infra.store(f"test_migration_log_idem_{uuid.uuid4().hex}", {"id": "p", "x": 1})
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO migration_log
+                (migration_name, run_at, status, rows_affected, error_message, dry_run)
+            VALUES (%s, now(), %s, %s, %s, %s)
+            RETURNING id
+            """,
+            ("sentinel_migration", "ok", 7, None, False),
+        )
+        sentinel_pk = cursor.fetchone()[0]
+
+    # Second run: call _ensure_schema again on the same connection.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn:
+        DefaultInfrastructure._ensure_schema(conn)  # must not raise
+
+    # Sentinel row must still be there with the same id and rows_affected.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT rows_affected, status FROM migration_log WHERE id = %s",
+            (sentinel_pk,),
+        )
+        row = cursor.fetchone()
+
+    assert row is not None, "sentinel row was lost after re-running _ensure_schema"
+    assert row == (7, "ok"), f"sentinel row data altered: {row}"
+
+
+@requires_postgres
+def test_ensure_schema_does_not_alter_existing_tables(infra):
+    """STORY-1: pre-existing rows in the records / queue_events /
+    scheduled_tasks tables are not altered or lost when _ensure_schema
+    runs (which is what happens every time a new DefaultInfrastructure
+    opens its first connection)."""
+    import psycopg
+    table = f"test_migration_log_existing_{uuid.uuid4().hex}"
+
+    # Seed each of the three pre-existing tables through the public API.
+    infra.store(table, {"id": "rec-1", "name": "alpha"})
+    infra.publish(table, {"event": "beta"})
+    schedule_id = infra.schedule(3600.0, {"job": "gamma"})
+
+    # Drop the in-memory connection so the next call re-triggers _ensure_schema.
+    infra._pg_connection = None
+
+    # Trigger another schema run; pre-existing rows must survive.
+    infra.store(table, {"id": "rec-2", "name": "alpha2"})
+
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT data FROM records WHERE table_name = %s AND id = %s",
+            (table, "rec-1"),
+        )
+        rec_row = cursor.fetchone()
+        assert rec_row is not None and rec_row[0]["name"] == "alpha", (
+            f"records row altered/lost: {rec_row}"
+        )
+
+        cursor.execute(
+            "SELECT event FROM queue_events WHERE topic = %s",
+            (table,),
+        )
+        evt_row = cursor.fetchone()
+        assert evt_row is not None and evt_row[0]["event"] == "beta", (
+            f"queue_events row altered/lost: {evt_row}"
+        )
+
+        cursor.execute(
+            "SELECT task FROM scheduled_tasks WHERE id = %s",
+            (int(schedule_id),),
+        )
+        sched_row = cursor.fetchone()
+        assert sched_row is not None and sched_row[0]["job"] == "gamma", (
+            f"scheduled_tasks row altered/lost: {sched_row}"
+        )
