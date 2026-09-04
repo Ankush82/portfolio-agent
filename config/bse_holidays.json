@@ -1,0 +1,29 @@
+{
+  "_comment": "BSE (Bombay Stock Exchange) market holidays. Each entry is a real, observed BSE trading holiday — date in YYYY-MM-DD, name as listed on BSE's official holiday calendar. Kept in a SEPARATE file from NSE per STORY-11 acceptance criteria, even though most dates overlap with NSE's calendar — BSE occasionally diverges (e.g. extra Maharashtra-specific holidays) and operators need to be able to edit either side independently. Read by src/market_holidays.py and consumed via src/market_hours.py.",
+  "exchange": "BSE",
+  "display_name": "Bombay Stock Exchange",
+  "holidays": [
+    {"date": "2024-01-26", "name": "Republic Day"},
+    {"date": "2024-03-08", "name": "Maha Shivaratri"},
+    {"date": "2024-03-25", "name": "Holi"},
+    {"date": "2024-04-11", "name": "Id-Ul-Fitr (Ramadan Eid)"},
+    {"date": "2024-04-17", "name": "Sri Ram Navami"},
+    {"date": "2024-05-01", "name": "Maharashtra Day"},
+    {"date": "2024-08-15", "name": "Independence Day"},
+    {"date": "2024-10-02", "name": "Mahatma Gandhi Jayanti"},
+    {"date": "2024-11-01", "name": "Diwali (Laxmi Puja)"},
+    {"date": "2024-11-15", "name": "Guru Nanak Jayanti"},
+    {"date": "2024-12-25", "name": "Christmas"},
+    {"date": "2025-01-26", "name": "Republic Day"},
+    {"date": "2025-02-26", "name": "Maha Shivaratri"},
+    {"date": "2025-03-14", "name": "Holi"},
+    {"date": "2025-03-31", "name": "Id-Ul-Fitr (Ramadan Eid)"},
+    {"date": "2025-04-06", "name": "Sri Ram Navami"},
+    {"date": "2025-04-14", "name": "Dr. Baba Saheb Ambedkar Jayanti"},
+    {"date": "2025-08-15", "name": "Independence Day"},
+    {"date": "2025-10-02", "name": "Mahatma Gandhi Jayanti"},
+    {"date": "2025-10-21", "name": "Diwali (Laxmi Puja)"},
+    {"date": "2025-11-05", "name": "Guru Nanak Jayanti"},
+    {"date": "2025-12-25", "name": "Christmas"}
+  ]
+}
