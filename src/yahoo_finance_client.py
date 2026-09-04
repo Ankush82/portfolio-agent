@@ -133,6 +133,21 @@ def fetch_yahoo_finance_quote(symbol: str) -> dict:
                                   none exists), so this client surfaces
                                   that absence honestly as `None`
                                   rather than fabricating a value.
+      - `tradeable`             — `meta.tradeable` when present
+                                  (the real `True` / `False` flag
+                                  Yahoo Finance surfaces for a
+                                  tradable / delisted-or-suspended
+                                  symbol, verified live on real
+                                  responses), `None` when absent.
+                                  STORY-13: the public chart endpoint
+                                  only sometimes includes
+                                  `meta.tradeable`; this client
+                                  surfaces it honestly as
+                                  `True`/`False`/`None` rather than
+                                  fabricating a value — `None` is
+                                  the signal that the caller should
+                                  skip delisting detection for that
+                                  symbol without erroring.
 
     Raises `YahooFinanceError` on a real failure:
       - non-2xx HTTP response (`raise_for_status`),
@@ -342,4 +357,10 @@ def fetch_yahoo_finance_quote(symbol: str) -> dict:
         "fifty_two_week_high": meta.get("fiftyTwoWeekHigh"),
         "fifty_two_week_low": meta.get("fiftyTwoWeekLow"),
         "market_cap": None,  # documented absence — see module docstring
+        # STORY-13: meta.tradeable is sometimes present in the live
+        # response (True = still tradable, False = delisted /
+        # suspended), sometimes absent. Surface it honestly:
+        # True/False when the API gave it, None when the API didn't —
+        # never fabricate a value either way.
+        "tradeable": meta.get("tradeable"),
     }
