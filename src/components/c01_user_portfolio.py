@@ -53,6 +53,77 @@ _VALID_CURRENCIES = ("USD", "INR")
 _VALID_EXCHANGES = ("NYSE", "NASDAQ", "NSE", "BSE")
 _VALID_SYMBOL_SUFFIXES = (None, ".NS", ".BO")
 
+# NSE body: 1-20 chars from [A-Z0-9&-] before the literal '.NS' suffix.
+# BSE body: exactly 6 digits before the literal '.BO' suffix.
+# Suffixes are case-sensitive: '.ns' / '.bo' must be rejected.
+import re as _re
+
+_NSE_BODY_PATTERN = _re.compile(r"^[A-Z0-9&\-]{1,20}$")
+_BSE_BODY_PATTERN = _re.compile(r"^[0-9]{6}$")
+
+
+def validate_stock_symbol(symbol: str) -> None:
+    """Server-side validation of a full stock symbol string (STORY-3).
+
+    Returns ``None`` for a valid symbol; raises ``ValueError`` with a
+    clear, message-bearing error on an invalid one. Rules:
+
+      * NSE: 1-20 characters from ``[A-Z0-9&-]`` followed by the
+        literal ``.NS`` suffix (e.g. ``RELIANCE.NS``, ``M&M.NS``).
+      * BSE: exactly 6 digits followed by the literal ``.BO`` suffix
+        (e.g. ``500325.BO``).
+      * US-format symbols without a ``.NS``/``.BO`` suffix are
+        accepted as-is — no new US-specific rules are invented here,
+        matching the "existing format" contract that already existed
+        before this story.
+      * Suffixes are case-sensitive: ``.ns``/``.bo`` (lowercase) are
+        rejected with a clear error rather than silently coerced.
+
+    This function is called from ``Holding.__post_init__`` whenever
+    ``symbol_suffix`` is one of ``.NS``/``.BO`` (i.e. an Indian
+    exchange, where the suffix is part of the symbol's identity). US
+    symbols (``symbol_suffix is None``) skip this validation entirely
+    so the existing pre-STORY-3 behaviour for them is preserved
+    verbatim.
+    """
+    if not isinstance(symbol, str):
+        raise ValueError(
+            f"stock symbol must be a string; got {type(symbol).__name__}"
+        )
+
+    if symbol.endswith(".NS"):
+        body = symbol[: -len(".NS")]
+        if not _NSE_BODY_PATTERN.match(body):
+            raise ValueError(
+                f"invalid NSE stock symbol {symbol!r}: body before '.NS' must be "
+                f"1-20 characters from [A-Z0-9&-]; got body {body!r}"
+            )
+        return None
+
+    if symbol.endswith(".BO"):
+        body = symbol[: -len(".BO")]
+        if not _BSE_BODY_PATTERN.match(body):
+            raise ValueError(
+                f"invalid BSE stock symbol {symbol!r}: body before '.BO' must be "
+                f"exactly 6 digits; got body {body!r}"
+            )
+        return None
+
+    # Lowercase suffixes are a common typo and must be rejected
+    # explicitly -- a silent upper() would mask the user's mistake and
+    # leave them wondering why their broker lookup returns nothing.
+    if symbol.endswith(".ns") or symbol.endswith(".bo"):
+        suffix = symbol[-4:]
+        raise ValueError(
+            f"invalid stock symbol {symbol!r}: suffix {suffix!r} is lowercase; "
+            f"suffixes are case-sensitive (use '.NS' or '.BO')"
+        )
+
+    # No suffix -> treated as an existing US-format symbol. No new
+    # US-specific rules are invented here; whatever passed validation
+    # before this story continues to pass.
+    return None
+
 
 def _coerce_quantity_to_decimal(value) -> Decimal:
     """Coerce a quantity input (int, float, str, Decimal) to a
@@ -105,6 +176,13 @@ class Holding:
                 f"Holding.symbol_suffix must be one of {_VALID_SYMBOL_SUFFIXES}; "
                 f"got {self.symbol_suffix!r}"
             )
+        # Validate the FULL symbol string (security_id + symbol_suffix)
+        # when an Indian suffix is set -- not just the suffix in
+        # isolation (STORY-3). US-format symbols (symbol_suffix is None)
+        # are passed through unchanged: no new US rules are invented
+        # here, only the NSE/BSE format rules from STORY-3 are enforced.
+        if self.symbol_suffix in (".NS", ".BO"):
+            validate_stock_symbol(f"{self.security_id}{self.symbol_suffix}")
         # Quantity is Decimal, not float — see _coerce_quantity_to_decimal.
         # Always coerce/quantize, even when the caller already passed a
         # Decimal: a Decimal with more than 4 places (e.g. Decimal("12.123456789"))
