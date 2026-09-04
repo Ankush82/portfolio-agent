@@ -9,6 +9,7 @@ dependencies = [
     "requests>=2.31",
     "mem0ai>=2.0",
     "fastembed>=0.8",
+    "flask>=3.0",
 ]
 
 [project.optional-dependencies]
