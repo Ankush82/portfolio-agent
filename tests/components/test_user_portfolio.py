@@ -745,8 +745,19 @@ def test_qa_story1_holding_field_defaults_and_validation_round_trip():
 
     # --- AC #1: symbol_suffix default None + valid set, invalid rejected ---
     assert usd_default.symbol_suffix is None, "default symbol_suffix must be None"
+    # security_id must satisfy validate_stock_symbol's real per-suffix
+    # format rules (added by a later story) once symbol_suffix is one
+    # of .NS/.BO -- "X" alone is a valid NSE body ([A-Z0-9&-]{1,20}) but
+    # not a valid BSE one (exactly 6 digits), so a single placeholder ID
+    # can't cover all three cases the way it could before that story.
+    _placeholder_security_id = {None: "X", ".NS": "X", ".BO": "500325"}
     for valid_suffix in (None, ".NS", ".BO"):
-        Holding(portfolio_id="pf-qa", security_id="X", quantity=10, symbol_suffix=valid_suffix)
+        Holding(
+            portfolio_id="pf-qa",
+            security_id=_placeholder_security_id[valid_suffix],
+            quantity=10,
+            symbol_suffix=valid_suffix,
+        )
     for bad_suffix in (".L", ".N", ".NSX", ".BSE", "NS", ".ns", ".bo", ""):
         with pytest.raises(ValueError) as exc_info:
             Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10, symbol_suffix=bad_suffix)
