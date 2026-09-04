@@ -213,3 +213,71 @@ class DefaultInfrastructure:
         Raises KeyError if `name` isn't set, same as `os.environ[name]`."""
         with traced("DefaultInfrastructure.get_secret"):
             return os.environ[name]
+
+    def load_us_tickers(self, csv_path: str = '/app/data/us_tickers.csv') -> None:
+        """Loads the US ticker universe into a session-scoped TEMP
+        table (`tmp_us_tickers`) from a one-ticker-per-line CSV at
+        `csv_path`. Tickers containing '.' or '-' are skipped (those
+        are non-US formats: e.g. Berkshire's BRK.B, dual-class shares
+        with hyphens). Duplicates collapse via the PRIMARY KEY. If
+        `csv_path` doesn't exist the temp table is left empty and the
+        method returns silently — this is so the dev path
+        (`/app/data/us_tickers.csv`) being missing doesn't take down
+        callers that should still be able to count an empty US set."""
+        with traced("DefaultInfrastructure.load_us_tickers"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_us_tickers (
+                        ticker TEXT PRIMARY KEY
+                    )
+                    """
+                )
+                cursor.execute("TRUNCATE TABLE tmp_us_tickers")
+
+                try:
+                    with open(csv_path, 'r') as f:
+                        for line in f:
+                            ticker = line.strip()
+                            if not ticker:
+                                continue
+                            if '.' in ticker or '-' in ticker:
+                                continue
+                            cursor.execute(
+                                """
+                                INSERT INTO tmp_us_tickers (ticker) VALUES (%s)
+                                ON CONFLICT (ticker) DO NOTHING
+                                """,
+                                (ticker,),
+                            )
+                except FileNotFoundError:
+                    return
+
+    def count_us_stocks(self, portfolio_id: str | None = None) -> int:
+        """Counts `holdings` records whose `security_id` is present in
+        the just-loaded `tmp_us_tickers` set — i.e. the number of US-
+        listed stocks currently held. When `portfolio_id` is given,
+        the count is restricted to that portfolio; otherwise it's the
+        total across every portfolio."""
+        with traced("DefaultInfrastructure.count_us_stocks"):
+            with self._connection().cursor() as cursor:
+                if portfolio_id is None:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM records
+                        WHERE table_name = 'holdings'
+                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                        """
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM records
+                        WHERE table_name = 'holdings'
+                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                          AND data->>'portfolio_id' = %s
+                        """,
+                        (portfolio_id,),
+                    )
+                row = cursor.fetchone()
+            return row[0] if row is not None else 0
