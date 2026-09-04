@@ -198,6 +198,19 @@ class Holding:
             self.exchange = "NSE"
         elif self.symbol_suffix == ".BO":
             self.exchange = "BSE"
+        # Currency auto-derivation from exchange (STORY-6). Runs AFTER
+        # the exchange auto-detection above so it sees the *final*
+        # exchange value (whether the caller passed it or the suffix
+        # assigned it). NSE/BSE always mean Indian rupees, so the
+        # caller's currency is overridden to 'INR' for those — the
+        # same "suffix / exchange is authoritative" pattern the
+        # exchange-from-suffix block above already uses. For every
+        # other exchange (NYSE, NASDAQ, None), the caller's currency
+        # is preserved as-is: no new US-specific rule is invented, and
+        # the existing 'USD' default keeps working for callers who
+        # don't know about this field at all.
+        if self.exchange in ("NSE", "BSE"):
+            self.currency = "INR"
         # Quantity is Decimal, not float — see _coerce_quantity_to_decimal.
         # Always coerce/quantize, even when the caller already passed a
         # Decimal: a Decimal with more than 4 places (e.g. Decimal("12.123456789"))
