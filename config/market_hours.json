@@ -1,0 +1,41 @@
+{
+  "_comment": "Trading-hours configuration for market-status detection. Edited by ops without code changes. Times are LOCAL to the market's zone (the zoneinfo zone name in 'timezone'). 'trading_days' are 0=Monday .. 6=Sunday (matches Python's datetime.weekday()). 'session_blocks' is a list of {open, close} in HH:MM local time, in case a market ever has multiple sessions per day; is_market_open/market_status handle the list shape transparently.",
+  "markets": {
+    "NSE": {
+      "display_name": "National Stock Exchange of India",
+      "country": "IN",
+      "timezone": "Asia/Kolkata",
+      "trading_days": [0, 1, 2, 3, 4],
+      "session_blocks": [
+        {"open": "09:15", "close": "15:30"}
+      ]
+    },
+    "BSE": {
+      "display_name": "Bombay Stock Exchange",
+      "country": "IN",
+      "timezone": "Asia/Kolkata",
+      "trading_days": [0, 1, 2, 3, 4],
+      "session_blocks": [
+        {"open": "09:15", "close": "15:30"}
+      ]
+    },
+    "NYSE": {
+      "display_name": "New York Stock Exchange",
+      "country": "US",
+      "timezone": "America/New_York",
+      "trading_days": [0, 1, 2, 3, 4],
+      "session_blocks": [
+        {"open": "09:30", "close": "16:00"}
+      ]
+    },
+    "NASDAQ": {
+      "display_name": "NASDAQ Stock Market",
+      "country": "US",
+      "timezone": "America/New_York",
+      "trading_days": [0, 1, 2, 3, 4],
+      "session_blocks": [
+        {"open": "09:30", "close": "16:00"}
+      ]
+    }
+  }
+}
