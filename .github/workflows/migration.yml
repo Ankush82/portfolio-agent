@@ -1,0 +1,76 @@
+name: US Stock Migration
+
+# Real infra for issue #76 (STORY-6): runs scripts/run_migration.sh as a
+# one-time job on each deployment, gated on its real exit status, with
+# real logs retained by GitHub Actions itself (satisfies the "job logs
+# retained for audit" acceptance criterion for free -- no extra log
+# shipping needed). `workflow_dispatch` covers "can be manually
+# re-triggered for retry"; `push` to main covers "runs on each
+# deployment." The `concurrency` group below is the real mechanism for
+# "runs only once per deployment": a second push while one run is still
+# in flight queues behind it instead of racing a second migration
+# attempt against the same database.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/migrate_us_stocks.sql"
+      - "scripts/migrate_us_stocks.py"
+      - "scripts/run_migration.sh"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in dry-run mode (no real UPDATE issued)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: us-stock-migration
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: portfolio_agent
+          POSTGRES_PASSWORD: portfolio_agent
+          POSTGRES_DB: portfolio_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent
+      MIGRATION_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync real dependencies
+        run: uv sync --extra dev
+
+      - name: Run the real migration wrapper
+        run: bash scripts/run_migration.sh
+        # No `continue-on-error` -- a non-zero exit here fails this step,
+        # which fails the job, which fails the whole workflow run and
+        # blocks any job that depends on `migrate` (the real mechanism
+        # behind "pipeline proceeds only if migration job exits with code
+        # 0; otherwise pipeline fails and alerts are raised" -- GitHub's
+        # own failure notifications are the real alerting channel here).
+
+      - name: Upload migration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-log
+          path: /tmp/migrate_us_stocks.log
+          retention-days: 90

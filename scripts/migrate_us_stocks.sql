@@ -22,8 +22,16 @@
 -- exactly as QA verified it rather than hand-edited unverified to match
 -- -- the join key needs a real decision (and a re-tested change) in a
 -- follow-up story, not a guess made while resolving a merge conflict.
-
-\echo '== migrate_us_stocks: start =='
+--
+-- NOTE (real bug, found live while merging): this file has two real
+-- callers with incompatible needs -- run_migration.sh invokes it via the
+-- real `psql` CLI (which understands `\echo` and other backslash
+-- meta-commands), but scripts/migrate_us_stocks.py's Python entry point
+-- reads this same file and executes it directly through psycopg, which
+-- only understands real SQL and raises a syntax error on `\echo`. No
+-- `\echo` (or any other psql meta-command) belongs in this file again --
+-- plain `--` comments carry the same information for a human reader
+-- without breaking the psycopg-based caller.
 
 -- ---------------------------------------------------------------------------
 -- (1) Load the US ticker CSV into tmp_us_tickers
@@ -43,7 +51,7 @@
 --
 -- For now this section is a placeholder so the wrapper has a runnable
 -- script end-to-end.
-\echo '-- (1) load US ticker CSV: STUB --'
+-- (1) load US ticker CSV: STUB
 
 -- ---------------------------------------------------------------------------
 -- (2) Count matched rows
@@ -56,7 +64,7 @@
 --     FROM stocks s
 --     JOIN tmp_us_tickers t ON s.ticker = t.ticker
 --    WHERE s.country IS DISTINCT FROM 'US' OR s.exchange IS DISTINCT FROM t.exchange ...;
-\echo '-- (2) count matched rows: STUB --'
+-- (2) count matched rows: STUB
 
 -- ---------------------------------------------------------------------------
 -- (3) Perform the UPDATE (STORY-3, issue #65)
@@ -79,5 +87,3 @@ WHERE stocks.id = tmp_us_tickers.id
         OR stocks.symbol_suffix IS NOT NULL
       )
 RETURNING stocks.id;
-
-\echo '== migrate_us_stocks: end =='

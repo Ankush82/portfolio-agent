@@ -15,6 +15,15 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Real, enforced resource ceiling -- issue #77 (performance validation)
+    # needs a concrete "allocated database instance capacity" to measure
+    # CPU usage against; without one, "does not exceed 70%" has nothing
+    # real to be 70% of. 2 CPUs is a believable local stand-in for a
+    # small managed Postgres instance size.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
 
   redis:
     image: redis:7
