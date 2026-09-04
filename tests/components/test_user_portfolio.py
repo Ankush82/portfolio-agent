@@ -24,6 +24,7 @@ from components.c01_user_portfolio import (
     StubUserPortfolio,
     Transaction,
     User,
+    validate_stock_symbol,
 )
 from components.c04_knowledge_entity import DefaultKnowledgeEntity
 from cross_cutting import observability
@@ -638,10 +639,17 @@ def test_holding_rejects_an_unknown_exchange_with_a_clear_error():
 
 
 def test_holding_accepts_each_valid_symbol_suffix():
-    """None (default), '.NS' for NSE-listed, '.BO' for BSE-listed."""
-    for suffix in (None, ".NS", ".BO"):
-        holding = Holding(portfolio_id="pf-1", security_id="X", quantity=10, symbol_suffix=suffix)
-        assert holding.symbol_suffix == suffix
+    """None (default), '.NS' for NSE-listed, '.BO' for BSE-listed.
+
+    The security_id must be valid for the chosen suffix (1-20 chars
+    from [A-Z0-9&-] for .NS, exactly 6 digits for .BO) now that
+    STORY-3's full-symbol validator runs in __post_init__."""
+    holding_ns = Holding(portfolio_id="pf-1", security_id="X", quantity=10, symbol_suffix=".NS")
+    holding_bo = Holding(portfolio_id="pf-1", security_id="100000", quantity=10, symbol_suffix=".BO")
+    holding_none = Holding(portfolio_id="pf-1", security_id="X", quantity=10, symbol_suffix=None)
+    assert holding_ns.symbol_suffix == ".NS"
+    assert holding_bo.symbol_suffix == ".BO"
+    assert holding_none.symbol_suffix is None
 
 
 def test_holding_defaults_symbol_suffix_to_none_when_not_specified():
@@ -784,3 +792,184 @@ def test_qa_story1_holding_field_defaults_and_validation_round_trip():
     for bad_q in (None, object(), [1, 2, 3], {"x": 1}):
         with pytest.raises(ValueError, match=r"Holding\.quantity must be a real number"):
             Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=bad_q)
+
+
+# --- STORY-3: validate_stock_symbol (server-side, NSE/BSE/US) -----------
+
+
+def test_validate_stock_symbol_accepts_the_storys_nse_example_reliance_ns():
+    """AC: NSE example RELIANCE.NS passes."""
+    assert validate_stock_symbol("RELIANCE.NS") is None
+
+
+def test_validate_stock_symbol_accepts_the_storys_nse_example_m_and_m_ns_with_ampersand():
+    """AC: NSE example M&M.NS passes -- ampersand is in [A-Z0-9&-]."""
+    assert validate_stock_symbol("M&M.NS") is None
+
+
+def test_validate_stock_symbol_accepts_the_storys_bse_example_500325_bo():
+    """AC: BSE example 500325.BO passes (exactly 6 digits + .BO)."""
+    assert validate_stock_symbol("500325.BO") is None
+
+
+def test_validate_stock_symbol_accepts_nse_body_at_minimum_length_one_char():
+    """AC: NSE body is 1-20 chars from [A-Z0-9&-]; the 1-char edge
+    must work."""
+    assert validate_stock_symbol("A.NS") is None
+
+
+def test_validate_stock_symbol_accepts_nse_body_at_maximum_length_twenty_chars():
+    """AC: NSE body is 1-20 chars from [A-Z0-9&-]; the 20-char edge
+    must work."""
+    twenty_char_body = "A" * 20
+    assert validate_stock_symbol(f"{twenty_char_body}.NS") is None
+
+
+def test_validate_stock_symbol_accepts_another_valid_bse_6digit_body():
+    """AC: BSE body is exactly 6 digits; another valid body passes."""
+    assert validate_stock_symbol("100000.BO") is None
+
+
+def test_validate_stock_symbol_rejects_nse_symbol_with_invalid_char_at_sign():
+    """AC: invalid NSE example REL@IANCE.NS fails. '@' is not in
+    [A-Z0-9&-]."""
+    with pytest.raises(ValueError, match=r"invalid NSE stock symbol"):
+        validate_stock_symbol("REL@IANCE.NS")
+
+
+def test_validate_stock_symbol_rejects_nse_body_longer_than_twenty_chars():
+    """AC: NSE body is 1-20 chars; a 21-char body is rejected with a
+    clear error mentioning the NSE format."""
+    twenty_one_char_body = "A" * 21
+    with pytest.raises(ValueError, match=r"invalid NSE stock symbol"):
+        validate_stock_symbol(f"{twenty_one_char_body}.NS")
+
+
+def test_validate_stock_symbol_rejects_nse_symbol_with_empty_body_before_suffix():
+    """AC: NSE body must be 1-20 chars; an empty body is rejected."""
+    with pytest.raises(ValueError, match=r"invalid NSE stock symbol"):
+        validate_stock_symbol(".NS")
+
+
+def test_validate_stock_symbol_rejects_bse_symbol_with_only_five_digits():
+    """AC: invalid BSE example 12345.BO fails (only 5 digits)."""
+    with pytest.raises(ValueError, match=r"invalid BSE stock symbol"):
+        validate_stock_symbol("12345.BO")
+
+
+def test_validate_stock_symbol_rejects_bse_symbol_with_seven_digits():
+    """AC: BSE body must be exactly 6 digits; 7 digits are rejected."""
+    with pytest.raises(ValueError, match=r"invalid BSE stock symbol"):
+        validate_stock_symbol("1234567.BO")
+
+
+def test_validate_stock_symbol_rejects_bse_symbol_with_letters_in_body():
+    """AC: BSE body must be exactly 6 *digits*; letters in the body
+    are rejected."""
+    with pytest.raises(ValueError, match=r"invalid BSE stock symbol"):
+        validate_stock_symbol("ABC123.BO")
+
+
+def test_validate_stock_symbol_rejects_lowercase_ns_suffix_with_a_clear_case_sensitive_error():
+    """AC: lowercase suffix .ns is rejected with a clear error
+    mentioning case-sensitivity (the story's reliance.ns example)."""
+    with pytest.raises(ValueError, match=r"(?i)case-sensitive|lowercase"):
+        validate_stock_symbol("reliance.ns")
+
+
+def test_validate_stock_symbol_rejects_lowercase_bo_suffix_with_a_clear_case_sensitive_error():
+    """AC: lowercase suffix .bo is rejected with a clear error
+    mentioning case-sensitivity."""
+    with pytest.raises(ValueError, match=r"(?i)case-sensitive|lowercase"):
+        validate_stock_symbol("reliance.bo")
+
+
+def test_validate_stock_symbol_rejects_uppercase_body_with_lowercase_ns_suffix():
+    """AC: suffix case-sensitivity is independent of body case --
+    RELIANCE.ns is still rejected for its lowercase suffix."""
+    with pytest.raises(ValueError, match=r"(?i)case-sensitive|lowercase"):
+        validate_stock_symbol("RELIANCE.ns")
+
+
+def test_validate_stock_symbol_rejects_bse_body_with_lowercase_bo_suffix():
+    """AC: 500325.bo (lowercase suffix on a valid BSE body) is still
+    rejected for the suffix being lowercase."""
+    with pytest.raises(ValueError, match=r"(?i)case-sensitive|lowercase"):
+        validate_stock_symbol("500325.bo")
+
+
+def test_validate_stock_symbol_accepts_us_format_symbols_without_any_new_rules():
+    """AC: US-format symbols (no .NS/.BO suffix) are accepted
+    unchanged -- no new US-specific rules invented. AAPL, BRK.B, and
+    a long ticker all pass without rejection."""
+    assert validate_stock_symbol("AAPL") is None
+    assert validate_stock_symbol("BRK.B") is None
+    assert validate_stock_symbol("A" * 30) is None  # arbitrary length US-style
+    assert validate_stock_symbol("123") is None  # pure digits, no suffix
+
+
+def test_validate_stock_symbol_rejects_non_string_input_with_a_clear_error():
+    """Defensive: a non-string input (None, int, list) raises a clear
+    ValueError rather than crashing inside the regex match."""
+    with pytest.raises(ValueError, match=r"stock symbol must be a string"):
+        validate_stock_symbol(None)
+    with pytest.raises(ValueError, match=r"stock symbol must be a string"):
+        validate_stock_symbol(12345)
+    with pytest.raises(ValueError, match=r"stock symbol must be a string"):
+        validate_stock_symbol(["RELIANCE", ".NS"])
+
+
+# --- STORY-3 integration: Holding.__post_init__ calls the validator ------
+
+
+def test_holding_accepts_a_valid_nse_full_symbol_via_security_id_and_suffix():
+    """Integration: Holding(security_id='RELIANCE', symbol_suffix='.NS')
+    constructs successfully -- the new validator wired into
+    Holding.__post_init__ accepts the full symbol string."""
+    holding = Holding(portfolio_id="pf-1", security_id="RELIANCE", quantity=10, symbol_suffix=".NS")
+    assert holding.security_id == "RELIANCE"
+    assert holding.symbol_suffix == ".NS"
+
+
+def test_holding_accepts_a_valid_bse_full_symbol_via_security_id_and_suffix():
+    """Integration: Holding(security_id='500325', symbol_suffix='.BO')
+    constructs successfully."""
+    holding = Holding(portfolio_id="pf-1", security_id="500325", quantity=10, symbol_suffix=".BO")
+    assert holding.security_id == "500325"
+    assert holding.symbol_suffix == ".BO"
+
+
+def test_holding_rejects_invalid_nse_body_via_security_id_with_a_clear_error():
+    """Integration: an invalid NSE body (REL@IANCE with '@') fails
+    through Holding.__post_init__'s call to validate_stock_symbol, with
+    the same clear error as the standalone function."""
+    with pytest.raises(ValueError, match=r"invalid NSE stock symbol"):
+        Holding(portfolio_id="pf-1", security_id="REL@IANCE", quantity=10, symbol_suffix=".NS")
+
+
+def test_holding_rejects_invalid_bse_body_with_only_5_digits_via_security_id():
+    """Integration: 12345 (only 5 digits before .BO) fails through
+    Holding.__post_init__ -- the standalone '12345.BO' example
+    flows through Holding too."""
+    with pytest.raises(ValueError, match=r"invalid BSE stock symbol"):
+        Holding(portfolio_id="pf-1", security_id="12345", quantity=10, symbol_suffix=".BO")
+
+
+def test_holding_skips_validate_stock_symbol_for_us_format_symbols_with_no_suffix():
+    """Integration: a US-format symbol (symbol_suffix=None) skips the
+    new validator entirely -- no new US rules are invented; existing
+    callers keep working without any code change."""
+    # Plain US symbol, no exchange/suffix set -- exactly the pre-STORY-3
+    # behavior, must keep constructing.
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=10)
+    assert holding.security_id == "AAPL"
+    assert holding.symbol_suffix is None
+
+
+def test_holding_still_rejects_lowercase_suffix_via_the_existing_symbol_suffix_check():
+    """Integration: a lowercase suffix passed as symbol_suffix is
+    caught by the *existing* _VALID_SYMBOL_SUFFIXES check (which runs
+    before the new validator), so callers see the same clear error
+    about the valid suffix set they saw before STORY-3."""
+    with pytest.raises(ValueError, match=r"Holding\.symbol_suffix must be one of"):
+        Holding(portfolio_id="pf-1", security_id="RELIANCE", quantity=10, symbol_suffix=".ns")
