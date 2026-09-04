@@ -22,7 +22,7 @@ from typing import Any
 
 import psycopg
 import redis
-from psycopg.types.json import Json
+from psycopg.types.json import Jsonb
 
 from cross_cutting.observability import traced
 
@@ -100,6 +100,22 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS migration_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    migration_name VARCHAR NOT NULL,
+                    run_at TIMESTAMPTZ NOT NULL,
+                    status VARCHAR NOT NULL,
+                    rows_affected BIGINT,
+                    error_message TEXT,
+                    dry_run BOOLEAN NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_migration_log_name_run ON migration_log (migration_name, run_at)"
+            )
 
     def _redis(self) -> redis.Redis:
         if self._redis_client is None:
@@ -121,7 +137,7 @@ class DefaultInfrastructure:
                     VALUES (%s, %s, %s)
                     ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
                     """,
-                    (table, record_id, Json(record)),
+                    (table, record_id, Jsonb(record)),
                 )
             return record_id
 
@@ -143,7 +159,7 @@ class DefaultInfrastructure:
             with self._connection().cursor() as cursor:
                 cursor.execute(
                     "SELECT data FROM records WHERE table_name = %s AND data @> %s",
-                    (table, Json(filters)),
+                    (table, Jsonb(filters)),
                 )
                 rows = cursor.fetchall()
             return [row[0] for row in rows]
@@ -153,7 +169,7 @@ class DefaultInfrastructure:
             with self._connection().cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO queue_events (topic, event) VALUES (%s, %s)",
-                    (topic, Json(event)),
+                    (topic, Jsonb(event)),
                 )
 
     def subscribe(self, topic: str, handler: Any) -> None:
@@ -191,7 +207,7 @@ class DefaultInfrastructure:
                     VALUES (now() + %s * interval '1 second', %s)
                     RETURNING id
                     """,
-                    (delay_seconds, Json(task)),
+                    (delay_seconds, Jsonb(task)),
                 )
                 row = cursor.fetchone()
             return str(row[0])
@@ -213,3 +229,71 @@ class DefaultInfrastructure:
         Raises KeyError if `name` isn't set, same as `os.environ[name]`."""
         with traced("DefaultInfrastructure.get_secret"):
             return os.environ[name]
+
+    def load_us_tickers(self, csv_path: str = '/app/data/us_tickers.csv') -> None:
+        """Loads the US ticker universe into a session-scoped TEMP
+        table (`tmp_us_tickers`) from a one-ticker-per-line CSV at
+        `csv_path`. Tickers containing '.' or '-' are skipped (those
+        are non-US formats: e.g. Berkshire's BRK.B, dual-class shares
+        with hyphens). Duplicates collapse via the PRIMARY KEY. If
+        `csv_path` doesn't exist the temp table is left empty and the
+        method returns silently — this is so the dev path
+        (`/app/data/us_tickers.csv`) being missing doesn't take down
+        callers that should still be able to count an empty US set."""
+        with traced("DefaultInfrastructure.load_us_tickers"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_us_tickers (
+                        ticker TEXT PRIMARY KEY
+                    )
+                    """
+                )
+                cursor.execute("TRUNCATE TABLE tmp_us_tickers")
+
+                try:
+                    with open(csv_path, 'r') as f:
+                        for line in f:
+                            ticker = line.strip()
+                            if not ticker:
+                                continue
+                            if '.' in ticker or '-' in ticker:
+                                continue
+                            cursor.execute(
+                                """
+                                INSERT INTO tmp_us_tickers (ticker) VALUES (%s)
+                                ON CONFLICT (ticker) DO NOTHING
+                                """,
+                                (ticker,),
+                            )
+                except FileNotFoundError:
+                    return
+
+    def count_us_stocks(self, portfolio_id: str | None = None) -> int:
+        """Counts `holdings` records whose `security_id` is present in
+        the just-loaded `tmp_us_tickers` set — i.e. the number of US-
+        listed stocks currently held. When `portfolio_id` is given,
+        the count is restricted to that portfolio; otherwise it's the
+        total across every portfolio."""
+        with traced("DefaultInfrastructure.count_us_stocks"):
+            with self._connection().cursor() as cursor:
+                if portfolio_id is None:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM records
+                        WHERE table_name = 'holdings'
+                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                        """
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) FROM records
+                        WHERE table_name = 'holdings'
+                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                          AND data->>'portfolio_id' = %s
+                        """,
+                        (portfolio_id,),
+                    )
+                row = cursor.fetchone()
+            return row[0] if row is not None else 0
