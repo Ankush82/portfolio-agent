@@ -26,6 +26,7 @@ Policy, Portfolio -> Event & Analysis, User -> Notification.
 
 import uuid
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
@@ -48,11 +49,68 @@ class Portfolio:
     user_id: str
 
 
+_VALID_CURRENCIES = ("USD", "INR")
+_VALID_EXCHANGES = ("NYSE", "NASDAQ", "NSE", "BSE")
+_VALID_SYMBOL_SUFFIXES = (None, ".NS", ".BO")
+
+
+def _coerce_quantity_to_decimal(value) -> Decimal:
+    """Coerce a quantity input (int, float, str, Decimal) to a
+    Decimal with 4 decimal places of precision. Raises ValueError on
+    non-numeric input — matching the DECIMAL(18,4) intent in
+    STORY-1's schema description, and keeping the rest of this
+    module's behaviour honest about what quantity really is."""
+    try:
+        quantized = Decimal(str(value)).quantize(Decimal("0.0001"))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(
+            f"Holding.quantity must be a real number (int/float/Decimal/str); got {value!r}"
+        ) from exc
+    return quantized
+
+
 @dataclass
 class Holding:
     portfolio_id: str
     security_id: str
-    quantity: float
+    quantity: Decimal
+    currency: str = "USD"
+    exchange: str | None = None
+    symbol_suffix: str | None = None
+
+    def __post_init__(self) -> None:
+        # Currency: ENUM-like, restricted to {USD, INR}. Anything else
+        # raises a clear error rather than silently letting bad data
+        # through — a US-listed price feed will give nonsensical
+        # exposures if a row sneaks in with currency='EUR'.
+        if self.currency not in _VALID_CURRENCIES:
+            raise ValueError(
+                f"Holding.currency must be one of {_VALID_CURRENCIES}; got {self.currency!r}"
+            )
+        # Exchange: ENUM-like, restricted to {NYSE, NASDAQ, NSE, BSE} or
+        # None. None is explicitly allowed so an imported holding whose
+        # broker payload omits the field isn't rejected out of the box.
+        if self.exchange is not None and self.exchange not in _VALID_EXCHANGES:
+            raise ValueError(
+                f"Holding.exchange must be one of {_VALID_EXCHANGES} or None; got {self.exchange!r}"
+            )
+        # symbol_suffix: the same None-or-restricted pattern as
+        # exchange. Suffix is meaningful only when paired with an Indian
+        # exchange (NSE → .NS, BSE → .BO); other combinations are
+        # allowed for now because a strict cross-field rule would force
+        # knowledge this class doesn't have (which exchange a given
+        # ticker maps to).
+        if self.symbol_suffix not in _VALID_SYMBOL_SUFFIXES:
+            raise ValueError(
+                f"Holding.symbol_suffix must be one of {_VALID_SYMBOL_SUFFIXES}; "
+                f"got {self.symbol_suffix!r}"
+            )
+        # Quantity is Decimal, not float — see _coerce_quantity_to_decimal.
+        # Always coerce/quantize, even when the caller already passed a
+        # Decimal: a Decimal with more than 4 places (e.g. Decimal("12.123456789"))
+        # must still be rounded to the DECIMAL(18,4) precision this story
+        # requires, not passed through untouched.
+        self.quantity = _coerce_quantity_to_decimal(self.quantity)
 
 
 @dataclass
@@ -394,15 +452,39 @@ class DefaultUserPortfolio:
         portfolio market value}}`; weight is 0.0 for every entry when
         total market value is 0, rather than dividing by zero."""
         with traced("DefaultUserPortfolio.calculate_exposure"):
-            total_market_value = sum(position.market_value for position in snapshot.positions)
+            # market_value is set from Holding.quantity (see
+            # track_portfolio_state), a Decimal since STORY-1 -- but
+            # Position's own dataclass field is still typed float, and a
+            # caller (or test) can still hand this a real float directly.
+            # Normalize every value to Decimal up front so the real
+            # aggregation below never has to mix the two types (a bare
+            # `float += Decimal`, or `Decimal + float`, both raise
+            # TypeError). Decimal == float still compares correctly for
+            # callers/tests that compare the result against plain float
+            # literals.
+            market_values = [
+                position.market_value
+                if isinstance(position.market_value, Decimal)
+                else Decimal(str(position.market_value))
+                for position in snapshot.positions
+            ]
+            total_market_value = sum(market_values, start=Decimal("0"))
             exposure: dict[str, dict] = {}
-            for position in snapshot.positions:
+            for position, market_value in zip(snapshot.positions, market_values):
                 security_id = position.holding.security_id
-                entry = exposure.setdefault(security_id, {"market_value": 0.0, "weight": 0.0})
-                entry["market_value"] += position.market_value
+                entry = exposure.setdefault(security_id, {"market_value": Decimal("0"), "weight": 0.0})
+                entry["market_value"] += market_value
             if total_market_value > 0:
                 for entry in exposure.values():
-                    entry["weight"] = entry["market_value"] / total_market_value
+                    # weight is a ratio/percentage, not a "price-related
+                    # field" the story's DECIMAL(18,4) precision concern
+                    # applies to -- kept as float (its existing, correct
+                    # type) rather than Decimal, since e.g. Decimal("0.6")
+                    # != 0.6 (0.6 has no exact binary float
+                    # representation), which would break every existing
+                    # caller/test that already compares against a plain
+                    # float literal.
+                    entry["weight"] = float(entry["market_value"] / total_market_value)
             return exposure
 
     def manage_preferences(self, user: User, updates: dict) -> User:

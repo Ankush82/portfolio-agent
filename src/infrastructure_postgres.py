@@ -116,6 +116,23 @@ class DefaultInfrastructure:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_migration_log_name_run ON migration_log (migration_name, run_at)"
             )
+            # schema_migrations tracks logical schema-version applications
+            # distinct from migration_log's per-invocation log rows.
+            # migration_log (existing) records every dry-run/real/failed
+            # attempt with rowcount + error message; schema_migrations
+            # (this table) records one row per applied logical migration
+            # name, idempotent via UNIQUE(migration_name), so a second
+            # application is a no-op and the table itself answers
+            # "which logical migrations have been applied?".
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    id BIGSERIAL PRIMARY KEY,
+                    migration_name VARCHAR NOT NULL UNIQUE,
+                    applied_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
 
     def _redis(self) -> redis.Redis:
         if self._redis_client is None:

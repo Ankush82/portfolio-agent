@@ -589,3 +589,198 @@ def test_stub_user_portfolio_untouched():
     assert stub.import_transactions(portfolio) == []
     assert stub.calculate_exposure(PortfolioSnapshot(portfolio_id="x", positions=[], exposure={})) == {}
     assert stub.determine_user_relevance(user, {}) is True
+
+
+# --- Holding dataclass validation (STORY-1) -------------------------------
+
+
+def test_holding_accepts_each_valid_currency():
+    """Both supported currencies (USD default and INR for Indian
+    holdings) instantiate without error."""
+    usd = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=10)
+    inr = Holding(portfolio_id="pf-1", security_id="RELIANCE", quantity=10, currency="INR")
+    assert usd.currency == "USD"
+    assert inr.currency == "INR"
+
+
+def test_holding_defaults_currency_to_usd_when_not_specified():
+    """The story explicitly says default currency is 'USD' so existing
+    callers that don't know about the new field keep working without
+    any code change."""
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=10)
+    assert holding.currency == "USD"
+
+
+def test_holding_rejects_an_unknown_currency_with_a_clear_error():
+    """Invalid currencies are rejected with a ValueError that names the
+    valid set — silently accepting 'EUR' would let a US price feed
+    silently mis-expose the position later."""
+    with pytest.raises(ValueError, match=r"Holding\.currency must be one of"):
+        Holding(portfolio_id="pf-1", security_id="X", quantity=10, currency="EUR")
+
+
+def test_holding_accepts_each_valid_exchange():
+    """All four supported exchanges (NYSE/NASDAQ for US, NSE/BSE for
+    Indian) plus None instantiate without error."""
+    for exchange in ("NYSE", "NASDAQ", "NSE", "BSE", None):
+        holding = Holding(portfolio_id="pf-1", security_id="X", quantity=10, exchange=exchange)
+        assert holding.exchange == exchange
+
+
+def test_holding_defaults_exchange_to_none_when_not_specified():
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=10)
+    assert holding.exchange is None
+
+
+def test_holding_rejects_an_unknown_exchange_with_a_clear_error():
+    with pytest.raises(ValueError, match=r"Holding\.exchange must be one of"):
+        Holding(portfolio_id="pf-1", security_id="X", quantity=10, exchange="LSE")
+
+
+def test_holding_accepts_each_valid_symbol_suffix():
+    """None (default), '.NS' for NSE-listed, '.BO' for BSE-listed."""
+    for suffix in (None, ".NS", ".BO"):
+        holding = Holding(portfolio_id="pf-1", security_id="X", quantity=10, symbol_suffix=suffix)
+        assert holding.symbol_suffix == suffix
+
+
+def test_holding_defaults_symbol_suffix_to_none_when_not_specified():
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=10)
+    assert holding.symbol_suffix is None
+
+
+def test_holding_rejects_an_unknown_symbol_suffix_with_a_clear_error():
+    with pytest.raises(ValueError, match=r"Holding\.symbol_suffix must be one of"):
+        Holding(portfolio_id="pf-1", security_id="X", quantity=10, symbol_suffix=".L")
+
+
+def test_holding_quantity_is_a_decimal_with_four_decimal_places_of_precision():
+    """Story STORY-1 says price/quantity fields use Decimal with 4
+    decimal places of precision (DECIMAL(18,4) intent), not float —
+    callers passing int/float must still work, but the stored value
+    must be a Decimal quantized to 4 places."""
+    from decimal import Decimal
+
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=12)
+    assert isinstance(holding.quantity, Decimal)
+    assert holding.quantity == Decimal("12.0000")
+
+
+def test_holding_quantity_coerces_a_float_to_quantized_decimal():
+    """Existing callers (and stored JSONB float quantities) keep
+    working: a float input is coerced through Decimal(str(value)) and
+    quantized to 4 places, not silently turned into a Decimal with
+    whatever float-precision artifact it happened to carry."""
+    from decimal import Decimal
+
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=12.5)
+    assert isinstance(holding.quantity, Decimal)
+    assert holding.quantity == Decimal("12.5000")
+
+
+def test_holding_quantity_quantizes_extra_decimal_digits_to_four_places():
+    """A caller-supplied Decimal with more than 4 decimal places is
+    rounded to 4 (matches DECIMAL(18,4) — no truncation surprises
+    beyond the documented precision)."""
+    from decimal import Decimal
+
+    holding = Holding(portfolio_id="pf-1", security_id="AAPL", quantity=Decimal("12.123456789"))
+    assert holding.quantity == Decimal("12.1235")
+
+
+def test_holding_quantity_rejects_non_numeric_input_with_a_clear_error():
+    """Strings that aren't parseable as numbers (or any non-numeric
+    type) fail loudly rather than silently storing garbage."""
+    with pytest.raises(ValueError, match=r"Holding\.quantity must be a real number"):
+        Holding(portfolio_id="pf-1", security_id="AAPL", quantity="not-a-number")
+
+
+# --- STORY-1 QA: targeted cross-field acceptance criteria -------------------
+
+
+def test_qa_story1_holding_field_defaults_and_validation_round_trip():
+    """Targeted QA for STORY-1's own acceptance criteria #1 and #2 —
+    one self-contained round trip exercising the Holding dataclass the
+    way this story's own change did: every new field is present with
+    its required default, every documented valid value instantiates,
+    and every documented invalid value raises ValueError with a
+    message naming the valid set. Independent of the wider file so a
+    regression in any of these three fields is caught as one failure.
+    """
+    from decimal import Decimal
+
+    # --- AC #1: currency='USD' default + USD/INR accepted, anything else rejected ---
+    usd_default = Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10)
+    assert usd_default.currency == "USD", "default currency must be USD"
+    inr_explicit = Holding(portfolio_id="pf-qa", security_id="RELIANCE", quantity=10, currency="INR")
+    assert inr_explicit.currency == "INR"
+    for bad_currency in ("EUR", "usd", "Usd", "US", "INDIAN", "", "GBP"):
+        with pytest.raises(ValueError) as exc_info:
+            Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10, currency=bad_currency)
+        # The error message must name the valid set so callers can self-correct.
+        assert "USD" in str(exc_info.value) and "INR" in str(exc_info.value), (
+            f"ValueError for currency={bad_currency!r} must name the valid set "
+            f"(USD, INR); got {exc_info.value!r}"
+        )
+
+    # --- AC #1: exchange default None + every documented value, invalid rejected ---
+    assert usd_default.exchange is None, "default exchange must be None"
+    for valid_exchange in ("NYSE", "NASDAQ", "NSE", "BSE", None):
+        Holding(portfolio_id="pf-qa", security_id="X", quantity=10, exchange=valid_exchange)
+    for bad_exchange in ("LSE", "TSX", "nyse", "BSEX", "NASDAQ:", "BSE-1"):
+        with pytest.raises(ValueError) as exc_info:
+            Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10, exchange=bad_exchange)
+        assert any(name in str(exc_info.value) for name in ("NYSE", "NASDAQ", "NSE", "BSE")), (
+            f"ValueError for exchange={bad_exchange!r} must name the valid set; "
+            f"got {exc_info.value!r}"
+        )
+
+    # --- AC #1: symbol_suffix default None + valid set, invalid rejected ---
+    assert usd_default.symbol_suffix is None, "default symbol_suffix must be None"
+    for valid_suffix in (None, ".NS", ".BO"):
+        Holding(portfolio_id="pf-qa", security_id="X", quantity=10, symbol_suffix=valid_suffix)
+    for bad_suffix in (".L", ".N", ".NSX", ".BSE", "NS", ".ns", ".bo", ""):
+        with pytest.raises(ValueError) as exc_info:
+            Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10, symbol_suffix=bad_suffix)
+        assert ".NS" in str(exc_info.value) and ".BO" in str(exc_info.value), (
+            f"ValueError for symbol_suffix={bad_suffix!r} must name the valid set "
+            f"(.NS, .BO); got {exc_info.value!r}"
+        )
+
+    # --- AC #2: quantity is Decimal with 4-decimal precision, not float ---
+    # int input
+    h_int = Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=10)
+    assert isinstance(h_int.quantity, Decimal), (
+        f"int input must coerce to Decimal; got {type(h_int.quantity).__name__}"
+    )
+    assert h_int.quantity == Decimal("10.0000"), (
+        f"int input must quantize to 4 decimal places; got {h_int.quantity}"
+    )
+    # float input — must be coerced, not stored as float (this is the
+    # load-bearing difference: a stored float would lose the DECIMAL(18,4)
+    # intent the story calls out).
+    h_float = Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=12.5)
+    assert isinstance(h_float.quantity, Decimal), (
+        f"float input must coerce to Decimal; got {type(h_float.quantity).__name__}"
+    )
+    assert h_float.quantity == Decimal("12.5000"), (
+        f"float input must quantize to 4 decimal places; got {h_float.quantity}"
+    )
+    # str input that parses as a number
+    h_str = Holding(portfolio_id="pf-qa", security_id="AAPL", quantity="7.125")
+    assert isinstance(h_str.quantity, Decimal)
+    assert h_str.quantity == Decimal("7.1250")
+    # over-precision Decimal input — quantize to 4 places (banker's
+    # rounding via Decimal.quantize; must be one of the two nearest
+    # half-away values).
+    h_over = Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=Decimal("0.123456"))
+    assert h_over.quantity == Decimal("0.1235"), (
+        f"over-precision must quantize to 4 places; got {h_over.quantity}"
+    )
+    # non-numeric string fails loudly with the documented message
+    with pytest.raises(ValueError, match=r"Holding\.quantity must be a real number"):
+        Holding(portfolio_id="pf-qa", security_id="AAPL", quantity="not-a-number")
+    # None / object / list also rejected (not parseable as a number)
+    for bad_q in (None, object(), [1, 2, 3], {"x": 1}):
+        with pytest.raises(ValueError, match=r"Holding\.quantity must be a real number"):
+            Holding(portfolio_id="pf-qa", security_id="AAPL", quantity=bad_q)
