@@ -53,6 +53,7 @@ checkpoint.md                  The narrative log of this entire build, in order
 loop.md                        The process every component's real implementation followed
 orchestration.md               How this was parallelized and reviewed
 docker-compose.yml             Local Postgres + Redis for real infrastructure tests
+docs/migrations/                Operational runbooks (e.g. docs/migrations/us_stock_migration.md for the US-stock portfolio defaults migration)
 ```
 
 ## How this was built
