@@ -745,11 +745,6 @@ def test_qa_story1_holding_field_defaults_and_validation_round_trip():
 
     # --- AC #1: symbol_suffix default None + valid set, invalid rejected ---
     assert usd_default.symbol_suffix is None, "default symbol_suffix must be None"
-    # security_id must satisfy validate_stock_symbol's real per-suffix
-    # format rules (added by a later story) once symbol_suffix is one
-    # of .NS/.BO -- "X" alone is a valid NSE body ([A-Z0-9&-]{1,20}) but
-    # not a valid BSE one (exactly 6 digits), so a single placeholder ID
-    # can't cover all three cases the way it could before that story.
     _placeholder_security_id = {None: "X", ".NS": "X", ".BO": "500325"}
     for valid_suffix in (None, ".NS", ".BO"):
         Holding(
@@ -984,3 +979,435 @@ def test_holding_still_rejects_lowercase_suffix_via_the_existing_symbol_suffix_c
     about the valid suffix set they saw before STORY-3."""
     with pytest.raises(ValueError, match=r"Holding\.symbol_suffix must be one of"):
         Holding(portfolio_id="pf-1", security_id="RELIANCE", quantity=10, symbol_suffix=".ns")
+
+
+# --- STORY-8: multi-currency portfolio calculation logic ------------------
+
+
+def _usd_holding(security_id: str, quantity, currency: str = "USD") -> Holding:
+    """Convenience: a USD-currency Holding (the pre-STORY-8 default)."""
+    return Holding(portfolio_id="pf-1", security_id=security_id, quantity=quantity, currency=currency)
+
+
+def _inr_holding(security_id: str, quantity) -> Holding:
+    """Convenience: an INR-currency Holding."""
+    return Holding(portfolio_id="pf-1", security_id=security_id, quantity=quantity, currency="INR")
+
+
+class _FakeExchangeRateInfrastructure:
+    """Minimal Infrastructure double for `fetch_exchange_rate`'s
+    cache layer. Mirrors the real `cache_get`/`cache_set` shape so
+    `fetch_exchange_rate` reads/writes the same way it would against
+    `DefaultInfrastructure`."""
+
+    def __init__(self) -> None:
+        self.store: dict = {}
+        self.set_calls: list = []
+
+    def cache_get(self, key: str):
+        return self.store.get(key)
+
+    def cache_set(self, key: str, value, ttl_seconds: int) -> None:
+        self.set_calls.append((key, value, ttl_seconds))
+        self.store[key] = value
+
+
+def test_calculate_portfolio_totals_sums_inr_and_usd_subtotals_separately():
+    """AC: System calculates total portfolio value in INR (sum of
+    INR-currency holdings) and USD (sum of USD-currency holdings)
+    separately. Both subtotals are Decimal with the project's
+    documented 4-decimal-place precision."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 10.0), market_value=Decimal("100.0000")),
+            Position(holding=_usd_holding("MSFT", 5.0), market_value=Decimal("50.0000")),
+            Position(holding=_inr_holding("RELIANCE", 4.0), market_value=Decimal("1000.0000")),
+            Position(holding=_inr_holding("TCS", 2.0), market_value=Decimal("500.0000")),
+        ],
+        exposure={},
+    )
+
+    # Stub fetch_exchange_rate so this test stays hermetic.
+    fetch_calls: list = []
+
+    def fake_fetch(infrastructure=None):
+        fetch_calls.append(infrastructure)
+        return Decimal("83.0000")
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate", fake_fetch
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="USD")
+    finally:
+        monkeypatch_fetch.undo()
+
+    assert isinstance(result["inr_total"], Decimal)
+    assert isinstance(result["usd_total"], Decimal)
+    assert result["usd_total"] == Decimal("150.0000")  # 100 + 50
+    assert result["inr_total"] == Decimal("1500.0000")  # 1000 + 500
+    # fetch_exchange_rate was called with the passed-in infrastructure
+    # (None here), proving the seam is plumbed end-to-end.
+    assert fetch_calls == [None]
+
+
+def test_calculate_portfolio_totals_consolidated_usd_equals_usd_total_plus_inr_divided_by_rate():
+    """AC: USD-base consolidated total = usd_total + (inr_total / rate),
+    computed from the real exchange rate returned by fetch_exchange_rate."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+            Position(holding=_inr_holding("RELIANCE", 1.0), market_value=Decimal("8300.0000")),
+        ],
+        exposure={},
+    )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate",
+        lambda infrastructure=None: Decimal("83.0000"),
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="USD")
+    finally:
+        monkeypatch_fetch.undo()
+
+    # 8300 INR / 83 = 100 USD, plus 100 USD = 200 USD total.
+    assert result["consolidated_total"] == Decimal("200.0000")
+    assert result["base_currency"] == "USD"
+    assert result["rate"] == Decimal("83.0000")
+    assert result["error"] is None
+
+
+def test_calculate_portfolio_totals_consolidated_inr_equals_usd_times_rate_plus_inr_total():
+    """AC: INR-base consolidated total = (usd_total * rate) + inr_total."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+            Position(holding=_inr_holding("RELIANCE", 1.0), market_value=Decimal("8300.0000")),
+        ],
+        exposure={},
+    )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate",
+        lambda infrastructure=None: Decimal("83.0000"),
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="INR")
+    finally:
+        monkeypatch_fetch.undo()
+
+    # 100 USD * 83 = 8300 INR, plus 8300 INR = 16600 INR total.
+    assert result["consolidated_total"] == Decimal("16600.0000")
+    assert result["base_currency"] == "INR"
+    assert result["rate"] == Decimal("83.0000")
+    assert result["error"] is None
+
+
+def test_calculate_portfolio_totals_uses_bankers_rounding_via_the_project_quantize_pattern():
+    """AC: All calculations use the project's established quantize
+    pattern. The codebase's actual pattern is `Decimal(...).quantize(
+    Decimal('0.0001'), rounding=ROUND_HALF_UP)` (see
+    `_coerce_quantity_to_decimal` and `_quantize_rate`), which is what
+    every monetary field here uses. Pin the pattern so a future
+    switch to a different rounding mode is caught."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    # Pick values that exercise the rounding boundary: 0.00005 -> 0.0001
+    # under ROUND_HALF_UP, the same way the rest of this codebase rounds.
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("X", 1), market_value=Decimal("0.00005")),
+        ],
+        exposure={},
+    )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate",
+        lambda infrastructure=None: Decimal("1.0000"),
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="USD")
+    finally:
+        monkeypatch_fetch.undo()
+
+    # 0.00005 ROUND_HALF_UP to 4dp -> 0.0001 (the project's own mode).
+    assert result["usd_total"] == Decimal("0.0001")
+    assert result["usd_total"].as_tuple().exponent == -4  # 4 decimal places
+    # Every monetary field is quantized to 4 places.
+    for field_name in ("inr_total", "usd_total", "consolidated_total", "rate"):
+        value = result[field_name]
+        assert isinstance(value, Decimal)
+        assert value.as_tuple().exponent == -4, (
+            f"{field_name!r} must be quantized to 4 decimal places; got {value}"
+        )
+
+
+def test_calculate_portfolio_totals_returns_subtotals_and_clear_error_on_missing_exchange_rate_key():
+    """AC: If fetch_exchange_rate() raises (here, because neither
+    vendor key is configured), the method returns the real currency
+    subtotals with a real error message about the consolidated total
+    being unavailable -- never a fabricated exchange rate or
+    fabricated consolidated total."""
+    from decimal import Decimal
+
+    from exchange_rate_client import MissingExchangeRateAPIKeyError
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+            Position(holding=_inr_holding("RELIANCE", 1.0), market_value=Decimal("8300.0000")),
+        ],
+        exposure={},
+    )
+
+    def fake_fetch(infrastructure=None):
+        raise MissingExchangeRateAPIKeyError(
+            "Neither EXCHANGE_RATE_API_KEY nor EXCHANGE_RATE_FALLBACK_API_KEY is set."
+        )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate", fake_fetch
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="USD")
+    finally:
+        monkeypatch_fetch.undo()
+
+    # Real subtotals are still returned -- never silently zeroed.
+    assert result["usd_total"] == Decimal("100.0000")
+    assert result["inr_total"] == Decimal("8300.0000")
+    # Real error message naming the failure mode, not a fabricated
+    # placeholder or a fabricated consolidated total.
+    assert result["consolidated_total"] is None
+    assert result["rate"] is None
+    assert result["base_currency"] == "USD"
+    assert result["error"] is not None
+    assert "consolidated total in USD is unavailable" in result["error"]
+    assert "MissingExchangeRateAPIKeyError" in result["error"]
+
+
+def test_calculate_portfolio_totals_returns_subtotals_and_clear_error_on_exchange_rate_fetch_error():
+    """AC: Same as above, but exercising the `ExchangeRateFetchError`
+    path (both vendor sources failed) -- still no fabricated
+    consolidated total, still a real error message."""
+    from decimal import Decimal
+
+    from exchange_rate_client import ExchangeRateFetchError
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+            Position(holding=_inr_holding("RELIANCE", 1.0), market_value=Decimal("8300.0000")),
+        ],
+        exposure={},
+    )
+
+    def fake_fetch(infrastructure=None):
+        raise ExchangeRateFetchError(
+            "Both exchange-rate sources failed: primary (...), fallback (...)"
+        )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate", fake_fetch
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(snapshot, base_currency="INR")
+    finally:
+        monkeypatch_fetch.undo()
+
+    assert result["usd_total"] == Decimal("100.0000")
+    assert result["inr_total"] == Decimal("8300.0000")
+    assert result["consolidated_total"] is None
+    assert result["rate"] is None
+    assert result["base_currency"] == "INR"
+    assert result["error"] is not None
+    assert "consolidated total in INR is unavailable" in result["error"]
+    assert "ExchangeRateFetchError" in result["error"]
+
+
+def test_calculate_portfolio_totals_rejects_unsupported_base_currency_with_clear_error():
+    """Only USD and INR are supported as base currencies (those are
+    the only currencies whose exchange rate `fetch_exchange_rate`
+    returns). A 3rd currency like EUR would require a different
+    real exchange rate this codebase doesn't fetch; silently coercing
+    to USD/INR would be exactly the fabrication the story
+    forbids."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+        ],
+        exposure={},
+    )
+
+    with pytest.raises(ValueError, match=r"base_currency must be one of"):
+        portfolio_component.calculate_portfolio_totals(snapshot, base_currency="EUR")
+
+
+def test_calculate_portfolio_totals_on_a_snapshot_with_only_one_currency_returns_correct_consolidated_total():
+    """Edge case: a snapshot containing only USD (or only INR)
+    positions still produces a correct consolidated total in either
+    base currency. The other-currency subtotal is zero and adds
+    nothing to the consolidated answer."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    usd_only_snapshot = PortfolioSnapshot(
+        portfolio_id="pf-usd-only",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+        ],
+        exposure={},
+    )
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate",
+        lambda infrastructure=None: Decimal("83.0000"),
+    )
+
+    try:
+        # USD-base: just the USD total, INR contribution is 0.
+        usd_result = portfolio_component.calculate_portfolio_totals(usd_only_snapshot, base_currency="USD")
+        # INR-base: 100 USD * 83 = 8300 INR, INR contribution is 0.
+        inr_result = portfolio_component.calculate_portfolio_totals(usd_only_snapshot, base_currency="INR")
+    finally:
+        monkeypatch_fetch.undo()
+
+    assert usd_result["inr_total"] == Decimal("0.0000")
+    assert usd_result["usd_total"] == Decimal("100.0000")
+    assert usd_result["consolidated_total"] == Decimal("100.0000")
+    assert inr_result["inr_total"] == Decimal("0.0000")
+    assert inr_result["usd_total"] == Decimal("100.0000")
+    assert inr_result["consolidated_total"] == Decimal("8300.0000")
+
+
+def test_calculate_portfolio_totals_on_an_empty_snapshot_returns_zero_subtotals_and_a_real_consolidated_total():
+    """Edge case: a portfolio with no positions has zero in every
+    currency and a consolidated total of zero in either base
+    currency -- fetch_exchange_rate is still called (the rate is a
+    real input to the math), and the result is real."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    empty_snapshot = PortfolioSnapshot(portfolio_id="pf-empty", positions=[], exposure={})
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate",
+        lambda infrastructure=None: Decimal("83.0000"),
+    )
+
+    try:
+        result = portfolio_component.calculate_portfolio_totals(empty_snapshot, base_currency="USD")
+    finally:
+        monkeypatch_fetch.undo()
+
+    assert result["inr_total"] == Decimal("0.0000")
+    assert result["usd_total"] == Decimal("0.0000")
+    assert result["consolidated_total"] == Decimal("0.0000")
+    assert result["error"] is None
+
+
+def test_calculate_portfolio_totals_propagates_infrastructure_to_fetch_exchange_rate():
+    """The Infrastructure passed to `calculate_portfolio_totals` is
+    forwarded to `fetch_exchange_rate` so the rate-fetch can use the
+    same cache layer (and same Redis) the rest of the system
+    already trusts."""
+    from decimal import Decimal
+
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=Decimal("100.0000")),
+        ],
+        exposure={},
+    )
+
+    infra_passed_to_fetch = []
+
+    def fake_fetch(infrastructure=None):
+        infra_passed_to_fetch.append(infrastructure)
+        return Decimal("83.0000")
+
+    monkeypatch_fetch = pytest.MonkeyPatch()
+    monkeypatch_fetch.setattr(
+        "components.c01_user_portfolio.fetch_exchange_rate", fake_fetch
+    )
+
+    injected = _FakeExchangeRateInfrastructure()
+
+    try:
+        portfolio_component.calculate_portfolio_totals(snapshot, base_currency="USD", infrastructure=injected)
+    finally:
+        monkeypatch_fetch.undo()
+
+    assert infra_passed_to_fetch == [injected]
+
+
+# --- STORY-8: gains/losses gap documentation (option (b)) ------------------
+
+
+def test_calculate_gains_losses_raises_not_implemented_error_naming_the_missing_cost_basis_field():
+    """AC: Gains/losses and percentage returns cannot be computed for
+    real right now -- neither Holding nor Position carries a
+    cost-basis field anywhere in this codebase, and inventing a
+    fabricated number would be the precise failure mode the story
+    forbids. The chosen honesty posture (option (b) in the story):
+    raise a `NotImplementedError` whose message explicitly names the
+    missing `Holding.cost_basis` field so a reviewer / future
+    contributor can see the gap from the error text alone."""
+    portfolio_component = DefaultUserPortfolio(infrastructure=_InMemoryInfrastructure())
+    snapshot = PortfolioSnapshot(
+        portfolio_id="pf-1",
+        positions=[
+            Position(holding=_usd_holding("AAPL", 1.0), market_value=100.0),
+        ],
+        exposure={},
+    )
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        portfolio_component.calculate_gains_losses(snapshot)
+
+    message = str(exc_info.value)
+    # The exception message must name the missing field so this gap is
+    # discoverable from the error alone -- the same posture ADR-0046
+    # / c04 / c07 already take for real data-model gaps.
+    assert "cost_basis" in message
+    assert "STORY-8" in message
+

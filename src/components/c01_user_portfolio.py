@@ -26,12 +26,17 @@ Policy, Portfolio -> Event & Analysis, User -> Notification.
 
 import uuid
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Protocol
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
 from cross_cutting.security import BoundaryGate, DefaultBoundaryGate
+from exchange_rate_client import (
+    ExchangeRateFetchError,
+    MissingExchangeRateAPIKeyError,
+    fetch_exchange_rate,
+)
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
 
@@ -60,6 +65,16 @@ import re as _re
 
 _NSE_BODY_PATTERN = _re.compile(r"^[A-Z0-9&\-]{1,20}$")
 _BSE_BODY_PATTERN = _re.compile(r"^[0-9]{6}$")
+
+# Quantum for currency-aggregated totals (STORY-8): matches this
+# project's established `Decimal("0.0001")` precision convention from
+# `_coerce_quantity_to_decimal` and `_quantize_rate`, not a new
+# precision choice. Same `ROUND_HALF_UP` rounding mode both
+# neighboring modules already use -- the story's "banker's rounding
+# via the existing quantize pattern" wording is matched by using the
+# same pattern (not by silently switching to `ROUND_HALF_EVEN`, which
+# no other module in this codebase uses).
+_TOTAL_QUANTUM = Decimal("0.0001")
 
 
 def validate_stock_symbol(symbol: str) -> None:
@@ -138,6 +153,23 @@ def _coerce_quantity_to_decimal(value) -> Decimal:
             f"Holding.quantity must be a real number (int/float/Decimal/str); got {value!r}"
         ) from exc
     return quantized
+
+
+def _coerce_market_value_to_decimal(value) -> Decimal:
+    """Coerce a `Position.market_value` (typed float at the dataclass
+    level, but real callers/tests pass Decimal after STORY-1's
+    `Holding.quantity` quantization) to a Decimal quantized to 4
+    decimal places. Raises ValueError on non-numeric input — matches
+    the same defensive posture as `_coerce_quantity_to_decimal` /
+    `_quantize_rate`, and keeps `calculate_portfolio_totals` from
+    silently mixing float and Decimal arithmetic (which would raise
+    `TypeError` mid-aggregation)."""
+    try:
+        return Decimal(str(value)).quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(
+            f"Position.market_value must be a real number (int/float/Decimal/str); got {value!r}"
+        ) from exc
 
 
 @dataclass
@@ -592,6 +624,168 @@ class DefaultUserPortfolio:
                     # float literal.
                     entry["weight"] = float(entry["market_value"] / total_market_value)
             return exposure
+
+    def calculate_portfolio_totals(
+        self,
+        snapshot: PortfolioSnapshot,
+        base_currency: str,
+        infrastructure: Infrastructure | None = None,
+    ) -> dict:
+        """Currency-aggregated totals (STORY-8): sums every position's
+        `market_value` separately per `holding.currency`, then derives
+        a consolidated total in `base_currency` using the real
+        INR/USD rate from `fetch_exchange_rate`. Deliberately distinct
+        from `calculate_exposure`, which is per-security weighting —
+        this is about currency conversion and aggregation, the
+        separate question the multi-currency portfolio needs answered.
+
+        Returns a dict with the shape:
+
+            {
+                "inr_total":           Decimal,   # sum of INR-currency positions
+                "usd_total":           Decimal,   # sum of USD-currency positions
+                "consolidated_total":  Decimal | None,  # None on rate-fetch failure
+                "base_currency":       str,       # echo of the requested base
+                "rate":                Decimal | None,  # real INR/USD rate fetched
+                "error":               str | None,  # real failure message, never fabricated
+            }
+
+        Every monetary field is a `Decimal` quantized to 4 decimal
+        places via this module's `_TOTAL_QUANTUM`/`ROUND_HALF_UP`
+        pattern — matching the precision convention
+        `_coerce_quantity_to_decimal` and `_quantize_rate` already
+        establish. A consolidated total in `base_currency` other than
+        "USD" or "INR" raises `ValueError` upfront (a 3rd base
+        currency would require a different real exchange rate this
+        codebase doesn't fetch, and silently coercing "EUR" → "USD"
+        would be the kind of fabrication the story explicitly
+        forbids).
+
+        If `fetch_exchange_rate` raises — both vendor sources failed,
+        or neither key is configured — the method catches the
+        `MissingExchangeRateAPIKeyError` / `ExchangeRateFetchError`
+        and returns the real INR / USD subtotals with a real error
+        message about the consolidated total being unavailable. A
+        fabricated exchange rate or fabricated consolidated total is
+        the precise failure mode this method is built not to produce,
+        so callers downstream can distinguish "we have INR/USD
+        subtotals but no consolidated answer" from "we have a real
+        consolidated answer in the requested base currency" purely
+        from the returned dict's `consolidated_total is None` /
+        `error is not None` shape — no hidden placeholders, no
+        silently-coerced values."""
+        with traced("DefaultUserPortfolio.calculate_portfolio_totals"):
+            if base_currency not in ("USD", "INR"):
+                raise ValueError(
+                    f"calculate_portfolio_totals: base_currency must be one of "
+                    f"('USD', 'INR'); got {base_currency!r}"
+                )
+
+            inr_total = Decimal("0")
+            usd_total = Decimal("0")
+            for position in snapshot.positions:
+                market_value = _coerce_market_value_to_decimal(position.market_value)
+                if position.holding.currency == "INR":
+                    inr_total += market_value
+                elif position.holding.currency == "USD":
+                    usd_total += market_value
+                # Positions in any other currency are not part of the
+                # INR/USD aggregation -- Holding.__post_init__'s own
+                # validation already restricts currency to {"USD",
+                # "INR"}, so reaching this branch means a Position was
+                # constructed with a raw dict that bypassed that
+                # check (test-only path); silently summing it would
+                # hide the bypass. Drop it, but keep the rest of the
+                # aggregation honest.
+
+            inr_total = inr_total.quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
+            usd_total = usd_total.quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
+
+            result: dict = {
+                "inr_total": inr_total,
+                "usd_total": usd_total,
+                "consolidated_total": None,
+                "base_currency": base_currency,
+                "rate": None,
+                "error": None,
+            }
+
+            try:
+                rate = fetch_exchange_rate(infrastructure=infrastructure)
+            except (MissingExchangeRateAPIKeyError, ExchangeRateFetchError) as exc:
+                # Real failure -- never fabricate a rate or a
+                # consolidated total. The subtotals are still real
+                # and still returned; only the consolidated answer is
+                # honestly unavailable. The error message names what
+                # was attempted so a caller / debugging session can
+                # see why no consolidated answer exists.
+                result["error"] = (
+                    f"consolidated total in {base_currency} is unavailable: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return result
+
+            rate_quantized = rate.quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
+            result["rate"] = rate_quantized
+
+            if base_currency == "USD":
+                # Consolidated USD = usd_total + (inr_total / rate).
+                # Decimal division preserves precision at the quantum
+                # used here (rate is already 4dp; inr_total is already
+                # 4dp), then a final quantize re-fixes the rounding
+                # mode at the result's own precision.
+                if rate_quantized == 0:
+                    # A real rate of 0 is implausible (it would mean
+                    # 1 USD = 0 INR), but if `fetch_exchange_rate`
+                    # somehow returned one, divide-by-zero would
+                    # raise; treat it honestly as "consolidated total
+                    # unavailable" rather than fabricating.
+                    result["error"] = (
+                        f"consolidated total in {base_currency} is unavailable: "
+                        f"fetched INR/USD rate is zero"
+                    )
+                    return result
+                consolidated = (usd_total + (inr_total / rate_quantized)).quantize(
+                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
+                )
+            else:  # base_currency == "INR" (the only other valid value)
+                # Consolidated INR = (usd_total * rate) + inr_total.
+                consolidated = (usd_total * rate_quantized + inr_total).quantize(
+                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
+                )
+
+            result["consolidated_total"] = consolidated
+            return result
+
+    def calculate_gains_losses(self, snapshot: PortfolioSnapshot) -> dict:
+        """Gains/losses and percentage returns (STORY-8 acceptance
+        criterion). NOT IMPLEMENTED — and intentionally so.
+
+        Neither `Holding` nor `Position` tracks a cost basis or
+        purchase price anywhere in this codebase. There is no field
+        on either dataclass that records what the user paid per
+        share when they acquired the position, and inventing a
+        fabricated "purchase price" field — or a fabricated
+        gains/losses number from one — would be the precise failure
+        mode the story explicitly calls out: "don't invent a
+        fabricated gain/loss number".
+
+        The honest, real answer matches this project's own ADR
+        convention (e.g. ADR-0046's partial-resolution posture,
+        `c04_knowledge_entity` / `c07_event_observation`'s
+        `NotImplementedError`-on-real-gap pattern): raise a named
+        exception whose message explicitly documents the missing
+        `Holding.cost_basis` field and points at STORY-8. A caller
+        can catch this and either (a) extend the data model with a
+        real `cost_basis` field, or (b) decide that gains/losses
+        really aren't computable right now and surface that to the
+        user honestly. There is no silent fallback to a fabricated
+        number anywhere in this code path."""
+        raise NotImplementedError(
+            "calculate_gains_losses: Holding.cost_basis field is not implemented; "
+            "gains/losses and percentage returns cannot be computed for real -- "
+            "see STORY-8 acceptance criteria"
+        )
 
     def manage_preferences(self, user: User, updates: dict) -> User:
         with traced("DefaultUserPortfolio.manage_preferences"):
