@@ -1241,9 +1241,15 @@ def test_story7_end_to_end_acceptance_criteria(monkeypatch):
 
     monkeypatch.setattr(exchange_rate_client.requests, "get", fake_get_ac2)
     rate_ac2 = fetch_exchange_rate(infrastructure=infra_ac1)
-    assert visited[0][0] == "https://open.er-api.com/v6/latest/USD"
-    assert visited[1][0] == "https://data.fixer.io/api/latest"
-    assert visited[1][1] == {"access_key": "story7-fallback-key"}, (
+    # STORY-12 added retry-with-backoff around each real HTTP call, so
+    # primary is now attempted 4 times (1 initial + 3 retries) before
+    # the code falls back -- all of those are still primary calls, and
+    # the fallback is the final entry in `visited`, not the second.
+    assert all(url == "https://open.er-api.com/v6/latest/USD" for url, _ in visited[:-1]), (
+        "AC2: every retried call before the fallback must still target primary"
+    )
+    assert visited[-1][0] == "https://data.fixer.io/api/latest"
+    assert visited[-1][1] == {"access_key": "story7-fallback-key"}, (
         "AC2: fallback must use `access_key`, not `apikey`"
     )
     assert rate_ac2 == Decimal("83.0000"), (
