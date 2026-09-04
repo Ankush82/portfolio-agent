@@ -40,6 +40,20 @@ WHERE stocks.currency <> 'USD'
    OR stocks.symbol_suffix IS NOT NULL
 """
 
+# Real identity for this migration in migration_log -- issue #74's
+# verification script and issue #75's idempotency/failure tests both key
+# off this exact name, so it isn't just documentation, it's a contract.
+MIGRATION_NAME = "us_stock_portfolio_defaults_v1"
+
+_LOG_INSERT_SQL = """
+INSERT INTO migration_log (migration_name, run_at, status, rows_affected, error_message, dry_run)
+VALUES (%s, now(), %s, %s, %s, %s)
+"""
+
+
+def _log(cursor, status: str, rows_affected: "int | None", error_message: "str | None", dry_run: bool) -> None:
+    cursor.execute(_LOG_INSERT_SQL, (MIGRATION_NAME, status, rows_affected, error_message, dry_run))
+
 
 def migrate_us_stocks(
     dsn: str = DEFAULT_POSTGRES_DSN,
@@ -48,18 +62,34 @@ def migrate_us_stocks(
     """Apply the US-stock normalization UPDATE.
 
     Returns rows_updated. When dry_run is True, no UPDATE is issued and
-    the count reflects rows that would have changed.
+    the count reflects rows that would have changed. Every real
+    invocation -- dry-run, successful real run, or a real failure -- logs
+    exactly one row to migration_log (issue #71): this was a real gap
+    found live -- the table existed with nothing ever writing to it, so
+    issue #74's own verification script could never actually pass. Each
+    connection here is autocommit (one implicit transaction per
+    statement), so a failed real UPDATE genuinely rolls back on its own
+    before the exception is caught and logged -- no explicit BEGIN/
+    ROLLBACK needed for this single-statement migration.
     """
     if dry_run is None:
         dry_run = _is_dry_run()
 
     with psycopg.connect(dsn, autocommit=True) as connection:
         with connection.cursor() as cursor:
-            if dry_run:
-                cursor.execute(_COUNT_SQL)
-                return int(cursor.fetchone()[0])
-            cursor.execute(_SQL)
-            return cursor.rowcount
+            try:
+                if dry_run:
+                    cursor.execute(_COUNT_SQL)
+                    rows = int(cursor.fetchone()[0])
+                    _log(cursor, "DRY_RUN", rows, None, True)
+                    return rows
+                cursor.execute(_SQL)
+                rows = cursor.rowcount
+                _log(cursor, "SUCCESS", rows, None, False)
+                return rows
+            except Exception as exc:
+                _log(cursor, "FAILED", None, str(exc), dry_run)
+                raise
 
 
 if __name__ == "__main__":
