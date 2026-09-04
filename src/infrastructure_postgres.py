@@ -22,7 +22,7 @@ from typing import Any
 
 import psycopg
 import redis
-from psycopg.types.json import Json
+from psycopg.types.json import Jsonb
 
 from cross_cutting.observability import traced
 
@@ -137,7 +137,7 @@ class DefaultInfrastructure:
                     VALUES (%s, %s, %s)
                     ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
                     """,
-                    (table, record_id, Json(record)),
+                    (table, record_id, Jsonb(record)),
                 )
             return record_id
 
@@ -159,7 +159,7 @@ class DefaultInfrastructure:
             with self._connection().cursor() as cursor:
                 cursor.execute(
                     "SELECT data FROM records WHERE table_name = %s AND data @> %s",
-                    (table, Json(filters)),
+                    (table, Jsonb(filters)),
                 )
                 rows = cursor.fetchall()
             return [row[0] for row in rows]
@@ -169,7 +169,7 @@ class DefaultInfrastructure:
             with self._connection().cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO queue_events (topic, event) VALUES (%s, %s)",
-                    (topic, Json(event)),
+                    (topic, Jsonb(event)),
                 )
 
     def subscribe(self, topic: str, handler: Any) -> None:
@@ -207,7 +207,7 @@ class DefaultInfrastructure:
                     VALUES (now() + %s * interval '1 second', %s)
                     RETURNING id
                     """,
-                    (delay_seconds, Json(task)),
+                    (delay_seconds, Jsonb(task)),
                 )
                 row = cursor.fetchone()
             return str(row[0])
