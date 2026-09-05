@@ -24,6 +24,7 @@ artifact, card 01: Portfolio -> Portfolio State, User -> Decision &
 Policy, Portfolio -> Event & Analysis, User -> Notification.
 """
 
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -98,13 +99,13 @@ class BrokerCredentials:
 class BrokerHolding:
     symbol: str
     isin: str
-    quantity: Decimal
-    average_price: Decimal
-    last_price: Decimal
-    exchange: str
-    product: str
-    instrument_id: str
-    name: str
+    quantity: Decimal | None
+    average_price: Decimal | None
+    last_price: Decimal | None
+    exchange: str | None = None
+    product: str | None = None
+    instrument_id: str | None = None
+    name: str | None = None
     raw: dict = field(default_factory=dict)
 
 
@@ -346,6 +347,24 @@ class DefaultUpstoxBrokerConnector:
     # scattered through the implementation.
     _UPSTOX_AUTHORIZE_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 
+    # STORY-7: the long-term holdings endpoint. Pinned as a class
+    # constant so the AC's "Request URL is exactly
+    # https://api.upstox.com/v2/portfolio/long-term-holdings" rule
+    # is a single grep, not a literal scattered through
+    # ``fetch_holdings``. The host + path combination is exactly
+    # what Upstox's own v2 docs publish; no extra query string,
+    # no version bump, no trailing slash.
+    _UPSTOX_LONG_TERM_HOLDINGS_PATH = "/v2/portfolio/long-term-holdings"
+
+    # Logger for ``fetch_holdings`` — a module-level ``logging.getLogger``
+    # on ``__name__`` so a real operator can route per-module log
+    # records (e.g. ``logging.getLogger("components.c01_user_portfolio")``)
+    # without every warning being swallowed by the root logger's
+    # default config. The warning logged when a holding element is
+    # missing ``trading_symbol`` is emitted on this logger so it
+    # surfaces under the standard per-module channel.
+    _logger = logging.getLogger(__name__)
+
     def __init__(
         self,
         config: UpstoxConfig,
@@ -577,10 +596,268 @@ class DefaultUpstoxBrokerConnector:
     def fetch_holdings(
         self, *, credentials: BrokerCredentials
     ) -> list[BrokerHolding]:
-        raise NotImplementedError(
-            "DefaultUpstoxBrokerConnector.fetch_holdings is "
-            "implemented in STORY-7"
+        """Fetch long-term holdings from Upstox (STORY-7).
+
+        Performs an authenticated GET against
+        ``https://api.upstox.com/v2/portfolio/long-term-holdings`` via
+        ``_UpstoxHttp.get`` — which attaches the exact two-header
+        auth contract (``Authorization: Bearer <access_token>`` +
+        ``Accept: application/json``), retries on 429 and 5xx only,
+        and raises ``BrokerAuthError`` / ``BrokerRateLimitError`` /
+        ``BrokerApiError`` on every non-success outcome.
+
+        The helper already enforces that a 2xx carries top-level
+        ``status == 'success'`` and raises ``BrokerApiError``
+        otherwise. The response shape (verbatim from Upstox's v2
+        docs) is::
+
+            {
+              "status": "success",
+              "data": [
+                {
+                  "isin":           "INE002A01018",
+                  "trading_symbol": "RELIANCE",
+                  "quantity":       10,
+                  "average_price":  2400.50,
+                  "last_price":     2510.75,
+                  "close_price":    2505.00,
+                  "pnl":            1102.50,
+                  "exchange":       "NSE",
+                  "product":        "CNC",
+                  "instrument_token": "NSE_EQ|INE002A01018",
+                  "company_name":   "Reliance Industries Limited",
+                  ...                       # docs end in '...'
+                },
+                ...
+              ]
+            }
+
+        Each element is mapped to a ``BrokerHolding`` per the
+        STORY-7 table:
+
+          * ``symbol         <- trading_symbol``
+          * ``isin           <- isin``
+          * ``quantity       <- Decimal(str(quantity))``
+          * ``average_price  <- Decimal(str(average_price))``
+          * ``last_price     <- Decimal(str(last_price))``
+          * ``exchange       <- exchange``
+          * ``product        <- product``
+          * ``instrument_id  <- instrument_token``
+          * ``name           <- company_name``
+          * ``raw            <- the whole element`` (so any
+            undocumented key the broker adds later is preserved
+            verbatim in the DTO instead of being silently dropped)
+
+        Numeric coercion rules (the AC's "Numeric fields must go
+        through ``Decimal(str(value))`` (never ``float``) and be
+        ``None`` when the key is absent or null" rule):
+
+          * Every numeric field (``quantity``, ``average_price``,
+            ``last_price``) is coerced via ``Decimal(str(value))``.
+            ``Decimal(str(...))`` rather than ``Decimal(value)`` is
+            the documented way to avoid binary float rounding
+            surprises (e.g. ``Decimal(0.1)`` is
+            ``Decimal('0.1000000000000000055511151231257827021181583404541015625')``
+            while ``Decimal(str(0.1))`` is ``Decimal('0.1')``).
+          * If the key is absent OR explicitly ``None`` in the
+            response element, the resulting field is ``None`` —
+            the DTO dataclass permits ``None`` for these fields
+            so a broker payload with a null ``average_price``
+            (documented as legal for zero-quantity / delisted rows)
+            does not crash the whole import.
+
+        Element-level errors (the AC's "an element missing
+        ``trading_symbol`` is skipped with a warning log rather than
+        failing the whole import" rule):
+
+          * If an element is missing ``trading_symbol`` (the
+            minimum field that uniquely identifies a holding),
+            ``fetch_holdings`` logs a warning on ``self._logger``
+            and skips that element — the rest of the import still
+            succeeds. This matches Upstox's own behaviour of
+            occasionally returning a partially-formed element on
+            delisted or merged securities, where failing the entire
+            import would discard the rest of the user's portfolio.
+          * Any other missing mandatory field (``isin``,
+            ``instrument_token``, ``company_name``, ``exchange``,
+            ``product``) is also tolerated — the resulting DTO
+            carries the empty string / 0 / ``None`` defaults rather
+            than the whole import failing. ``trading_symbol`` is the
+            single field treated as a skip-triggers because it's the
+            only one the import cannot meaningfully proceed without.
+
+        Top-level errors:
+
+          * ``status != 'success'`` → ``BrokerApiError`` (the
+            helper raises this already for a non-success body; we
+            do not need to re-check here — the helper's contract
+            is the single source of truth).
+          * ``data`` missing or ``None`` → returns ``[]`` (an
+            empty portfolio is a legal state, not an error).
+          * ``data`` not a list → ``BrokerApiError`` (the contract
+            says it's a list; anything else is a contract
+            violation worth surfacing rather than silently
+            fabricating an empty result).
+
+        Returns:
+            A list of ``BrokerHolding`` objects, one per parsed
+            ``data`` element. Order matches the broker's response
+            order. May be empty when ``data`` is empty or ``None``.
+        """
+        response_body = self._http.get(
+            path=self._UPSTOX_LONG_TERM_HOLDINGS_PATH
         )
+
+        # Defensive: ``response_body`` is guaranteed to be a ``dict``
+        # by ``_UpstoxHttp._map_response_to_body`` (which raises
+        # ``BrokerApiError`` on non-dict 2xx bodies), but the helper
+        # is the contract owner for the request shape; we only own
+        # the response mapping here.
+        #
+        # Belt-and-braces status check: the HTTP helper already
+        # enforces ``status == 'success'`` on a 2xx body and raises
+        # ``BrokerApiError`` otherwise. We re-check here so a test
+        # that mocks ``_UpstoxHttp.get`` to return a literal dict
+        # (bypassing the helper's own mapping) still gets the
+        # documented "status != 'success' -> BrokerApiError"
+        # behaviour for free. The cost is one ``.get()`` per call;
+        # the benefit is that this method is robust to a
+        # misconfigured helper as well as a misbehaving broker.
+        if response_body.get("status") != "success":
+            raise BrokerApiError(
+                f"Upstox long-term-holdings response status is "
+                f"{response_body.get('status')!r}, not 'success'"
+            )
+
+        data = response_body.get("data")
+
+        # Missing or null ``data`` is a documented "empty portfolio"
+        # state, not an error — return ``[]`` rather than raising.
+        if data is None:
+            return []
+
+        # ``data`` is documented to be a list. Anything else (a
+        # dict, a string, an int) is a contract violation; surface
+        # it as ``BrokerApiError`` rather than silently fabricating
+        # an empty result that would mask a real upstream bug.
+        if not isinstance(data, list):
+            raise BrokerApiError(
+                f"Upstox long-term-holdings response 'data' field "
+                f"is not a list; got {type(data).__name__}"
+            )
+
+        holdings: list[BrokerHolding] = []
+        for element in data:
+            # Non-dict elements are a real contract violation —
+            # surface as BrokerApiError rather than silently
+            # dropping. A real broker would never emit a non-dict
+            # element; this branch only fires on a malformed
+            # upstream response, which is exactly what we want to
+            # raise loudly about.
+            if not isinstance(element, dict):
+                raise BrokerApiError(
+                    f"Upstox long-term-holdings 'data' element is "
+                    f"not a dict; got {type(element).__name__}"
+                )
+
+            # Element-level skip rule: an element missing
+            # ``trading_symbol`` is logged as a warning and
+            # skipped — the rest of the import proceeds. We check
+            # for *both* "key absent" and "value is None" so a
+            # broker payload that explicitly nulls the field is
+            # treated identically to one that omits it.
+            trading_symbol_raw = element.get("trading_symbol")
+            if not trading_symbol_raw or not isinstance(
+                trading_symbol_raw, str
+            ):
+                self._logger.warning(
+                    "DefaultUpstoxBrokerConnector.fetch_holdings: "
+                    "[UPSTOX_HOLDING_ELEMENT_SKIPPED] "
+                    "skipping holding element missing 'trading_symbol'",
+                    extra={
+                        "error_code": "UPSTOX_HOLDING_ELEMENT_SKIPPED",
+                        "isin": element.get("isin"),
+                        "instrument_token": element.get("instrument_token"),
+                        "company_name": element.get("company_name"),
+                    },
+                )
+                continue
+
+            # Numeric coercion helper — every numeric field goes
+            # through ``Decimal(str(value))`` per the AC's
+            # explicit rule. A ``None`` value or a missing key
+            # both map to ``None`` (the dataclass permits it);
+            # any other value is coerced via ``str(...)`` first
+            # so binary-float surprises never reach the DTO.
+            def _coerce_decimal_or_none(value) -> Decimal | None:
+                if value is None:
+                    return None
+                try:
+                    return Decimal(str(value))
+                except (InvalidOperation, ValueError) as exc:
+                    raise BrokerApiError(
+                        f"Upstox long-term-holdings element has a "
+                        f"non-numeric value where a number was "
+                        f"expected: {value!r}"
+                    ) from exc
+
+            quantity = _coerce_decimal_or_none(element.get("quantity"))
+            average_price = _coerce_decimal_or_none(
+                element.get("average_price")
+            )
+            last_price = _coerce_decimal_or_none(
+                element.get("last_price")
+            )
+
+            # String fields default to "" when absent — the
+            # dataclass permits ``None`` for ``symbol`` /
+            # ``instrument_id`` but typing them as ``str`` makes
+            # downstream code's life easier. Empty-string is the
+            # safest "I saw the field but it was missing"
+            # representation; callers that need to distinguish
+            # "missing" from "present but empty" should check the
+            # ``raw`` dict, which preserves the exact source
+            # element.
+            def _coerce_str_or_empty(value) -> str:
+                if value is None:
+                    return ""
+                if isinstance(value, str):
+                    return value
+                return str(value)
+
+            isin = _coerce_str_or_empty(element.get("isin"))
+            exchange = _coerce_str_or_empty(element.get("exchange"))
+            product = _coerce_str_or_empty(element.get("product"))
+            instrument_id = _coerce_str_or_empty(
+                element.get("instrument_token")
+            )
+            name = _coerce_str_or_empty(element.get("company_name"))
+
+            holdings.append(
+                BrokerHolding(
+                    symbol=trading_symbol_raw,
+                    isin=isin,
+                    quantity=quantity,
+                    average_price=average_price,
+                    last_price=last_price,
+                    exchange=exchange,
+                    product=product,
+                    instrument_id=instrument_id,
+                    name=name,
+                    # ``raw`` is the entire element verbatim, so
+                    # any extra undocumented keys Upstox adds
+                    # later (the documented shape ends in '...')
+                    # are preserved without us having to invent a
+                    # field for each one. The AC's explicit
+                    # "Unknown/extra keys must be preserved in
+                    # ``raw``" rule is satisfied by this single
+                    # line — no need to enumerate "documented"
+                    # vs "undocumented" keys.
+                    raw=element,
+                )
+            )
+
+        return holdings
 
     def fetch_transactions(
         self,
