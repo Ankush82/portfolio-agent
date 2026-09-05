@@ -15,6 +15,15 @@ import json
 import pytest
 
 from components.c01_user_portfolio import (
+    BrokerApiError,
+    BrokerAuthError,
+    BrokerConfigError,
+    BrokerConnector,
+    BrokerCredentials,
+    BrokerError,
+    BrokerHolding,
+    BrokerRateLimitError,
+    BrokerTransaction,
     DefaultUserPortfolio,
     Holding,
     PlaceholderBrokerConnector,
@@ -23,6 +32,7 @@ from components.c01_user_portfolio import (
     Position,
     StubUserPortfolio,
     Transaction,
+    UnsupportedBrokerError,
     User,
     validate_stock_symbol,
 )
@@ -590,6 +600,505 @@ def test_stub_user_portfolio_untouched():
     assert stub.import_transactions(portfolio) == []
     assert stub.calculate_exposure(PortfolioSnapshot(portfolio_id="x", positions=[], exposure={})) == {}
     assert stub.determine_user_relevance(user, {}) is True
+
+
+# --- BrokerConnector DTOs and Protocol (STORY-2) ----------------------------
+
+
+def test_broker_connector_dto_instances_and_immutability():
+    """Construct one instance of each DTO and assert field types and immutability."""
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    # BrokerCredentials
+    creds = BrokerCredentials(
+        access_token="token123",
+        token_type="Bearer",
+        expires_at=datetime(2025, 1, 1, 12, 0, 0),
+        refresh_token="refresh123",
+        broker_user_id="user123",
+        raw={"key": "value"},
+    )
+    assert creds.access_token == "token123"
+    assert creds.token_type == "Bearer"
+    assert creds.expires_at == datetime(2025, 1, 1, 12, 0, 0)
+    assert creds.refresh_token == "refresh123"
+    assert creds.broker_user_id == "user123"
+    assert creds.raw == {"key": "value"}
+    # Type checks
+    assert isinstance(creds.access_token, str)
+    assert isinstance(creds.token_type, str)
+    assert isinstance(creds.expires_at, datetime)
+    assert isinstance(creds.refresh_token, str)
+    assert isinstance(creds.broker_user_id, str)
+    assert isinstance(creds.raw, dict)
+    # Immutability (frozen dataclass)
+    with pytest.raises(FrozenInstanceError):
+        creds.access_token = "new"
+
+    # BrokerHolding
+    holding = BrokerHolding(
+        symbol="AAPL",
+        isin="US0378331005",
+        quantity=Decimal("10.0"),
+        average_price=Decimal("150.0"),
+        last_price=Decimal("155.0"),
+        exchange="NASDAQ",
+        product="equity",
+        instrument_id="12345",
+        name="Apple Inc.",
+        raw={"exchange": "NASDAQ"},
+    )
+    assert holding.symbol == "AAPL"
+    assert holding.isin == "US0378331005"
+    assert holding.quantity == Decimal("10.0")
+    assert holding.average_price == Decimal("150.0")
+    assert holding.last_price == Decimal("155.0")
+    assert holding.exchange == "NASDAQ"
+    assert holding.product == "equity"
+    assert holding.instrument_id == "12345"
+    assert holding.name == "Apple Inc."
+    assert holding.raw == {"exchange": "NASDAQ"}
+    # Type checks
+    assert isinstance(holding.symbol, str)
+    assert isinstance(holding.isin, str)
+    assert isinstance(holding.quantity, Decimal)
+    assert isinstance(holding.average_price, Decimal)
+    assert isinstance(holding.last_price, Decimal)
+    assert isinstance(holding.exchange, str)
+    assert isinstance(holding.product, str)
+    assert isinstance(holding.instrument_id, str)
+    assert isinstance(holding.name, str)
+    assert isinstance(holding.raw, dict)
+    # Immutability
+    with pytest.raises(FrozenInstanceError):
+        holding.symbol = "MSFT"
+
+    # BrokerTransaction
+    transaction = BrokerTransaction(
+        external_id="ext123",
+        symbol="AAPL",
+        isin="US0378331005",
+        trade_date=date(2025, 1, 1),
+        side="BUY",
+        quantity=Decimal("10.0"),
+        price=Decimal("150.0"),
+        amount=Decimal("1500.0"),
+        exchange="NASDAQ",
+        segment="equity",
+        raw={"trade_id": "trade123"},
+    )
+    assert transaction.external_id == "ext123"
+    assert transaction.symbol == "AAPL"
+    assert transaction.isin == "US0378331005"
+    assert transaction.trade_date == date(2025, 1, 1)
+    assert transaction.side == "BUY"
+    assert transaction.quantity == Decimal("10.0")
+    assert transaction.price == Decimal("150.0")
+    assert transaction.amount == Decimal("1500.0")
+    assert transaction.exchange == "NASDAQ"
+    assert transaction.segment == "equity"
+    assert transaction.raw == {"trade_id": "trade123"}
+    # Type checks
+    assert isinstance(transaction.external_id, str)
+    assert isinstance(transaction.symbol, str)
+    assert isinstance(transaction.isin, str)
+    assert isinstance(transaction.trade_date, date)
+    assert transaction.side in ("BUY", "SELL")
+    assert isinstance(transaction.quantity, Decimal)
+    assert isinstance(transaction.price, Decimal)
+    assert isinstance(transaction.amount, Decimal)
+    assert isinstance(transaction.exchange, str)
+    assert isinstance(transaction.segment, str)
+    assert isinstance(transaction.raw, dict)
+    # Immutability
+    with pytest.raises(FrozenInstanceError):
+        transaction.symbol = "MSFT"
+
+    # Protocol existence and runtime_checkable
+    from typing import runtime_checkable
+    assert runtime_checkable(BrokerConnector)
+    # Check that the Protocol has the required attributes (just a basic check)
+    assert hasattr(BrokerConnector, 'broker_id')
+    assert hasattr(BrokerConnector, 'display_name')
+    assert hasattr(BrokerConnector, 'build_authorize_url')
+    assert hasattr(BrokerConnector, 'exchange_auth_code')
+    assert hasattr(BrokerConnector, 'fetch_holdings')
+    assert hasattr(BrokerConnector, 'fetch_transactions')
+
+
+# --- STORY-2 QA: broker-agnostic BrokerConnector Protocol, DTOs, exceptions -
+
+
+def test_qa_story2_protocol_is_runtime_checkable_and_required_members_match_brief():
+    """AC: BrokerConnector Protocol is declared @runtime_checkable so
+    conformance can be asserted in tests; the six members listed in
+    the brief (broker_id, display_name, build_authorize_url,
+    exchange_auth_code, fetch_holdings, fetch_transactions) all
+    exist with exactly the signatures described. No pagination or
+    Upstox-specific field may appear on the Protocol."""
+    import dataclasses
+    import inspect
+    import re
+    from typing import runtime_checkable
+
+    # Protocol is runtime_checkable — actual conformance check: an
+    # implementer (PlaceholderBrokerConnector) is isinstance(.)
+    # against the Protocol, which is the whole point of
+    # @runtime_checkable. Without it, the conformance claim is
+    # unsubstantiated.
+    assert runtime_checkable(BrokerConnector), "BrokerConnector must be @runtime_checkable"
+    placeholder_instance = PlaceholderBrokerConnector()
+    assert isinstance(placeholder_instance, BrokerConnector), (
+        "PlaceholderBrokerConnector must satisfy BrokerConnector at "
+        "runtime (the @runtime_checkable guarantee)"
+    )
+
+    # Required attributes (members) all present on the Protocol class.
+    # For a typing.Protocol, attributes declared at class body level
+    # land in __annotations__ (this is how runtime_checkable is able
+    # to enforce them); has_attr on the Protocol object itself is
+    # NOT the right check for attribute declarations.
+    proto_annotations = dict(BrokerConnector.__annotations__)
+    for member in ("broker_id", "display_name"):
+        assert member in proto_annotations, (
+            f"BrokerConnector Protocol must declare {member!r} as an "
+            f"attribute annotation; missing from {sorted(proto_annotations)!r}"
+        )
+        assert proto_annotations[member] is str, (
+            f"BrokerConnector.{member} annotation must be str; "
+            f"got {proto_annotations[member]!r}"
+        )
+    # Callable methods on the Protocol
+    for member in ("build_authorize_url", "exchange_auth_code",
+                   "fetch_holdings", "fetch_transactions"):
+        assert hasattr(BrokerConnector, member), (
+            f"BrokerConnector Protocol must declare {member!r} as a method; missing"
+        )
+
+    # No pagination hook on the Protocol — pagination is a
+    # connector-internal concern per the brief.
+    proto_src = inspect.getsource(BrokerConnector)
+    assert not re.search(r"page[_a-zA-Z]*\s*[:=]", proto_src), (
+        "BrokerConnector Protocol must not declare a pagination "
+        "parameter (pagination is connector-internal per the brief)"
+    )
+    # fetch_transactions signature must be the exact one in the brief:
+    # (self, *, credentials, start_date, end_date) — no page/page_size.
+    fetch_tx_sig = inspect.signature(BrokerConnector.fetch_transactions)
+    assert "credentials" in fetch_tx_sig.parameters
+    assert "start_date" in fetch_tx_sig.parameters
+    assert "end_date" in fetch_tx_sig.parameters
+    assert "page" not in fetch_tx_sig.parameters
+    assert "page_size" not in fetch_tx_sig.parameters
+    assert "page_number" not in fetch_tx_sig.parameters
+    # fetch_holdings returns a materialised list, not an iterator (the
+    # brief's decision (a) is that fetch_transactions returns a list too,
+    # so the simpler check on fetch_holdings covering "list not iterator"
+    # suffices; we also check fetch_transactions here).
+    holdings_anno = BrokerConnector.fetch_holdings.__annotations__.get("return")
+    tx_anno = BrokerConnector.fetch_transactions.__annotations__.get("return")
+    assert "list" in repr(holdings_anno), (
+        f"fetch_holdings return annotation must be list[BrokerHolding]; got {holdings_anno!r}"
+    )
+    assert "Iterator" not in repr(holdings_anno), (
+        f"fetch_holdings must return a list, not an iterator; got {holdings_anno!r}"
+    )
+    assert "list" in repr(tx_anno), (
+        f"fetch_transactions return annotation must be list[BrokerTransaction]; got {tx_anno!r}"
+    )
+
+    # No Upstox field names may appear in the Protocol's own source —
+    # specifically not 'trading_symbol', 'instrument_token',
+    # 'scrip_name', 'page_number', 'meta_data', and no literal
+    # 'upstox' string and no upstox.com URL.
+    forbidden = ("upstox", "trading_symbol", "instrument_token",
+                 "scrip_name", "page_number", "meta_data")
+    for name in forbidden:
+        assert name.lower() not in proto_src.lower(), (
+            f"BrokerConnector Protocol source must not mention {name!r}"
+        )
+    assert "upstox.com" not in proto_src, (
+        "BrokerConnector Protocol must not reference an Upstox URL"
+    )
+
+    # build_authorize_url takes state as a keyword-only argument
+    # returning str (from the brief).
+    bau_sig = inspect.signature(BrokerConnector.build_authorize_url)
+    state_param = bau_sig.parameters.get("state")
+    assert state_param is not None, "build_authorize_url must take 'state'"
+    assert state_param.kind == inspect.Parameter.KEYWORD_ONLY, (
+        "build_authorize_url's 'state' must be keyword-only"
+    )
+    assert "str" in repr(bau_sig.return_annotation), (
+        f"build_authorize_url must return str; got {bau_sig.return_annotation!r}"
+    )
+
+
+def test_qa_story2_dtos_use_decimal_date_datetime_and_are_frozen_with_no_upstox_fields():
+    """AC: All three DTOs exist with exactly the fields listed in the
+    brief, Decimal for quantities/prices, date/datetime for temporal
+    fields, are frozen (immutable), and contain no Upstox-specific
+    field name (trading_symbol, instrument_token, scrip_name,
+    page_number, meta_data) and no 'upstox' string anywhere."""
+    import dataclasses
+    import inspect
+    from dataclasses import fields
+    from datetime import date, datetime
+    from decimal import Decimal
+    from typing import Literal
+
+    # --- BrokerCredentials ---
+    creds_fields = {f.name: f for f in fields(BrokerCredentials)}
+    expected_creds = {"access_token", "token_type", "expires_at",
+                      "refresh_token", "broker_user_id", "raw"}
+    assert set(creds_fields.keys()) == expected_creds, (
+        f"BrokerCredentials fields must be exactly {expected_creds}; "
+        f"got {set(creds_fields.keys())}"
+    )
+    assert creds_fields["access_token"].type is str, (
+        "BrokerCredentials.access_token must be typed as str"
+    )
+    assert creds_fields["token_type"].type is str, (
+        "BrokerCredentials.token_type must be typed as str"
+    )
+    # expires_at is datetime|None — accept either Optional[datetime]
+    # or a Union[...] annotation that includes datetime.
+    expires_at_type = creds_fields["expires_at"].type
+    assert expires_at_type in (datetime, "datetime") or "datetime" in repr(expires_at_type), (
+        f"BrokerCredentials.expires_at must be datetime|None; got {expires_at_type!r}"
+    )
+    # refresh_token, broker_user_id are Optional[str]
+    for fld in ("refresh_token", "broker_user_id"):
+        ft = creds_fields[fld].type
+        assert ft in (str, "str") or "str" in repr(ft) or "None" in repr(ft), (
+            f"BrokerCredentials.{fld} must be str|None; got {ft!r}"
+        )
+    # raw is dict
+    assert creds_fields["raw"].type is dict, (
+        f"BrokerCredentials.raw must be dict; got {creds_fields['raw'].type!r}"
+    )
+    # Defaults per brief: token_type='Bearer', everything else None.
+    assert creds_fields["token_type"].default == "Bearer", (
+        f"BrokerCredentials.token_type default must be 'Bearer'; "
+        f"got {creds_fields['token_type'].default!r}"
+    )
+    assert creds_fields["expires_at"].default is None, (
+        f"BrokerCredentials.expires_at default must be None; "
+        f"got {creds_fields['expires_at'].default!r}"
+    )
+    assert creds_fields["refresh_token"].default is None
+    assert creds_fields["broker_user_id"].default is None
+    # raw default factory returns dict
+    assert creds_fields["raw"].default_factory is not None, (
+        "BrokerCredentials.raw must have a default_factory returning dict"
+    )
+    assert creds_fields["raw"].default_factory() == {}
+
+    # Frozen / immutable: try to assign to a fresh instance, expect FrozenInstanceError
+    from dataclasses import FrozenInstanceError
+    c = BrokerCredentials(access_token="tok")
+    with pytest.raises(FrozenInstanceError):
+        c.access_token = "different"
+    # Constructing with the minimal set must work (all optional fields default)
+    c_min = BrokerCredentials(access_token="only-required")
+    assert c_min.access_token == "only-required"
+    assert c_min.token_type == "Bearer"
+    assert c_min.expires_at is None
+    assert c_min.refresh_token is None
+    assert c_min.broker_user_id is None
+    assert c_min.raw == {}
+
+    # --- BrokerHolding ---
+    holding_fields = {f.name: f for f in fields(BrokerHolding)}
+    expected_holding = {"symbol", "isin", "quantity", "average_price",
+                        "last_price", "exchange", "product",
+                        "instrument_id", "name", "raw"}
+    assert set(holding_fields.keys()) == expected_holding, (
+        f"BrokerHolding fields must be exactly {expected_holding}; "
+        f"got {set(holding_fields.keys())}"
+    )
+    # Decimal-typed quantity/price fields
+    for fld in ("quantity", "average_price", "last_price"):
+        ft = holding_fields[fld].type
+        assert ft is Decimal or "Decimal" in repr(ft), (
+            f"BrokerHolding.{fld} must be Decimal; got {ft!r}"
+        )
+    # Str-typed identifying fields
+    for fld in ("symbol", "isin", "exchange", "product",
+                "instrument_id", "name"):
+        ft = holding_fields[fld].type
+        assert ft is str or "str" in repr(ft), (
+            f"BrokerHolding.{fld} must be str; got {ft!r}"
+        )
+    # raw default_factory returns dict
+    assert holding_fields["raw"].default_factory is not None
+    assert holding_fields["raw"].default_factory() == {}
+
+    h = BrokerHolding(
+        symbol="AAPL",
+        isin="US0378331005",
+        quantity=Decimal("10"),
+        average_price=Decimal("150"),
+        last_price=Decimal("155"),
+        exchange="NASDAQ",
+        product="equity",
+        instrument_id="12345",
+        name="Apple Inc.",
+    )
+    with pytest.raises(FrozenInstanceError):
+        h.symbol = "MSFT"
+    # Real values are persisted as the typed types (not coerced to str)
+    assert isinstance(h.quantity, Decimal)
+    assert h.quantity == Decimal("10")
+    assert isinstance(h.average_price, Decimal)
+    assert isinstance(h.last_price, Decimal)
+
+    # --- BrokerTransaction ---
+    tx_fields = {f.name: f for f in fields(BrokerTransaction)}
+    expected_tx = {"external_id", "symbol", "isin", "trade_date",
+                   "side", "quantity", "price", "amount", "exchange",
+                   "segment", "raw"}
+    assert set(tx_fields.keys()) == expected_tx, (
+        f"BrokerTransaction fields must be exactly {expected_tx}; "
+        f"got {set(tx_fields.keys())}"
+    )
+    # Decimal-typed quantity/price/amount
+    for fld in ("quantity", "price", "amount"):
+        ft = tx_fields[fld].type
+        assert ft is Decimal or "Decimal" in repr(ft), (
+            f"BrokerTransaction.{fld} must be Decimal; got {ft!r}"
+        )
+    # trade_date is date
+    assert tx_fields["trade_date"].type is date, (
+        f"BrokerTransaction.trade_date must be date; got {tx_fields['trade_date'].type!r}"
+    )
+    # side is Literal['BUY','SELL']
+    side_type = tx_fields["side"].type
+    assert "Literal" in repr(side_type), (
+        f"BrokerTransaction.side must be Literal['BUY','SELL']; got {side_type!r}"
+    )
+    assert "'BUY'" in repr(side_type) and "'SELL'" in repr(side_type), (
+        f"BrokerTransaction.side must be Literal['BUY','SELL']; got {side_type!r}"
+    )
+    # Str-typed fields
+    for fld in ("external_id", "symbol", "isin", "exchange", "segment"):
+        ft = tx_fields[fld].type
+        assert ft is str or "str" in repr(ft), (
+            f"BrokerTransaction.{fld} must be str; got {ft!r}"
+        )
+    # raw default_factory returns dict
+    assert tx_fields["raw"].default_factory is not None
+
+    t = BrokerTransaction(
+        external_id="ext-1",
+        symbol="AAPL",
+        isin="US0378331005",
+        trade_date=date(2025, 1, 15),
+        side="BUY",
+        quantity=Decimal("10"),
+        price=Decimal("150"),
+        amount=Decimal("1500"),
+        exchange="NASDAQ",
+        segment="equity",
+    )
+    with pytest.raises(FrozenInstanceError):
+        t.symbol = "MSFT"
+    # Temporal field is a real date
+    assert isinstance(t.trade_date, date)
+    assert t.trade_date == date(2025, 1, 15)
+    # Decimal fields are real Decimals
+    assert isinstance(t.quantity, Decimal)
+    assert isinstance(t.price, Decimal)
+    assert isinstance(t.amount, Decimal)
+
+    # --- No Upstox field name / 'upstox' string in DTO field names ---
+    forbidden = ("upstox", "trading_symbol", "instrument_token",
+                 "scrip_name", "page_number", "meta_data")
+    for dto_name, dto_fields in (
+        ("BrokerCredentials", creds_fields),
+        ("BrokerHolding", holding_fields),
+        ("BrokerTransaction", tx_fields),
+    ):
+        for name in forbidden:
+            assert name not in dto_fields, (
+                f"{dto_name} must not declare field {name!r} "
+                f"(Upstox-specific, not broker-agnostic)"
+            )
+
+
+def test_qa_story2_exception_hierarchy_all_derive_from_single_broker_error_base():
+    """AC: Full exception hierarchy exists with BrokerError as the
+    single base; BrokerConfigError, BrokerAuthError, BrokerApiError,
+    BrokerRateLimitError, UnsupportedBrokerError all derive from
+    BrokerError (and ultimately Exception). The names match the
+    brief exactly."""
+    # Every leaf exception is a subclass of BrokerError
+    for cls in (BrokerConfigError, BrokerAuthError, BrokerApiError,
+                BrokerRateLimitError, UnsupportedBrokerError):
+        assert issubclass(cls, BrokerError), (
+            f"{cls.__name__} must derive from BrokerError"
+        )
+        assert issubclass(cls, Exception), (
+            f"{cls.__name__} must ultimately derive from Exception"
+        )
+    # Single base: BrokerError itself derives from Exception, not from
+    # any other broker-specific exception class.
+    assert BrokerError.__bases__ == (Exception,), (
+        f"BrokerError must derive directly from Exception only; "
+        f"got bases={BrokerError.__bases__}"
+    )
+    # No Upstox-specific name in any exception class name (e.g.
+    # UpstoxAuthError would leak the vendor name into the error
+    # taxonomy).
+    for cls in (BrokerError, BrokerConfigError, BrokerAuthError,
+                BrokerApiError, BrokerRateLimitError, UnsupportedBrokerError):
+        assert "upstox" not in cls.__name__.lower(), (
+            f"Exception class {cls.__name__} must not reference Upstox"
+        )
+
+    # Instantiability / raisability: each leaf exception can be raised
+    # and caught as its own type or as BrokerError.
+    for cls in (BrokerConfigError, BrokerAuthError, BrokerApiError,
+                BrokerRateLimitError, UnsupportedBrokerError):
+        try:
+            raise cls("synthetic failure")
+        except BrokerError as exc:
+            assert isinstance(exc, cls), (
+                f"Caught {type(exc).__name__}, expected {cls.__name__}"
+            )
+
+
+def test_qa_story2_no_upstox_leak_in_protocol_dtos_or_exceptions_across_the_source_file():
+    """AC: No Upstox-specific field name (trading_symbol,
+    instrument_token, scrip_name, page_number, meta_data), no
+    Upstox URL, and the literal string 'upstox' appears nowhere in
+    the Protocol, the DTOs, or the exceptions. Checked against the
+    real source file rather than reconstructed annotations so a stray
+    string literal cannot slip through."""
+    import inspect
+
+    # Concatenate source for every relevant symbol in c01_user_portfolio.py
+    sources = []
+    for sym in (BrokerConnector, BrokerCredentials, BrokerHolding,
+                BrokerTransaction, BrokerError, BrokerConfigError,
+                BrokerAuthError, BrokerApiError, BrokerRateLimitError,
+                UnsupportedBrokerError, PlaceholderBrokerConnector):
+        try:
+            sources.append(inspect.getsource(sym))
+        except (TypeError, OSError):
+            pass
+
+    forbidden_substrings = (
+        "upstox", "trading_symbol", "instrument_token", "scrip_name",
+        "page_number", "meta_data", "upstox.com",
+    )
+    combined = "\n".join(sources).lower()
+    for token in forbidden_substrings:
+        assert token.lower() not in combined, (
+            f"Protocol / DTOs / exceptions source must not contain "
+            f"{token!r} (Upstox-specific, not broker-agnostic)"
+        )
 
 
 # --- Holding dataclass validation (STORY-1) -------------------------------
