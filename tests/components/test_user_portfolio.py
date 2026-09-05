@@ -72,6 +72,9 @@ class _InMemoryInfrastructure:
             if all(record.get(key) == value for key, value in filters.items())
         ]
 
+    def delete(self, table: str, id: str) -> bool:
+        return self._tables.get(table, {}).pop(id, None) is not None
+
 
 class _FakeBrokerConnector:
     """Test double returning caller-configured holdings/transactions,

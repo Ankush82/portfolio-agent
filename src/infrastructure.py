@@ -36,6 +36,11 @@ class Infrastructure(Protocol):
         """Read records matching filters."""
         ...
 
+    def delete(self, table: str, id: str) -> bool:
+        """Delete a record by id. Returns True if a row was removed,
+        False if no matching row existed."""
+        ...
+
     def publish(self, topic: str, event: dict) -> None:
         """Publish an event onto the (Postgres-backed, for now) queue."""
         ...
@@ -76,6 +81,10 @@ class StubInfrastructure:
     def query(self, table: str, filters: dict) -> list[dict]:
         with traced("StubInfrastructure.query"):
             return []
+
+    def delete(self, table: str, id: str) -> bool:
+        with traced("StubInfrastructure.delete"):
+            return False
 
     def publish(self, topic: str, event: dict) -> None:
         with traced("StubInfrastructure.publish"):

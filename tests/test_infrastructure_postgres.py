@@ -70,6 +70,28 @@ def test_retrieve_missing_id_returns_none(infra):
 
 
 @requires_postgres
+def test_store_then_delete_then_retrieve_returns_none(infra):
+    table = f"test_records_{uuid.uuid4().hex}"
+    record = {"id": "widget-1", "name": "Widget", "count": 3}
+
+    record_id = infra.store(table, record)
+    deleted = infra.delete(table, record_id)
+    retrieved = infra.retrieve(table, record_id)
+
+    assert deleted is True
+    assert retrieved is None
+
+
+@requires_postgres
+def test_delete_unknown_id_returns_false_and_does_not_raise(infra):
+    table = f"test_records_{uuid.uuid4().hex}"
+
+    deleted = infra.delete(table, "does-not-exist")
+
+    assert deleted is False
+
+
+@requires_postgres
 def test_store_without_id_generates_one(infra):
     table = f"test_records_{uuid.uuid4().hex}"
 

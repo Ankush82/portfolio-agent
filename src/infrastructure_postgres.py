@@ -181,6 +181,19 @@ class DefaultInfrastructure:
                 rows = cursor.fetchall()
             return [row[0] for row in rows]
 
+    def delete(self, table: str, id: str) -> bool:
+        """Removes the row with `(table_name, id)` from the `records`
+        table. Returns True if a row was removed, False if no matching
+        row existed — idempotent for nonexistent ids (never raises)."""
+        with traced("DefaultInfrastructure.delete"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM records WHERE table_name = %s AND id = %s",
+                    (table, id),
+                )
+                rowcount = cursor.rowcount
+            return rowcount > 0
+
     def publish(self, topic: str, event: dict) -> None:
         with traced("DefaultInfrastructure.publish"):
             with self._connection().cursor() as cursor:
