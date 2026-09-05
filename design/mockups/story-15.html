@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en" data-theme="corporate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portfolio Display Mockup - Story-15</title>
+  <link rel="stylesheet" href="../../static/css/tailwind.css">
+</head>
+<body class="min-h-screen bg-base-200">
+  <header class="navbar bg-base-100 shadow-sm px-6">
+    <h1 class="text-xl font-semibold">Portfolio Agent</h1>
+  </header>
+  <main class="max-w-3xl mx-auto p-6">
+    <h2 class="text-2xl font-bold mb-4">Portfolio Display</h2>
+
+    <!-- Summary by Currency -->
+    <section class="card w-full mb-6">
+      <div class="card-body">
+        <h3 class="card-title text-lg font-medium mb-4">Summary by Currency</h3>
+        <div class="grid gap-4 md:grid-cols-2">
+          <!-- INR Summary -->
+          <div class="stat bg-base-200">
+            <div class="stat-title">Total INR Holdings</div>
+            <div class="stat-value">₹ 1,25,430.50 (INR)</div>
+          </div>
+          <!-- USD Summary -->
+          <div class="stat bg-base-200">
+            <div class="stat-title">Total USD Holdings</div>
+            <div class="stat-value">$ 1,845.20 (USD)</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Holdings Detail -->
+    <section class="card w-full">
+      <div class="card-body">
+        <h3 class="card-title text-lg font-medium mb-4">Holdings Detail</h3>
+        <div class="overflow-x-auto">
+          <table class="table table-bordered w-full">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>Exchange</th>
+                <th>Currency</th>
+                <th>Quantity</th>
+                <th>Price (₹/$)</th>
+                <th>Value (₹/$)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- INR Holdings -->
+              <tr class="hover:bg-base-200">
+                <td>RELIANCE</td>
+                <td>NSE</td>
+                <td>INR</td>
+                <td>10</td>
+                <td>₹ 2,543.05 (INR)</td>
+                <td>₹ 25,430.50 (INR)</td>
+              </tr>
+              <tr class="hover:bg-base-200">
+                <td>TCS</td>
+                <td>BSE</td>
+                <td>INR</td>
+                <td>5</td>
+                <td>₹ 3,800.00 (INR)</td>
+                <td>₹ 19,000.00 (INR)</td>
+              </tr>
+              <tr class="hover:bg-base-200">
+                <td>INFY</td>
+                <td>NSE</td>
+                <td>INR</td>
+                <td>8</td>
+                <td>₹ 1,650.75 (INR)</td>
+                <td>₹ 13,206.00 (INR)</td>
+              </tr>
+              <!-- USD Holdings -->
+              <tr class="hover:bg-base-200">
+                <td>AAPL</td>
+                <td>NASDAQ</td>
+                <td>USD</td>
+                <td>4</td>
+                <td>$ 175.50 (USD)</td>
+                <td>$ 702.00 (USD)</td>
+              </tr>
+              <tr class="hover:bg-base-200">
+                <td>MSFT</td>
+                <td>NASDAQ</td>
+                <td>USD</td>
+                <td>3</td>
+                <td>$ 340.40 (USD)</td>
+                <td>$ 1,021.20 (USD)</td>
+              </tr>
+              <tr class="hover:bg-base-200">
+                <td>GOOGL</td>
+                <td>NASDAQ</td>
+                <td>USD</td>
+                <td>2</td>
+                <td>$ 142.10 (USD)</td>
+                <td>$ 284.20 (USD)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
