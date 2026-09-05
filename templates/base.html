@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="corporate">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Portfolio Agent{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
 </head>
-<body>
-  <header>
-    <h1>Portfolio Agent</h1>
+<body class="min-h-screen bg-base-200">
+  <header class="navbar bg-base-100 shadow-sm px-6">
+    <h1 class="text-xl font-semibold">Portfolio Agent</h1>
   </header>
-  <main>
+  <main class="max-w-3xl mx-auto p-6">
     {% block content %}{% endblock %}
   </main>
   {% block scripts %}{% endblock %}

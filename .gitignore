@@ -8,3 +8,9 @@ venv/
 .pytest_cache/
 trace.log
 audit.log
+# Real Tailwind CSS v4 + daisyUI standalone CLI binary (dobicinaitis/
+# tailwind-cli-extra) -- ~75MB, platform-specific, and fully reproducible
+# via scripts/build_tailwind.sh's own self-download -- never commit it.
+# static/css/tailwind.css (the actual compiled CSS output) IS committed;
+# only this binary tool that produces it is excluded.
+/bin/tailwindcss-extra
