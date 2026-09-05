@@ -1,0 +1,45 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "isin": "INE002A01018",
+      "trading_symbol": "RELIANCE",
+      "quantity": 10,
+      "average_price": 2400.50,
+      "last_price": 2510.75,
+      "close_price": 2505.00,
+      "pnl": 1102.50,
+      "exchange": "NSE",
+      "product": "CNC",
+      "instrument_token": "NSE_EQ|INE002A01018",
+      "company_name": "Reliance Industries Limited"
+    },
+    {
+      "isin": "INE467B01029",
+      "trading_symbol": "TCS",
+      "quantity": 5,
+      "average_price": null,
+      "last_price": 3850.25,
+      "close_price": 3848.10,
+      "pnl": 0,
+      "exchange": "NSE",
+      "product": "CNC",
+      "instrument_token": "NSE_EQ|INE467B01029",
+      "company_name": "Tata Consultancy Services Limited"
+    },
+    {
+      "isin": "US0378331005",
+      "trading_symbol": "AAPL",
+      "quantity": 20,
+      "average_price": 150.25,
+      "last_price": 175.50,
+      "close_price": 174.80,
+      "pnl": 505.00,
+      "exchange": "NASDAQ",
+      "product": "CNC",
+      "instrument_token": "NASDAQ_EQ|US0378331005",
+      "company_name": "Apple Inc.",
+      "undocumented_field_added_by_upstox": "preserved-in-raw"
+    }
+  ]
+}
