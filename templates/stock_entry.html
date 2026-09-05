@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Stock Entry{% endblock %}
+{% block content %}
+<h2 class="text-2xl font-bold mb-4">Stock Entry Form</h2>
+
+<!-- Stock Entry Form -->
+<section class="card w-full">
+  <div class="card-body">
+    <form id="stock-entry-form">
+      <div class="form-control">
+        <label class="label">
+          <span class="label-text">Stock Symbol</span>
+        </label>
+        <input type="text" id="symbol-input" class="input input-bordered w-full" placeholder="e.g., RELIANCE.NS" />
+        <span id="helper-text" class="helper-text">For Indian stocks, add .NS (NSE) or .BO (BSE) suffix (e.g., RELIANCE.NS). Symbols are case-sensitive.</span>
+      </div>
+      <div id="loading-state" class="hidden mt-2">
+        <div class="loading loading-spinner loading-sm"></div>
+        <p class="mt-2 text-base-content/80">Verifying symbol...</p>
+      </div>
+      <div id="success-state" class="hidden mt-4">
+        <p class="text-success">Valid symbol</p>
+        <div class="mt-2">
+          <p><strong>Exchange:</strong> <span id="exchange-display"></span></p>
+          <p><strong>Currency:</strong> <span id="currency-display"></span></p>
+        </div>
+      </div>
+      <div id="error-state" class="hidden mt-2">
+        <p class="text-error" id="server-error-message"></p>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+// Helper functions for UI states
+function hideLoading() {
+  document.getElementById('loading-state').classList.add('hidden');
+}
+function showLoading() {
+  document.getElementById('loading-state').classList.remove('hidden');
+}
+function hideSuccess() {
+  document.getElementById('success-state').classList.add('hidden');
+}
+function showSuccess() {
+  document.getElementById('success-state').classList.remove('hidden');
+}
+function hideError() {
+  document.getElementById('error-state').classList.add('hidden');
+}
+function showError() {
+  document.getElementById('error-state').classList.remove('hidden');
+}
+function setHelperText(text, isError = false) {
+  const helperText = document.getElementById('helper-text');
+  helperText.textContent = text;
+  if (isError) {
+    helperText.classList.add('text-error');
+  } else {
+    helperText.classList.remove('text-error');
+  }
+}
+function setExchangeAndCurrency(exchange, currency) {
+  document.getElementById('exchange-display').textContent = exchange || '';
+  document.getElementById('currency-display').textContent = currency || '';
+}
+function setServerErrorMessage(message) {
+  document.getElementById('server-error-message').textContent = message;
+}
+
+// Debounce function
+function debounce(func, delay) {
+  let timeoutId;
+  return function (...args) {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => func.apply(this, args), delay);
+  };
+}
+
+// Client-side validation for Indian stock symbols
+function validateIndianStockSymbol(symbol) {
+  // Reset helper text to default and remove error styling
+  setHelperText("For Indian stocks, add .NS (NSE) or .BO (BSE) suffix (e.g., RELIANCE.NS). Symbols are case-sensitive.", false);
+  hideError();
+
+  // Check for .NS or .BO suffix (case-sensitive)
+  if (symbol.endsWith('.NS')) {
+    const body = symbol.slice(0, -3);
+    if (!/^[A-Z0-9&\-]{1,20}$/.test(body)) {
+      setHelperText(`invalid NSE stock symbol: body before '.NS' must be 1-20 characters from [A-Z0-9&-]; got body ${JSON.stringify(body)}`, true);
+      return false;
+    }
+    return true;
+  } else if (symbol.endsWith('.BO')) {
+    const body = symbol.slice(0, -3);
+    if (!/^[0-9]{6}$/.test(body)) {
+      setHelperText(`invalid BSE stock symbol: body before '.BO' must be exactly 6 digits; got body ${JSON.stringify(body)}`, true);
+      return false;
+    }
+    return true;
+  } else if (symbol.endsWith('.ns') || symbol.endsWith('.bo')) {
+    setHelperText('invalid stock symbol: suffix is case-sensitive (use \'.NS\' or \'.BO\')', true);
+    return false;
+  }
+  // For any other symbol (including US symbols and other suffixes), we consider client-side validation passed
+  // (we won't proceed to server validation for non-Indian suffixes in our logic below)
+  return true;
+}
+
+// Validate symbol on server
+async function validateSymbolOnServer(symbol) {
+  try {
+    const response = await fetch('/validate_symbol', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ symbol }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Validation failed');
+    }
+
+    const data = await response.json();
+    hideLoading();
+    showSuccess();
+    setExchangeAndCurrency(data.exchange, data.currency);
+  } catch (error) {
+    hideLoading();
+    showError();
+    setServerErrorMessage(error.message);
+  }
+}
+
+// Main input handler
+const symbolInput = document.getElementById('symbol-input');
+const debouncedHandler = debounce(function (e) {
+  const symbol = e.target.value.trim();
+
+  // Clear all states
+  hideLoading();
+  hideSuccess();
+  hideError();
+
+  // If empty, show default helper text and return
+  if (symbol === '') {
+    setHelperText("For Indian stocks, add .NS (NSE) or .BO (BSE) suffix (e.g., RELIANCE.NS). Symbols are case-sensitive.", false);
+    return;
+  }
+
+  // Perform client-side validation for Indian stock symbols
+  const isClientValid = validateIndianStockSymbol(symbol);
+  if (!isClientValid) {
+    // Client-side validation failed, do not proceed to server
+    return;
+  }
+
+  // If symbol ends with .NS or .BO (case-sensitive) and passed client-side validation, proceed to server
+  if (symbol.endsWith('.NS') || symbol.endsWith('.BO')) {
+    showLoading();
+    validateSymbolOnServer(symbol);
+  }
+  // For all other symbols (US symbols, etc.), we do nothing (no validation)
+}, 300);
+
+symbolInput.addEventListener('input', debouncedHandler);
+</script>
+{% endblock %}
