@@ -30,6 +30,7 @@ from components.c01_user_portfolio import (
     Portfolio,
     PortfolioSnapshot,
     Position,
+    StubBrokerConnector,
     StubUserPortfolio,
     Transaction,
     UnsupportedBrokerError,
@@ -1919,4 +1920,452 @@ def test_calculate_gains_losses_raises_not_implemented_error_naming_the_missing_
     # / c04 / c07 already take for real data-model gaps.
     assert "cost_basis" in message
     assert "STORY-8" in message
+
+
+# --- STORY-3: StubBrokerConnector (deterministic Protocol-conformant double) --
+
+
+def test_stub_broker_connector_satisfies_the_brokerconnector_protocol_via_runtime_checkable_isinstance():
+    """AC: ``isinstance(StubBrokerConnector(), BrokerConnector)`` is True
+    via the runtime-checkable Protocol. This is the concrete, behaviour-
+    checking form of the AC: a freshly-constructed StubBrokerConnector
+    instance must actually be recognised as a BrokerConnector, not just
+    structurally similar."""
+    instance = StubBrokerConnector()
+
+    assert isinstance(instance, BrokerConnector), (
+        "StubBrokerConnector() must satisfy BrokerConnector at runtime "
+        "(via @runtime_checkable). AC #1 of STORY-3 fails."
+    )
+
+
+def test_stub_broker_connector_has_fixed_broker_id_and_display_name():
+    """AC: ``broker_id='stub'`` and ``display_name='Stub Broker'`` --
+    fixed identifiers every caller can rely on, not anything derived
+    from host state (AC #5: no environment-variable reads)."""
+    connector_a = StubBrokerConnector()
+    connector_b = StubBrokerConnector()
+
+    assert connector_a.broker_id == "stub"
+    assert connector_a.display_name == "Stub Broker"
+    # Two independent instances must agree on these fixed identifiers.
+    assert connector_b.broker_id == "stub"
+    assert connector_b.display_name == "Stub Broker"
+    # Type-level (attribute, not instance state) so a class-level
+    # shadow of the value can't quietly regress.
+    assert StubBrokerConnector.broker_id == "stub"
+    assert StubBrokerConnector.display_name == "Stub Broker"
+
+
+def test_stub_broker_connector_build_authorize_url_returns_a_deterministic_fake_url_echoing_state():
+    """AC: ``build_authorize_url`` returns a fixed fake URL echoing the
+    passed ``state``, and is deterministic across repeated calls (AC #2:
+    all four methods are deterministic). The echoed state is the only
+    caller-supplied input that appears in the returned URL."""
+    connector = StubBrokerConnector()
+
+    url_state_abc = connector.build_authorize_url(state="abc123")
+    url_state_abc_again = connector.build_authorize_url(state="abc123")
+    url_state_xyz = connector.build_authorize_url(state="xyz789")
+
+    # Determinism: identical input -> identical output.
+    assert url_state_abc == url_state_abc_again
+    # State echoed in the URL: different state -> different URL.
+    assert url_state_abc != url_state_xyz
+    assert "abc123" in url_state_abc
+    assert "xyz789" in url_state_xyz
+    # The returned value is a real string with a host component (i.e. it
+    # looks like a URL, not a literal sentinel).
+    assert isinstance(url_state_abc, str)
+    assert url_state_abc.startswith("http")
+    # A brand-new connector produces the same URL for the same state --
+    # the value is not instance-state-dependent.
+    other_connector = StubBrokerConnector()
+    assert connector.build_authorize_url(state="abc123") == other_connector.build_authorize_url(state="abc123")
+
+
+def test_stub_broker_connector_exchange_auth_code_returns_real_brokercredentials_and_raises_for_invalid():
+    """AC: ``exchange_auth_code`` returns a fixed ``BrokerCredentials``
+    for any code other than the sentinel ``'invalid'``, for which it
+    raises ``BrokerAuthError`` (AC #2 + AC #2). Real BrokerCredentials
+    type, real exception type."""
+    connector = StubBrokerConnector()
+
+    # Non-sentinel code: a real BrokerCredentials instance with the
+    # documented fields populated.
+    creds = connector.exchange_auth_code(code="real-auth-code-xyz")
+    assert isinstance(creds, BrokerCredentials)
+    assert creds.access_token == "stub-access-token"
+    assert creds.token_type == "Bearer"
+    assert creds.broker_user_id == "stub-broker-user"
+    # Determinism: same code -> same credential values, independent of
+    # how many times or from which instance you ask.
+    again = connector.exchange_auth_code(code="real-auth-code-xyz")
+    assert again == creds
+    assert StubBrokerConnector().exchange_auth_code(code="real-auth-code-xyz") == creds
+
+    # Sentinel code 'invalid' raises BrokerAuthError (not a generic
+    # Exception -- the AUTH-failure branch is specifically exercised).
+    with pytest.raises(BrokerAuthError):
+        connector.exchange_auth_code(code="invalid")
+    # The BrokerAuthError raised here is the one defined in this same
+    # module -- not a vendor-specific exception leaking the broker name.
+    assert BrokerAuthError.__bases__[0] is BrokerError
+
+
+def test_stub_broker_connector_fetch_holdings_returns_real_brokerholdings_and_is_deterministic():
+    """AC: ``fetch_holdings`` returns a small fixed list of
+    ``BrokerHolding``, and is deterministic across repeated calls."""
+    from datetime import datetime
+    from decimal import Decimal
+
+    connector = StubBrokerConnector()
+    creds = BrokerCredentials(access_token="tok")
+
+    holdings_first = connector.fetch_holdings(credentials=creds)
+    holdings_second = connector.fetch_holdings(credentials=creds)
+
+    # Real BrokerHolding instances (typed return).
+    assert all(isinstance(h, BrokerHolding) for h in holdings_first)
+    # Determinism: repeated calls return equal results.
+    assert holdings_first == holdings_second
+    # Independence: mutating the returned list does NOT mutate the
+    # stub's internal state -- a critical property for a deterministic
+    # test double, otherwise callers' test setup could leak between
+    # cases. The frozen-dataclass copy in the implementation is the
+    # load-bearing detail.
+    holdings_first.append("garbage")
+    holdings_third = connector.fetch_holdings(credentials=creds)
+    assert "garbage" not in holdings_third
+    assert len(holdings_third) == len(holdings_second)
+    # Default-construction path: at least one real holding, with the
+    # expected shape (the small fixed canned list).
+    assert len(holdings_second) >= 1
+    sample = holdings_second[0]
+    assert isinstance(sample.symbol, str)
+    assert isinstance(sample.quantity, Decimal)
+
+
+def test_stub_broker_connector_fetch_transactions_filters_by_inclusive_window_with_default_data():
+    """AC: ``fetch_transactions`` returns only transactions whose
+    ``trade_date`` falls within the requested inclusive window. The
+    default canned list spans 2024-01-15, 2024-02-10, 2024-03-05,
+    2024-04-20, so this test exercises windows that include, exclude,
+    and bracket each boundary."""
+    from datetime import date
+
+    connector = StubBrokerConnector()
+    creds = BrokerCredentials(access_token="tok")
+
+    # Window containing only the first transaction (inclusive on both ends).
+    only_jan = connector.fetch_transactions(
+        credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 1, 31)
+    )
+    assert all(isinstance(t, BrokerTransaction) for t in only_jan)
+    assert {t.external_id for t in only_jan} == {"stub-tx-001"}
+
+    # Window containing only the middle transactions (Feb + Mar).
+    feb_mar = connector.fetch_transactions(
+        credentials=creds, start_date=date(2024, 2, 1), end_date=date(2024, 3, 31)
+    )
+    assert {t.external_id for t in feb_mar} == {"stub-tx-002", "stub-tx-003"}
+
+    # Inclusive lower boundary: a window whose start_date IS a transaction's
+    # trade_date must include that transaction.
+    boundary_lower = connector.fetch_transactions(
+        credentials=creds, start_date=date(2024, 2, 10), end_date=date(2024, 2, 10)
+    )
+    assert {t.external_id for t in boundary_lower} == {"stub-tx-002"}
+
+    # Inclusive upper boundary: a window whose end_date IS a transaction's
+    # trade_date must include that transaction.
+    boundary_upper = connector.fetch_transactions(
+        credentials=creds, start_date=date(2024, 3, 5), end_date=date(2024, 3, 5)
+    )
+    assert {t.external_id for t in boundary_upper} == {"stub-tx-003"}
+
+    # Window that excludes every transaction -- the list-empty case.
+    nothing = connector.fetch_transactions(
+        credentials=creds, start_date=date(2030, 1, 1), end_date=date(2030, 12, 31)
+    )
+    assert nothing == []
+
+    # Whole-year window -- all four default transactions.
+    whole_year = connector.fetch_transactions(
+        credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 12, 31)
+    )
+    assert {t.external_id for t in whole_year} == {
+        "stub-tx-001", "stub-tx-002", "stub-tx-003", "stub-tx-004"
+    }
+
+
+def test_stub_broker_connector_fetch_transactions_is_deterministic_across_repeated_calls():
+    """AC: ``fetch_transactions`` is deterministic across repeated
+    calls (AC #2). Same window twice returns equal lists."""
+    from datetime import date
+
+    connector = StubBrokerConnector()
+    creds = BrokerCredentials(access_token="tok")
+    window = dict(start_date=date(2024, 2, 1), end_date=date(2024, 4, 30))
+
+    first = connector.fetch_transactions(credentials=creds, **window)
+    second = connector.fetch_transactions(credentials=creds, **window)
+    assert first == second
+    # A brand-new StubBrokerConnector (no shared state) returns the
+    # same data for the same window -- determinism is baked into the
+    # class, not instance state.
+    fresh = StubBrokerConnector().fetch_transactions(credentials=creds, **window)
+    assert fresh == first
+
+
+def test_stub_broker_connector_constructor_accepts_overridable_holdings_and_transactions_lists():
+    """AC: Constructor accepts overridable holdings/transactions lists
+    (AC #4) and tests demonstrate both (this test). Custom lists
+    must be what the four methods return -- the override must take
+    effect end-to-end, not be silently ignored."""
+    from datetime import date
+    from decimal import Decimal
+
+    custom_holding = BrokerHolding(
+        symbol="CUSTOM",
+        isin="XX0000000001",
+        quantity=Decimal("99"),
+        average_price=Decimal("1.00"),
+        last_price=Decimal("2.00"),
+        exchange="NYSE",
+        product="EQ",
+        instrument_id="custom-instr-1",
+        name="Custom Holding",
+    )
+    custom_tx = BrokerTransaction(
+        external_id="custom-tx-001",
+        symbol="CUSTOM",
+        isin="XX0000000001",
+        trade_date=date(2099, 6, 1),  # outside the default 2024 window
+        side="BUY",
+        quantity=Decimal("1"),
+        price=Decimal("10.00"),
+        amount=Decimal("10.00"),
+        exchange="NYSE",
+        segment="EQ",
+    )
+
+    connector = StubBrokerConnector(holdings=[custom_holding], transactions=[custom_tx])
+    creds = BrokerCredentials(access_token="tok")
+
+    # The custom holding replaces the default canned list entirely.
+    holdings = connector.fetch_holdings(credentials=creds)
+    assert holdings == [custom_holding]
+
+    # The custom transaction's date is outside the 2024 default
+    # window -- picking a 2099 window proves the custom list is
+    # actually used (a default-window fetch would return nothing).
+    txs = connector.fetch_transactions(
+        credentials=creds, start_date=date(2099, 1, 1), end_date=date(2099, 12, 31)
+    )
+    assert txs == [custom_tx]
+
+    # The custom list is defensively COPIED -- mutating the
+    # caller's list afterwards must not change what the stub
+    # returns later (otherwise a test's own setup could leak into
+    # other tests sharing the same default list).
+    callers_list = [custom_holding]
+    mutating_connector = StubBrokerConnector(holdings=callers_list)
+    callers_list.clear()
+    still_there = mutating_connector.fetch_holdings(credentials=creds)
+    assert still_there == [custom_holding]
+
+
+def test_stub_broker_connector_raise_on_makes_every_protocol_method_raise_the_configured_exception():
+    """AC: Constructor accepts an optional exception to raise (AC #4).
+    When set, every Protocol method must raise that exception -- so
+    other components' tests can simulate failures uniformly across
+    build_authorize_url / exchange_auth_code / fetch_holdings /
+    fetch_transactions."""
+    from datetime import date
+    from decimal import Decimal
+
+    sentinel = BrokerApiError("synthetic broker outage")
+    connector = StubBrokerConnector(raise_on=sentinel)
+    creds = BrokerCredentials(access_token="tok")
+
+    with pytest.raises(BrokerApiError) as exc_info:
+        connector.build_authorize_url(state="any-state")
+    assert exc_info.value is sentinel  # exact instance, not a re-raised copy
+
+    with pytest.raises(BrokerApiError) as exc_info:
+        connector.exchange_auth_code(code="any-code")
+    assert exc_info.value is sentinel
+    # When raise_on is set, it short-circuits BEFORE the 'invalid'
+    # sentinel branch -- so even an auth code of 'invalid' raises
+    # raise_on, not BrokerAuthError. This matches the documented
+    # "every Protocol method raises this exception" behaviour: the
+    # raise_on check is the first thing every method does, before any
+    # internal branching. (Without raise_on, 'invalid' still raises
+    # BrokerAuthError -- see the dedicated exchange_auth_code test.)
+    with pytest.raises(BrokerApiError) as exc_info:
+        connector.exchange_auth_code(code="invalid")
+    assert exc_info.value is sentinel
+
+    with pytest.raises(BrokerApiError) as exc_info:
+        connector.fetch_holdings(credentials=creds)
+    assert exc_info.value is sentinel
+
+    with pytest.raises(BrokerApiError) as exc_info:
+        connector.fetch_transactions(credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+    assert exc_info.value is sentinel
+
+    # And the inverse: with raise_on unset, all methods succeed normally.
+    plain = StubBrokerConnector()
+    plain.build_authorize_url(state="ok")
+    plain.exchange_auth_code(code="ok")
+    plain.fetch_holdings(credentials=creds)
+    plain.fetch_transactions(credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+
+def test_stub_broker_connector_makes_no_network_calls_and_reads_no_environment_variables(monkeypatch):
+    """AC: The Stub makes no network calls and reads no environment
+    variables (AC #5). Proven two ways:
+
+      (a) monkeypatching the standard-library socket / urllib call sites
+          so any such call would raise -- nothing raises during normal
+          method invocation;
+      (b) every os.environ access through the read-only ``os.environ``
+          proxy is recorded, and none of them touch the keys the stub
+          could conceivably look up.
+
+    Both prove the same thing from different angles, so a regression
+    in either direction (silently opening a socket OR silently reading
+    e.g. ``BROKER_API_KEY``) is caught.
+    """
+    import os
+    import socket as _socket
+    from datetime import date
+    from decimal import Decimal
+    from unittest import mock
+
+    # --- (a) No network call sites are reached. ---
+    # urllib is the conventional Python surface for any HTTP-ish
+    # network call from library code; patching it to raise is a
+    # load-bearing net -- if the Stub (or anything it imports
+    # transitively during a method call) ever tries to open a URL,
+    # this raises before the assertion runs.
+    real_urlopen = None
+    try:
+        from urllib.request import urlopen as _real_urlopen  # noqa: F401
+        real_urlopen = _real_urlopen
+    except ImportError:
+        pass
+    socket_create_connection = _socket.socket
+    # Replace any plausible outbound entrypoint with a raising
+    # sentinel; ANY use would explode the test.
+    def _raise_urlopen(*args, **kwargs):
+        raise AssertionError("StubBrokerConnector must not make HTTP calls")
+
+    def _raise_socket(*args, **kwargs):
+        raise AssertionError("StubBrokerConnector must not open sockets")
+
+    connector = StubBrokerConnector()
+    creds = BrokerCredentials(access_token="tok")
+
+    with mock.patch("urllib.request.urlopen", _raise_urlopen), \
+         mock.patch("socket.socket", _raise_socket):
+        # Every Protocol method must complete without touching the
+        # network. If any one of them opens a socket or URL, the
+        # raised AssertionError above propagates and the test fails.
+        connector.build_authorize_url(state="net-check")
+        connector.exchange_auth_code(code="net-check")
+        connector.fetch_holdings(credentials=creds)
+        connector.fetch_transactions(
+            credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 12, 31)
+        )
+
+    # --- (b) No environment variable reads. ---
+    # Record every os.environ[...] / os.environ.get call by wrapping
+    # the read-only proxy's __getitem__ and get methods.
+    env_reads: list[str] = []
+    real_getitem = type(os.environ).__getitem__
+    real_get = type(os.environ).get
+
+    def _recording_getitem(self, key):
+        env_reads.append(key)
+        return real_getitem(self, key)
+
+    def _recording_get(self, key, *args, **kwargs):
+        env_reads.append(key)
+        return real_get(self, key, *args, **kwargs)
+
+    with mock.patch.object(type(os.environ), "__getitem__", _recording_getitem), \
+         mock.patch.object(type(os.environ), "get", _recording_get):
+        connector.build_authorize_url(state="env-check")
+        connector.exchange_auth_code(code="env-check")
+        connector.fetch_holdings(credentials=creds)
+        connector.fetch_transactions(
+            credentials=creds, start_date=date(2024, 1, 1), end_date=date(2024, 12, 31)
+        )
+
+    # The Stub must not have read ANY environment variable --
+    # including the broker-credential keys (BROKER_API_KEY,
+    # UPSTOX_ACCESS_TOKEN, etc.) that other components might use.
+    assert env_reads == [], (
+        f"StubBrokerConnector must not read environment variables; "
+        f"observed reads: {env_reads!r}"
+    )
+    # And the upper-case keys an honest broker connector could plausibly
+    # consult are explicitly NOT touched, even by the Stub's
+    # transitive imports during construction.
+    for forbidden_key in ("BROKER_API_KEY", "BROKER_SECRET", "UPSTOX_ACCESS_TOKEN",
+                          "EXCHANGE_RATE_API_KEY", "STUB_BROKER_URL"):
+        assert forbidden_key not in env_reads, (
+            f"StubBrokerConnector must not read {forbidden_key!r} from env"
+        )
+
+
+def test_stub_broker_connector_does_not_read_env_at_construction_time():
+    """AC: AC #5 covers all paths -- construction time included. A
+    StubBrokerConnector whose constructor happens to read e.g.
+    ``BROKER_API_KEY`` would still be considered env-coupled. Wrap
+    os.environ the same way as the methods-only test and construct
+    several variants (default, with custom holdings, with custom
+    transactions, with raise_on) -- none may read any env var."""
+    import os
+    from decimal import Decimal
+    from unittest import mock
+
+    env_reads: list[str] = []
+    real_getitem = type(os.environ).__getitem__
+    real_get = type(os.environ).get
+
+    def _recording_getitem(self, key):
+        env_reads.append(key)
+        return real_getitem(self, key)
+
+    def _recording_get(self, key, *args, **kwargs):
+        env_reads.append(key)
+        return real_get(self, key, *args, **kwargs)
+
+    custom_h = BrokerHolding(
+        symbol="CUSTOM", isin="XX0000000001", quantity=Decimal("1"),
+        average_price=Decimal("1"), last_price=Decimal("1"), exchange="NYSE",
+        product="EQ", instrument_id="x", name="Custom",
+    )
+    custom_t = BrokerTransaction(
+        external_id="custom-tx", symbol="CUSTOM", isin="XX0000000001",
+        trade_date=__import__("datetime").date(2024, 1, 1), side="BUY",
+        quantity=Decimal("1"), price=Decimal("1"), amount=Decimal("1"),
+        exchange="NYSE", segment="EQ",
+    )
+
+    with mock.patch.object(type(os.environ), "__getitem__", _recording_getitem), \
+         mock.patch.object(type(os.environ), "get", _recording_get):
+        StubBrokerConnector()
+        StubBrokerConnector(holdings=[custom_h])
+        StubBrokerConnector(transactions=[custom_t])
+        StubBrokerConnector(holdings=[custom_h], transactions=[custom_t])
+        StubBrokerConnector(raise_on=BrokerApiError("synthetic"))
+
+    assert env_reads == [], (
+        f"StubBrokerConnector() must not read env vars at construction; "
+        f"observed reads: {env_reads!r}"
+    )
 
