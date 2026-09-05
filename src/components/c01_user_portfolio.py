@@ -164,6 +164,209 @@ class PlaceholderBrokerConnector:
         return []
 
 
+class StubBrokerConnector:
+    """Deterministic, offline test double for the ``BrokerConnector``
+    Protocol (STORY-3). Used by OTHER components' tests where a
+    ``BrokerConnector``-shaped collaborator is needed but no real
+    broker call should ever be made.
+
+    Conforms exactly to the STORY-2 ``BrokerConnector`` Protocol —
+    verifiable via the runtime-checkable Protocol's ``isinstance``
+    check (the first acceptance criterion for this story).
+
+    Behaviour (all deterministic, no I/O, no environment access):
+
+      * ``broker_id`` is ``'stub'`` and ``display_name`` is
+        ``'Stub Broker'`` — fixed identifiers every caller can rely
+        on, not anything derived from host state.
+      * ``build_authorize_url`` returns a fixed fake URL echoing the
+        passed ``state`` so a caller can assert its ``state`` token
+        reached this connector intact.
+      * ``exchange_auth_code`` returns a fixed ``BrokerCredentials``
+        for any code other than the sentinel ``'invalid'``, for which
+        it raises ``BrokerAuthError`` — the sentinel lets tests
+        exercise the auth-failure branch without a real broker.
+      * ``fetch_holdings`` returns a small fixed list of
+        ``BrokerHolding`` (overridable via the constructor — see
+        below).
+      * ``fetch_transactions`` returns a fixed list of
+        ``BrokerTransaction`` filtered by the requested
+        ``start_date`` / ``end_date`` window (inclusive on both ends,
+        so window-edge tests work as expected). Also overridable.
+
+    Constructor injection:
+
+      * ``holdings``: optional list of ``BrokerHolding`` to return
+        from ``fetch_holdings``. Defaults to a small fixed canned
+        list so the default-construction path is fully usable.
+      * ``transactions``: optional list of ``BrokerTransaction`` to
+        filter through in ``fetch_transactions``. Defaults to a
+        small fixed canned list spanning several dates so the
+        windowing logic has real data to filter.
+      * ``raise_on``: optional exception instance to raise from any
+        of the four Protocol methods (simulating broker failures
+        in other stories' tests). When set, every method raises this
+        exception before producing any real output — matches the
+        "simulate failures" requirement without a per-method
+        configuration knob the Protocol would otherwise need.
+
+    No network calls. No environment-variable reads. All values
+    baked in at construction time, so repeated calls produce
+    identical results (the "deterministic across repeated calls"
+    acceptance criterion)."""
+
+    broker_id: str = "stub"
+    display_name: str = "Stub Broker"
+
+    def __init__(
+        self,
+        holdings: list[BrokerHolding] | None = None,
+        transactions: list[BrokerTransaction] | None = None,
+        raise_on: BaseException | None = None,
+    ) -> None:
+        self._holdings: list[BrokerHolding] = (
+            list(holdings) if holdings is not None else list(_DEFAULT_STUB_HOLDINGS)
+        )
+        self._transactions: list[BrokerTransaction] = (
+            list(transactions) if transactions is not None else list(_DEFAULT_STUB_TRANSACTIONS)
+        )
+        self._raise_on = raise_on
+
+    def build_authorize_url(self, *, state: str) -> str:
+        if self._raise_on is not None:
+            raise self._raise_on
+        return f"https://stub.broker/auth?state={state}"
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        if self._raise_on is not None:
+            raise self._raise_on
+        if code == "invalid":
+            raise BrokerAuthError(
+                f"StubBrokerConnector: refusing sentinel code 'invalid'"
+            )
+        return BrokerCredentials(
+            access_token="stub-access-token",
+            token_type="Bearer",
+            expires_at=None,
+            refresh_token=None,
+            broker_user_id="stub-broker-user",
+            raw={"code": code, "stub": True},
+        )
+
+    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
+        if self._raise_on is not None:
+            raise self._raise_on
+        return [BrokerHolding(**asdict(h)) for h in self._holdings]
+
+    def fetch_transactions(
+        self,
+        *,
+        credentials: BrokerCredentials,
+        start_date: date,
+        end_date: date,
+    ) -> list[BrokerTransaction]:
+        if self._raise_on is not None:
+            raise self._raise_on
+        return [
+            BrokerTransaction(**asdict(t))
+            for t in self._transactions
+            if start_date <= t.trade_date <= end_date
+        ]
+
+
+# Canned default data for StubBrokerConnector — defined at module
+# scope (not inside the class body) so the dataclasses are fully
+# constructed once at import time and the default-construction path
+# stays cheap and side-effect-free. These exact values are what the
+# acceptance criteria describe: a "small fixed list" for holdings,
+# and a transaction list spanning multiple dates so window-edge
+# filtering has real rows above, below, and on each boundary.
+_DEFAULT_STUB_HOLDINGS: list[BrokerHolding] = [
+    BrokerHolding(
+        symbol="AAPL",
+        isin="US0378331005",
+        quantity=Decimal("10"),
+        average_price=Decimal("150.00"),
+        last_price=Decimal("175.00"),
+        exchange="NASDAQ",
+        product="EQ",
+        instrument_id="stub-instr-AAPL",
+        name="Apple Inc.",
+        raw={"stub": True},
+    ),
+    BrokerHolding(
+        symbol="RELIANCE.NS",
+        isin="INE002A01018",
+        quantity=Decimal("5"),
+        average_price=Decimal("2400.00"),
+        last_price=Decimal("2500.00"),
+        exchange="NSE",
+        product="EQ",
+        instrument_id="stub-instr-RELIANCE",
+        name="Reliance Industries Limited",
+        raw={"stub": True},
+    ),
+]
+
+# Spans 2024-01-15, 2024-02-10, 2024-03-05, 2024-04-20 so that
+# window tests can verify both endpoints (inclusive) and exclude
+# rows clearly outside the window.
+_DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
+    BrokerTransaction(
+        external_id="stub-tx-001",
+        symbol="AAPL",
+        isin="US0378331005",
+        trade_date=date(2024, 1, 15),
+        side="BUY",
+        quantity=Decimal("2"),
+        price=Decimal("150.00"),
+        amount=Decimal("300.00"),
+        exchange="NASDAQ",
+        segment="EQ",
+        raw={"stub": True},
+    ),
+    BrokerTransaction(
+        external_id="stub-tx-002",
+        symbol="AAPL",
+        isin="US0378331005",
+        trade_date=date(2024, 2, 10),
+        side="SELL",
+        quantity=Decimal("1"),
+        price=Decimal("160.00"),
+        amount=Decimal("160.00"),
+        exchange="NASDAQ",
+        segment="EQ",
+        raw={"stub": True},
+    ),
+    BrokerTransaction(
+        external_id="stub-tx-003",
+        symbol="RELIANCE.NS",
+        isin="INE002A01018",
+        trade_date=date(2024, 3, 5),
+        side="BUY",
+        quantity=Decimal("1"),
+        price=Decimal("2400.00"),
+        amount=Decimal("2400.00"),
+        exchange="NSE",
+        segment="EQ",
+        raw={"stub": True},
+    ),
+    BrokerTransaction(
+        external_id="stub-tx-004",
+        symbol="RELIANCE.NS",
+        isin="INE002A01018",
+        trade_date=date(2024, 4, 20),
+        side="SELL",
+        quantity=Decimal("1"),
+        price=Decimal("2500.00"),
+        amount=Decimal("2500.00"),
+        exchange="NSE",
+        segment="EQ",
+        raw={"stub": True},
+    ),
+]
+
+
 @dataclass
 class User:
     id: str
