@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" data-theme="corporate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Entry Form Mockup - Story-14</title>
+  <link rel="stylesheet" href="../../static/css/tailwind.css">
+</head>
+<body class="min-h-screen bg-base-200">
+  <header class="navbar bg-base-100 shadow-sm px-6">
+    <h1 class="text-xl font-semibold">Portfolio Agent</h1>
+  </header>
+  <main class="max-w-3xl mx-auto p-6">
+    <h2 class="text-2xl font-bold mb-4">Stock Entry Form (Indian Stocks Support)</h2>
+
+    <!-- We'll show four states in a grid -->
+    <div class="grid gap-6 md:grid-cols-2">
+      <!-- Default State -->
+      <section class="card w-full">
+        <div class="card-body">
+          <h3 class="card-title text-lg font-medium">Default State</h3>
+          <p class="text-base-content/80 mb-2">Enter a stock symbol to begin.</p>
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Stock Symbol</span>
+            </label>
+            <input type="text" id="symbol-default" class="input input-bordered w-full" placeholder="e.g., RELIANCE.NS" />
+            <span class="helper-text">For Indian stocks, add .NS (NSE) or .BO (BSE) suffix (e.g., RELIANCE.NS). Symbols are case-sensitive.</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Loading State -->
+      <section class="card w-full">
+        <div class="card-body">
+          <h3 class="card-title text-lg font-medium">Loading State</h3>
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Stock Symbol</span>
+            </label>
+            <input type="text" id="symbol-loading" class="input input-bordered w-full" value="RELIANCE.NS" disabled />
+            <div class="loading loading-spinner loading-sm mt-2"></div>
+            <p class="mt-2 text-base-content/80">Verifying symbol...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Success State -->
+      <section class="card w-full">
+        <div class="card-body">
+          <h3 class="card-title text-lg font-medium">Success State</h3>
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Stock Symbol</span>
+            </label>
+            <input type="text" id="symbol-success" class="input input-bordered w-full" value="RELIANCE.NS" disabled />
+            <p class="mt-2 text-success">Valid symbol</p>
+            <div class="mt-4">
+              <p><strong>Exchange:</strong> NSE</p>
+              <p><strong>Currency:</strong> INR</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error State -->
+      <section class="card w-full">
+        <div class="card-body">
+          <h3 class="card-title text-lg font-medium">Error State</h3>
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Stock Symbol</span>
+            </label>
+            <input type="text" id="symbol-error" class="input input-bordered w-full" value="INVALID" />
+            <span class="helper-text text-error">Invalid format. Use .NS or .BO suffix for Indian stocks.</span>
+          </div>
+          <p class="mt-2 text-error">Symbol not found on exchange.</p>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
