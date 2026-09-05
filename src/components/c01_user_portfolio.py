@@ -27,8 +27,9 @@ Policy, Portfolio -> Event & Analysis, User -> Notification.
 import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from datetime import date, datetime
+from urllib.parse import urlencode
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
@@ -40,6 +41,15 @@ from exchange_rate_client import (
 )
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+from upstox_config import UpstoxConfig
+
+if TYPE_CHECKING:
+    # Imported only for the type hint on ``DefaultUpstoxBrokerConnector.__init__``;
+    # resolved at runtime inside the constructor to avoid a circular import
+    # (``src/upstox_http.py`` imports the STORY-2 ``BrokerApiError`` /
+    # ``BrokerAuthError`` / ``BrokerRateLimitError`` classes from this module
+    # at module load time, so the reverse module-level import would deadlock).
+    from upstox_http import _UpstoxHttp
 
 
 # Exception hierarchy for BrokerConnector (ADR-0022)
@@ -272,6 +282,164 @@ class StubBrokerConnector:
             for t in self._transactions
             if start_date <= t.trade_date <= end_date
         ]
+
+
+class DefaultUpstoxBrokerConnector:
+    """Real Upstox implementation of the ``BrokerConnector`` Protocol
+    (STORY-5). Skeleton for the upcoming auth flow — only
+    ``build_authorize_url`` is implemented in this story;
+    ``exchange_auth_code`` / ``fetch_holdings`` / ``fetch_transactions``
+    raise ``NotImplementedError`` here and are filled in by
+    STORY-6 / STORY-7 / STORY-8 respectively.
+
+    Constructor-injected dependencies:
+
+      * ``config`` — an ``UpstoxConfig`` (STORY-1) holding the
+        Upstox app's ``client_id``, ``client_secret``, and
+        ``redirect_uri``. Immutable / frozen, so no defensive copy
+        is needed.
+      * ``http`` — the private ``_UpstoxHttp`` helper (STORY-4)
+        that owns transport, retries, and error-mapping for all
+        outbound Upstox calls. Injecting it (rather than
+        constructing it internally) is what makes the connector
+        testable in later stories without ever touching ``requests``
+        or the network.
+
+    Identifiers (ADR-0022's per-broker metadata contract):
+
+      * ``broker_id == 'upstox'`` — the broker-specific slug other
+        components use to look up the right connector and to route
+        per-broker UI affordances.
+      * ``display_name == 'Upstox'`` — the human-readable name
+        rendered in UI surfaces; not derived from any runtime
+        state.
+
+    ``build_authorize_url`` produces exactly the URL shape Upstox's
+    public OAuth docs describe — no extras, no PKCE, no ``scope``
+    parameter (the docs the story's AC quotes do not list one,
+    and inventing one here would diverge from the contract):
+
+        https://api.upstox.com/v2/login/authorization/dialog
+            ?response_type=code
+            &client_id=<percent-encoded client_id>
+            &redirect_uri=<percent-encoded redirect_uri>
+            &state=<percent-encoded state>
+
+    Every value is percent-encoded with ``urllib.parse.quote``
+    (``safe=''`` semantics — no character is left unencoded), and
+    the resulting string round-trips through
+    ``urllib.parse.parse_qs`` to the original values verbatim. A
+    blank or whitespace-only ``state`` raises ``ValueError`` —
+    Upstox rejects these server-side, and rejecting them client
+    side too keeps callers from burning a CSRF-less OAuth round
+    trip on a value the server would discard."""
+
+    broker_id: str = "upstox"
+    display_name: str = "Upstox"
+
+    # Upstox's documented OAuth authorize endpoint. Verbatim from
+    # the docs — the AC's "scheme/host/path is exactly
+    # https://api.upstox.com/v2/login/authorization/dialog" rule
+    # is encoded as this single constant so a future move (e.g.
+    # to ``https://api-sandbox.upstox.com`` for a test
+    # environment) is one constant change away, not a string
+    # scattered through the implementation.
+    _UPSTOX_AUTHORIZE_URL = "https://api.upstox.com/v2/login/authorization/dialog"
+
+    def __init__(
+        self,
+        config: UpstoxConfig,
+        http: "_UpstoxHttp",
+    ) -> None:
+        # Deferred import — ``src/upstox_http`` already imports the
+        # STORY-2 exception classes from this module at load time, so
+        # an eager module-level import here would deadlock. The
+        # import is needed at runtime only to record the helper's
+        # concrete class for any future ``isinstance`` checks; the
+        # connector itself never calls into the helper in this
+        # story (STORY-6 onwards).
+        from upstox_http import _UpstoxHttp as _UpstoxHttpRuntime
+        self._config = config
+        self._http: _UpstoxHttpRuntime = http
+
+    def build_authorize_url(self, *, state: str) -> str:
+        """Build the Upstox OAuth authorize URL for ``state``.
+
+        Returns a URL whose scheme/host/path is exactly
+        ``https://api.upstox.com/v2/login/authorization/dialog`` and
+        whose query string carries exactly the four keys
+        ``response_type=code``, ``client_id=<config.client_id>``,
+        ``redirect_uri=<config.redirect_uri>``, ``state=<state>`` —
+        in that order, all percent-encoded. The round-trip invariant
+        ``parse_qs(url)['redirect_uri'] == config.redirect_uri``
+        holds for any ``redirect_uri`` the Upstox app registration
+        accepts, including the realistic
+        ``https://example.com/cb?next=/foo`` shape that contains
+        ``:`` / ``/`` / ``?`` characters which ``quote`` encodes
+        by default.
+
+        ``state`` is mandatory: an empty string or whitespace-only
+        string raises ``ValueError`` rather than producing a URL
+        Upstox would refuse server-side.
+        """
+        if not isinstance(state, str) or not state.strip():
+            raise ValueError(
+                "DefaultUpstoxBrokerConnector.build_authorize_url: "
+                "state must be a non-empty, non-whitespace string"
+            )
+
+        # ``urlencode`` percent-encodes every value with
+        # ``urllib.parse.quote(..., safe='')`` semantics, encoding
+        # every character that isn't unreserved per RFC 3986 —
+        # including ``:``, ``/``, ``?``, ``&``, ``=``, ``+``, ``#``,
+        # ``%`` — so a ``redirect_uri`` of
+        # ``https://example.com/cb?next=/foo`` does NOT split the
+        # query string, silently inject a new ``&next=`` pair, or
+        # corrupt the URL in any way. The resulting ``parse_qs``
+        # call reads back the exact original ``redirect_uri``
+        # value.
+        query = urlencode(
+            [
+                ("response_type", "code"),
+                ("client_id", self._config.client_id),
+                ("redirect_uri", self._config.redirect_uri),
+                ("state", state),
+            ]
+        )
+        return f"{self._UPSTOX_AUTHORIZE_URL}?{query}"
+
+    # ------------------------------------------------------------------
+    # STORY-6 / STORY-7 / STORY-8 fill these in. For this story only
+    # they raise ``NotImplementedError`` so the Protocol conformance
+    # (verified via ``isinstance(connector, BrokerConnector)``) is
+    # intact while the real implementations are still pending.
+    # ------------------------------------------------------------------
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        raise NotImplementedError(
+            "DefaultUpstoxBrokerConnector.exchange_auth_code is "
+            "implemented in STORY-6"
+        )
+
+    def fetch_holdings(
+        self, *, credentials: BrokerCredentials
+    ) -> list[BrokerHolding]:
+        raise NotImplementedError(
+            "DefaultUpstoxBrokerConnector.fetch_holdings is "
+            "implemented in STORY-7"
+        )
+
+    def fetch_transactions(
+        self,
+        *,
+        credentials: BrokerCredentials,
+        start_date: date,
+        end_date: date,
+    ) -> list[BrokerTransaction]:
+        raise NotImplementedError(
+            "DefaultUpstoxBrokerConnector.fetch_transactions is "
+            "implemented in STORY-8"
+        )
 
 
 # Canned default data for StubBrokerConnector — defined at module
