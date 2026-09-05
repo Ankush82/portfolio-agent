@@ -27,7 +27,8 @@ Policy, Portfolio -> Event & Analysis, User -> Notification.
 import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Protocol
+from typing import Literal, Protocol, runtime_checkable
+from datetime import date, datetime
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
 from cross_cutting.observability import AuditManager, DefaultAuditManager, traced
@@ -39,6 +40,128 @@ from exchange_rate_client import (
 )
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+
+
+# Exception hierarchy for BrokerConnector (ADR-0022)
+class BrokerError(Exception):
+    """Base exception for all broker-related errors."""
+    pass
+
+
+class BrokerConfigError(BrokerError):
+    """Raised when the broker configuration is invalid or missing."""
+    pass
+
+
+class BrokerAuthError(BrokerError):
+    """Raised when authentication fails (invalid/expired token or auth code)."""
+    pass
+
+
+class BrokerApiError(BrokerError):
+    """Raised when the broker API returns an error (non-2xx or status != 'success')."""
+    pass
+
+
+class BrokerRateLimitError(BrokerError):
+    """Raised when the broker API rate limit is exceeded."""
+    pass
+
+
+class UnsupportedBrokerError(BrokerError):
+    """Raised when the broker is not supported."""
+    pass
+
+
+# Data Transfer Objects (DTOs) for BrokerConnector (ADR-0022)
+@dataclass(frozen=True)
+class BrokerCredentials:
+    access_token: str
+    token_type: str = 'Bearer'
+    expires_at: datetime | None = None
+    refresh_token: str | None = None
+    broker_user_id: str | None = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BrokerHolding:
+    symbol: str
+    isin: str
+    quantity: Decimal
+    average_price: Decimal
+    last_price: Decimal
+    exchange: str
+    product: str
+    instrument_id: str
+    name: str
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BrokerTransaction:
+    external_id: str
+    symbol: str
+    isin: str
+    trade_date: date
+    side: Literal['BUY', 'SELL']
+    quantity: Decimal
+    price: Decimal
+    amount: Decimal
+    exchange: str
+    segment: str
+    raw: dict = field(default_factory=dict)
+
+
+# BrokerConnector Protocol (ADR-0022)
+@runtime_checkable
+class BrokerConnector(Protocol):
+    broker_id: str
+    display_name: str
+
+    def build_authorize_url(self, *, state: str) -> str:
+        """Build the broker-specific authorization URL for the given state."""
+        ...
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        """Exchange an authorization code for broker credentials."""
+        ...
+
+    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
+        """Fetch holdings for the given credentials."""
+        ...
+
+    def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
+        """Fetch transactions for the given credentials and date range."""
+        ...
+
+
+class PlaceholderBrokerConnector:
+    """Placeholder implementation of BrokerConnector for testing and development.
+    All methods return synthetic, obviously-fake data that cannot be mistaken
+    for real broker data."""
+
+    broker_id: str = "placeholder"
+    display_name: str = "Placeholder Broker"
+
+    def build_authorize_url(self, *, state: str) -> str:
+        return f"https://placeholder.broker/auth?state={state}"
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        return BrokerCredentials(
+            access_token=f"placeholder-token-{code}",
+            token_type="Bearer",
+            expires_at=None,
+            refresh_token=None,
+            broker_user_id=None,
+            raw={"code": code},
+        )
+
+    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
+        return []
+
+    def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
+        return []
 
 
 @dataclass
@@ -343,72 +466,7 @@ class StubUserPortfolio:
             return True
 
 
-class BrokerConnector(Protocol):
-    """The seam `connect_portfolio`/`import_holdings`/`import_transactions`
-    call through instead of talking to a broker/DMAT API directly
-    (ADR-0022). A `Protocol` with three named methods, not a single
-    injected `Callable` — see ADR-0022's Decision section for why the
-    three real-world operations here (establish a session, read
-    holdings, read transactions) don't share one shape the way Agent
-    Runtime's `reason_fn` does.
 
-    Every method returns plain, untagged dicts. Tagging broker-sourced
-    content UNTRUSTED (ADR-0022, extending ADR-0003/ADR-0018) is
-    `DefaultUserPortfolio`'s responsibility, at the point each result
-    is used — not this connector's, so a future real implementation
-    doesn't have to know about provenance at all."""
-
-    def connect(self, user: User, broker_credentials: dict) -> dict:
-        """Establishes (or simulates) a broker/DMAT session for
-        `user`. Returns broker-supplied connection metadata (e.g. an
-        external account identifier) as a plain dict."""
-        ...
-
-    def fetch_holdings(self, portfolio: Portfolio) -> list[dict]:
-        """Each returned dict is expected to carry at least
-        `security_id` and `quantity` — the fields DefaultUserPortfolio
-        needs to build a Holding."""
-        ...
-
-    def fetch_transactions(self, portfolio: Portfolio) -> list[dict]:
-        """Each returned dict is expected to carry at least `kind` and
-        `amount` — the fields DefaultUserPortfolio needs to build a
-        Transaction."""
-        ...
-
-
-class PlaceholderBrokerConnector:
-    """NOT a real broker connection (ADR-0022, ADR-0023). No live
-    broker/DMAT API credential exists in this project — ADR-0023 names
-    the real options (Zerodha Kite Connect, Upstox, the RBI Account
-    Aggregator framework) without choosing one, since that requires a
-    live external credential this pass cannot obtain. This class exists
-    purely so DefaultUserPortfolio's connect_portfolio/import_holdings/
-    import_transactions are buildable, runnable, and testable end to
-    end without one.
-
-    `connect()` returns synthetic connection metadata carrying an
-    obviously-fake account identifier — never a value a real broker API
-    would return. `fetch_holdings()`/`fetch_transactions()` return
-    empty lists rather than inventing synthetic positions or trades:
-    fabricated financial data would look real to anything downstream
-    that doesn't already know this path is a placeholder, where an
-    empty list cannot be mistaken for real holdings."""
-
-    def connect(self, user: User, broker_credentials: dict) -> dict:
-        with traced("PlaceholderBrokerConnector.connect"):
-            return {
-                "external_account_id": f"placeholder-account-{uuid.uuid4()}",
-                "broker": "placeholder",
-            }
-
-    def fetch_holdings(self, portfolio: Portfolio) -> list[dict]:
-        with traced("PlaceholderBrokerConnector.fetch_holdings"):
-            return []
-
-    def fetch_transactions(self, portfolio: Portfolio) -> list[dict]:
-        with traced("PlaceholderBrokerConnector.fetch_transactions"):
-            return []
 
 
 USERS_TABLE = "users"
@@ -487,15 +545,16 @@ class DefaultUserPortfolio:
 
     def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
         with traced("DefaultUserPortfolio.connect_portfolio"):
-            raw_connection = self._broker_connector.connect(user, broker_credentials)
-            tagged_connection = self._boundary_gate.tag_provenance(raw_connection, source="broker_connector")
+            # Store the broker_credentials in the portfolio record (without calling the broker_connector)
             portfolio = Portfolio(id=str(uuid.uuid4()), user_id=user.id)
+            # Tag and store the broker_credentials as the broker_connection in the portfolio record
+            tagged_credentials = self._boundary_gate.tag_provenance(broker_credentials, source="broker_connector")
             self._infrastructure.store(
                 PORTFOLIOS_TABLE,
                 {
                     "id": portfolio.id,
                     "user_id": portfolio.user_id,
-                    "broker_connection": tagged_connection,
+                    "broker_connection": tagged_credentials,
                 },
             )
             self._audit_manager.record(
@@ -503,20 +562,24 @@ class DefaultUserPortfolio:
                 {
                     "portfolio_id": portfolio.id,
                     "user_id": user.id,
-                    "provenance": tagged_connection.get("provenance"),
+                    "provenance": tagged_credentials.get("provenance"),
                 },
             )
             return portfolio
 
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
         with traced("DefaultUserPortfolio.import_holdings"):
-            raw_holdings = self._broker_connector.fetch_holdings(portfolio)
+            credentials = self._load_credentials(portfolio)
+            if credentials is None:
+                return []
+            # Fetch holdings using the broker_connector
+            raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
             holdings = []
             for raw in raw_holdings:
-                tagged = self._boundary_gate.tag_provenance(raw, source="broker_connector")
+                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
                 holding = Holding(
                     portfolio_id=portfolio.id,
-                    security_id=tagged["security_id"],
+                    security_id=tagged["symbol"],
                     quantity=tagged["quantity"],
                 )
                 self._infrastructure.store(
@@ -530,15 +593,19 @@ class DefaultUserPortfolio:
                 holdings.append(holding)
             return holdings
 
-    def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
+    def import_transactions(self, portfolio: Portfolio, start_date: date = date.min, end_date: date = date.max) -> list[Transaction]:
         with traced("DefaultUserPortfolio.import_transactions"):
-            raw_transactions = self._broker_connector.fetch_transactions(portfolio)
+            credentials = self._load_credentials(portfolio)
+            if credentials is None:
+                return []
+            # Fetch transactions using the broker_connector
+            raw_transactions = self._broker_connector.fetch_transactions(credentials=credentials, start_date=start_date, end_date=end_date)
             transactions = []
             for raw in raw_transactions:
-                tagged = self._boundary_gate.tag_provenance(raw, source="broker_connector")
+                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
                 transaction = Transaction(
                     portfolio_id=portfolio.id,
-                    kind=tagged["kind"],
+                    kind=tagged["side"],  # Note: the BrokerTransaction has 'side' (BUY/SELL), but the Transaction expects 'kind'
                     amount=tagged["amount"],
                 )
                 self._infrastructure.store(
@@ -902,3 +969,28 @@ class DefaultUserPortfolio:
             )
             for record in records
         ]
+
+    def _load_credentials(self, portfolio: Portfolio) -> BrokerCredentials | None:
+        """Read the broker_credentials stored on `portfolio` at
+        `connect_portfolio` time, strip the provenance key added by
+        `BoundaryGate.tag_provenance`, and rebuild a `BrokerCredentials`
+        instance. Returns `None` when the portfolio has no stored
+        `broker_connection` (the same "no broker connected" case
+        `import_holdings` / `import_transactions` already short-circuit
+        on), so callers can early-return without restating the lookup."""
+        stored = self._infrastructure.retrieve(PORTFOLIOS_TABLE, portfolio.id)
+        if not stored or "broker_connection" not in stored:
+            return None
+        tagged_credentials = stored["broker_connection"]
+        if isinstance(tagged_credentials, dict):
+            credentials_dict = {k: v for k, v in tagged_credentials.items() if k != "_provenance"}
+        else:
+            credentials_dict = {}
+        return BrokerCredentials(
+            access_token=credentials_dict.get("access_token"),
+            token_type=credentials_dict.get("token_type", "Bearer"),
+            expires_at=credentials_dict.get("expires_at"),
+            refresh_token=credentials_dict.get("refresh_token"),
+            broker_user_id=credentials_dict.get("broker_user_id"),
+            raw=credentials_dict.get("raw", {}),
+        )
