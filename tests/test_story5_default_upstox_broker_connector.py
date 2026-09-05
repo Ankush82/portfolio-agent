@@ -214,18 +214,11 @@ def test_default_upstox_broker_connector_constructs_and_uses_no_network():
 
 
 # ---------------------------------------------------------------------
-# STORY-6/7/8 fill these in. This story pins their not-implemented
-# status so a regression that silently fills one in early is caught.
+# STORY-6 fills in exchange_auth_code (see tests/test_story6_exchange_auth_code.py
+# for the real acceptance tests); STORY-7/8 fill in the other two. The
+# remaining pinning tests below catch a regression that silently
+# implements fetch_holdings / fetch_transactions early.
 # ---------------------------------------------------------------------
-
-
-def test_default_upstox_broker_connector_exchange_auth_code_raises_not_implemented_for_story6():
-    from components.c01_user_portfolio import BrokerCredentials
-    connector = DefaultUpstoxBrokerConnector(
-        config=_config(), http=_http()
-    )
-    with pytest.raises(NotImplementedError):
-        connector.exchange_auth_code(code="any-code")  # type: ignore[arg-type]
 
 
 def test_default_upstox_broker_connector_fetch_holdings_raises_not_implemented_for_story7():

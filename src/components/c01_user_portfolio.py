@@ -28,7 +28,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
@@ -416,9 +416,162 @@ class DefaultUpstoxBrokerConnector:
     # ------------------------------------------------------------------
 
     def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
-        raise NotImplementedError(
-            "DefaultUpstoxBrokerConnector.exchange_auth_code is "
-            "implemented in STORY-6"
+        """Exchange an OAuth authorization code for Upstox credentials.
+
+        POSTs the documented form-encoded body to
+        ``https://api.upstox.com/v2/login/authorization/token`` via
+        ``_UpstoxHttp.post_token_exchange`` — which never retries
+        (retrying would either waste the one-time auth code or
+        trigger Upstox's duplicate-grant rejection). The form keys
+        are passed in the exact order the fetched Upstox docs list
+        them (``code``, ``client_id``, ``client_secret``,
+        ``redirect_uri``, ``grant_type``) so the wire payload is
+        byte-identical to the docs' reference example.
+
+        On a 2xx whose JSON body contains ``access_token``, returns
+        a ``BrokerCredentials`` with:
+
+          * ``token_type='Bearer'`` — Upstox access tokens are
+            bearer tokens per their docs.
+          * ``broker_user_id`` from a top-level ``user_id`` field,
+            or ``None`` if the field is absent. The fetched docs do
+            not promise it on every response, so absence is normal,
+            not an error.
+          * ``expires_at`` computed as ``now + expires_in`` seconds
+            (UTC) when an ``expires_in`` field is present, else
+            ``None``. The docs do not promise it either, so a
+            ``None`` ``expires_at`` means "valid until Upstox
+            rejects it" — the same semantics the rest of this
+            project's broker credentials carry.
+          * ``refresh_token`` from the response if present, else
+            ``None``. The fetched docs do not promise a refresh
+            token on this endpoint, so absence is the normal case.
+          * ``raw`` = the full response dict with the
+            ``access_token`` value replaced by ``_REDACTED``, so if
+            the dict is ever stringified into a log line the
+            secret never leaks.
+
+        Errors:
+          * 2xx with no ``access_token`` → ``BrokerApiError`` (the
+            response shape doesn't match the documented contract).
+          * 4xx on the token endpoint (other than 429, which is
+            surfaced as ``BrokerRateLimitError``) →
+            ``BrokerAuthError`` with a message instructing the user
+            to restart the connect flow. A 4xx here is Upstox's
+            rejection of the one-time auth code; the only correct
+            user action is to start the OAuth round-trip over.
+          * 5xx → ``BrokerApiError`` (carrying the HTTP status
+            and body snippet from the helper).
+          * The auth code and client secret are never passed to
+            the helper as anything but the form payload, and the
+            helper redacts them before any log/exception path —
+            so they cannot end up in any log line or exception
+            message this method produces.
+        """
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError(
+                "DefaultUpstoxBrokerConnector.exchange_auth_code: "
+                "code must be a non-empty, non-whitespace string"
+            )
+
+        # Verbatim form order from the Upstox OAuth docs. Each value
+        # is a plain string — ``requests`` will URL-encode the body
+        # itself when ``data=`` is a dict and
+        # ``Content-Type: application/x-www-form-urlencoded`` is set
+        # by the helper.
+        form: dict[str, str] = {
+            "code": code,
+            "client_id": self._config.client_id,
+            "client_secret": self._config.client_secret,
+            "redirect_uri": self._config.redirect_uri,
+            "grant_type": "authorization_code",
+        }
+
+        try:
+            response_body = self._http.post_token_exchange(form=form)
+        except BrokerRateLimitError:
+            # 429 on the token endpoint is a transient backoff
+            # signal, not a rejection of the code itself — let it
+            # surface unchanged so the caller can retry the
+            # *whole* OAuth round-trip on a different cadence
+            # rather than asking the user to reconnect.
+            raise
+        except BrokerApiError as exc:
+            # The helper maps every non-2xx to ``BrokerApiError``
+            # carrying ``http_status`` (the AC's contract for the
+            # HTTP-status attribute). On the token-exchange
+            # endpoint specifically, every other 4xx is Upstox
+            # rejecting the auth code — the only correct user
+            # response is to restart the connect flow.
+            status = getattr(exc, "http_status", 0)
+            if 400 <= status < 500:
+                raise BrokerAuthError(
+                    "Upstox rejected the authorization code; please "
+                    "restart the connect flow and try a fresh code"
+                ) from exc
+            raise
+
+        # The helper already enforces status=='success' on 2xx and
+        # raises ``BrokerApiError`` otherwise. Defensive checks
+        # below cover what the docs DO promise on success
+        # (``access_token``) vs what they DON'T (``user_id``,
+        # ``expires_in``, ``refresh_token``).
+        if not isinstance(response_body, dict):
+            raise BrokerApiError(
+                "Upstox token exchange returned a non-dict JSON body"
+            )
+
+        access_token = response_body.get("access_token")
+        if not access_token or not isinstance(access_token, str):
+            raise BrokerApiError(
+                "Upstox token exchange response is missing "
+                "'access_token'"
+            )
+
+        # Optional fields — the fetched docs do not promise any of
+        # these. Each one is read with a ``get`` and validated only
+        # for type; absence is the normal case.
+        broker_user_id = response_body.get("user_id")
+        if broker_user_id is not None and not isinstance(broker_user_id, str):
+            broker_user_id = None
+
+        expires_at: datetime | None = None
+        expires_in = response_body.get("expires_in")
+        if isinstance(expires_in, (int, float)) and expires_in > 0:
+            # ``datetime.now(timezone.utc)`` rather than the
+            # deprecated ``datetime.utcnow()`` — the latter emits
+            # a ``DeprecationWarning`` on Python 3.12+ which fails
+            # the test suite under any ``filterwarnings = error``
+            # configuration (a common CI hardening). The result is
+            # a timezone-aware UTC datetime.
+            expires_at = datetime.now(timezone.utc) + timedelta(
+                seconds=float(expires_in)
+            )
+
+        refresh_token = response_body.get("refresh_token")
+        if refresh_token is not None and not isinstance(refresh_token, str):
+            refresh_token = None
+
+        # Redact the access token from the raw dict before it goes
+        # anywhere that might be stringified into a log line or an
+        # exception message. The original token still lives on
+        # ``access_token`` above (it's the only thing the caller
+        # actually needs); only the ``raw`` cache is scrubbed. The
+        # redaction sentinel matches ``_UpstoxHttp._REDACTED`` so
+        # the two layers produce a single, greppable marker if it
+        # ever does appear in a log.
+        raw: dict = {
+            key: ("***" if key == "access_token" else value)
+            for key, value in response_body.items()
+        }
+
+        return BrokerCredentials(
+            access_token=access_token,
+            token_type="Bearer",
+            expires_at=expires_at,
+            refresh_token=refresh_token,
+            broker_user_id=broker_user_id,
+            raw=raw,
         )
 
     def fetch_holdings(
