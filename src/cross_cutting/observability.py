@@ -26,7 +26,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 TRACE_LOG_PATH = Path("trace.log")
 AUDIT_LOG_PATH = Path("audit.log")
@@ -97,3 +97,33 @@ class DefaultAuditManager:
             )
             with AUDIT_LOG_PATH.open("a") as f:
                 f.write(line + "\n")
+
+
+# ---------------------------------------------------------------------------
+# redact_secrets — masks sensitive values in nested dicts/lists
+# ---------------------------------------------------------------------------
+
+_SECRET_KEY_SUBSTRINGS = frozenset({
+    "password", "secret", "token", "credential", "api_key", "apikey",
+    "auth", "bearer", "private_key", "access_key", "secret_key",
+})
+
+
+def redact_secrets(data: Any) -> Any:
+    """Recursively walk *data*, replacing values of keys whose name contains
+    a secret-related substring with the literal string ``'[REDACTED]'``.
+    Case-insensitive. Dicts, lists, and all other values pass through
+    unchanged. The input is never mutated."""
+    if isinstance(data, dict):
+        return {
+            k: ("[REDACTED]" if _is_secret_key(k) else redact_secrets(v))
+            for k, v in data.items()
+        }
+    if isinstance(data, list):
+        return [redact_secrets(item) for item in data]
+    return data
+
+
+def _is_secret_key(key: str) -> bool:
+    key_lower = key.lower()
+    return any(substr in key_lower for substr in _SECRET_KEY_SUBSTRINGS)
