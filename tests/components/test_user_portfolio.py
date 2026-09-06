@@ -11,6 +11,7 @@ itself, which already has its own dedicated test suite.
 """
 
 import json
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -26,6 +27,7 @@ from components.c01_user_portfolio import (
     BrokerTransaction,
     DefaultUserPortfolio,
     Holding,
+    ImportResult,
     PlaceholderBrokerConnector,
     Portfolio,
     PortfolioSnapshot,
@@ -50,11 +52,17 @@ class _InMemoryInfrastructure:
     contain every key/value in the filter dict (the same containment
     match DefaultInfrastructure.query documents for its JSONB `@>`
     operator). publish/subscribe/schedule/cache_get/cache_set/get_secret
-    are unused by DefaultUserPortfolio and are not implemented."""
+    are unused by DefaultUserPortfolio and are not implemented.
+    
+    Extended for STORY-15: also implements get_broker_connection,
+    upsert_broker_transaction, touch_last_import, mark_broker_connection_error."""
 
     def __init__(self) -> None:
         self._tables: dict[str, dict[str, dict]] = {}
         self._next_id = 0
+        self._broker_connections: dict[tuple[str, str], dict] = {}
+        self._broker_transactions: list[dict] = []
+        self._last_import_calls: list[tuple[str, str]] = []
 
     def store(self, table: str, record: dict) -> str:
         self._next_id += 1
@@ -71,6 +79,83 @@ class _InMemoryInfrastructure:
             for record in self._tables.get(table, {}).values()
             if all(record.get(key) == value for key, value in filters.items())
         ]
+
+    # STORY-15 extensions
+    def get_broker_connection(self, user_id: str, broker_id: str) -> "BrokerConnectionRecord | None":
+        from infrastructure_postgres import BrokerConnectionRecord
+        row = self._broker_connections.get((user_id, broker_id))
+        if row is None:
+            return None
+        return BrokerConnectionRecord(
+            id=row.get("id", "test-id"),
+            user_id=row["user_id"],
+            broker_id=row["broker_id"],
+            broker_user_id=row.get("broker_user_id"),
+            access_token_encrypted=row.get("access_token_encrypted", "test-encrypted"),
+            token_type=row.get("token_type", "Bearer"),
+            access_token_expires_at=row.get("access_token_expires_at"),
+            status=row.get("status", "CONNECTED"),
+            last_error=row.get("last_error"),
+            connected_at=row.get("connected_at"),
+            last_import_at=row.get("last_import_at"),
+            created_at=row.get("created_at", "2024-01-01T00:00:00Z"),
+            updated_at=row.get("updated_at", "2024-01-01T00:00:00Z"),
+        )
+
+    def upsert_broker_transaction(
+        self,
+        user_id: str,
+        broker_id: str,
+        external_id: str,
+        symbol: str,
+        isin: str,
+        trade_date: "date",
+        side: str,
+        quantity: "Decimal",
+        price: "Decimal",
+        amount: "Decimal",
+        exchange: str,
+        segment: str,
+        raw: dict,
+    ) -> bool:
+        for existing in self._broker_transactions:
+            if (existing["user_id"], existing["broker_id"], existing["external_id"]) == (
+                user_id, broker_id, external_id
+            ):
+                # Update existing
+                existing.update(
+                    dict(
+                        symbol=symbol, isin=isin, trade_date=str(trade_date),
+                        side=side, quantity=str(quantity), price=str(price),
+                        amount=str(amount), exchange=exchange, segment=segment, raw=raw,
+                    )
+                )
+                return False
+        self._broker_transactions.append(
+            dict(
+                user_id=user_id, broker_id=broker_id, external_id=external_id,
+                symbol=symbol, isin=isin, trade_date=str(trade_date),
+                side=side, quantity=str(quantity), price=str(price),
+                amount=str(amount), exchange=exchange, segment=segment, raw=raw,
+            )
+        )
+        return True
+
+    def touch_last_import(self, user_id: str, broker_id: str) -> None:
+        self._last_import_calls.append((user_id, broker_id))
+        key = (user_id, broker_id)
+        if key in self._broker_connections:
+            self._broker_connections[key]["last_import_at"] = "2024-01-01T00:00:00Z"
+
+    def mark_broker_connection_error(self, user_id: str, broker_id: str, error_message: str) -> None:
+        key = (user_id, broker_id)
+        if key in self._broker_connections:
+            self._broker_connections[key]["status"] = "ERROR"
+            self._broker_connections[key]["last_error"] = error_message
+
+    def _put_broker_connection(self, row: dict) -> None:
+        """Test helper to seed a broker connection row."""
+        self._broker_connections[(row["user_id"], row["broker_id"])] = dict(row)
 
 
 class _FakeBrokerConnector:
