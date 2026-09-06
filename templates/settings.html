@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Portfolio Agent{% endblock %}
+
+{% block content %}
+<div class="card bg-base-100 shadow-md">
+  <div class="card-body">
+    <h2 class="card-title text-2xl mb-6">Settings</h2>
+
+    <!-- Base Currency Preference -->
+    <section class="mb-8">
+      <h3 class="text-lg font-semibold mb-4">Base Currency</h3>
+      <p class="text-sm text-base-content/70 mb-4">
+        Choose your preferred base currency for consolidated portfolio views.
+      </p>
+
+      <div class="form-control">
+        <label class="label cursor-pointer justify-start gap-4">
+          <input
+            type="radio"
+            name="base_currency"
+            value="USD"
+            id="currency_usd"
+            class="radio radio-primary"
+            {% if current_base_currency == 'USD' %}checked{% endif %}
+          >
+          <span class="label-text text-lg">USD ($)</span>
+        </label>
+      </div>
+
+      <div class="form-control mb-6">
+        <label class="label cursor-pointer justify-start gap-4">
+          <input
+            type="radio"
+            name="base_currency"
+            value="INR"
+            id="currency_inr"
+            class="radio radio-primary"
+            {% if current_base_currency == 'INR' %}checked{% endif %}
+          >
+          <span class="label-text text-lg">INR (₹)</span>
+        </label>
+      </div>
+
+      <div id="status_message" class="hidden alert mb-4"></div>
+
+      <button id="save_currency" class="btn btn-primary">Save Preference</button>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const statusEl = document.getElementById('status_message');
+  const saveBtn = document.getElementById('save_currency');
+
+  function showStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.className = 'alert mb-4 ' + (isError ? 'alert-error' : 'alert-success');
+    statusEl.classList.remove('hidden');
+  }
+
+  saveBtn.addEventListener('click', async () => {
+    const selected = document.querySelector('input[name="base_currency"]:checked');
+    if (!selected) {
+      showStatus('Please select a currency.', true);
+      return;
+    }
+
+    const currency = selected.value;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+      const res = await fetch('/settings/base-currency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_currency: currency }),
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        showStatus('Preference saved successfully!', false);
+      } else {
+        showStatus(data.error || 'Failed to save preference.', true);
+      }
+    } catch (err) {
+      showStatus('Network error. Please try again.', true);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Preference';
+    }
+  });
+</script>
+{% endblock %}
