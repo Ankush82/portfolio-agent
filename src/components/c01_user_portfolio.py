@@ -1225,6 +1225,109 @@ class PortfolioSnapshot:
     exposure: dict
 
 
+@dataclass(frozen=True)
+class FailedRecord:
+    """A record that could not be processed during portfolio synchronization,
+    along with the reason it failed.
+
+    ``record_type`` is the logical type of the record that failed — e.g.
+    ``"holding"`` or ``"transaction"`` — not the raw broker label, so
+    callers can branch on it without knowing broker-specific taxonomy.
+
+    ``broker_id`` is the broker that produced the record, or ``None`` when
+    the failure arose during manual entry (where there is no broker source).
+
+    ``reason`` is a human-readable explanation of what went wrong, suitable
+    for surfacing in a UI or a log line.
+
+    ``raw_data`` is the original record dict as received from the broker
+    (or from the manual-entry payload), preserved verbatim so a future retry
+    or diagnostic pass can re-process it without re-fetching from the
+    broker. An empty dict means the record had no usable content to begin
+    with (e.g. the broker returned a completely null element)."""
+
+    record_type: str  # e.g. "holding" | "transaction"
+    broker_id: str | None
+    reason: str
+    raw_data: dict = field(default_factory=dict)
+
+
+@dataclass
+class SyncResult:
+    """The structured result of a ``synchronize_portfolio()`` call,
+    capturing every kind of outcome (added / updated / unchanged / removed /
+    failed) for both holdings and transactions, plus timing metadata.
+
+    ``success`` is ``True`` when no records failed to process at all —
+    i.e. when ``holdings_failed`` and ``transactions_failed`` are both zero.
+    A partially-successful sync that added some holdings but also had
+    failures is ``success=False``; callers that distinguish "some failures
+    among successes" from "total failure" can use the individual counter
+    fields to build their own severity signals.
+
+    ``has_changes`` is ``True`` when any record was added, updated, or
+    removed. A fully-unmodified sync (all existing records unchanged and
+    no new ones added) returns ``False``. A sync that only had failures
+    but no structural changes also returns ``False`` — "failed" is not
+    "changed".  Callers can use ``has_changes`` to decide whether to
+    notify downstream systems or re-render a portfolio view.
+
+    ``sync_started_at`` / ``sync_completed_at`` are timezone-aware UTC
+    timestamps captured at the outermost method boundary, so callers /
+    logs that record the same ``SyncResult`` get the same timestamp
+    values regardless of how deep in the call stack the capture happens.
+
+    ``duration_ms`` is the elapsed wall-clock time in milliseconds,
+    derived as the difference between ``sync_completed_at`` and
+    ``sync_started_at`` (never pre-computed, always computed from the
+    two timestamps so the value is always consistent with them)."""
+
+    portfolio_id: str
+
+    # Holdings counters
+    holdings_added: int = 0
+    holdings_updated: int = 0
+    holdings_unchanged: int = 0
+    holdings_removed: int = 0
+    holdings_failed: int = 0
+
+    # Transactions counters
+    transactions_added: int = 0
+    transactions_updated: int = 0
+    transactions_unchanged: int = 0
+    transactions_removed: int = 0
+    transactions_failed: int = 0
+
+    # Failed record detail
+    failed_records: list[FailedRecord] = field(default_factory=list)
+
+    # Timing
+    sync_started_at: datetime | None = None
+    sync_completed_at: datetime | None = None
+
+    @property
+    def duration_ms(self) -> int | None:
+        if self.sync_started_at is None or self.sync_completed_at is None:
+            return None
+        delta = self.sync_completed_at - self.sync_started_at
+        return int(delta.total_seconds() * 1000)
+
+    @property
+    def success(self) -> bool:
+        return self.holdings_failed == 0 and self.transactions_failed == 0
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(
+            self.holdings_added
+            or self.holdings_updated
+            or self.holdings_removed
+            or self.transactions_added
+            or self.transactions_updated
+            or self.transactions_removed
+        )
+
+
 class UserPortfolio(Protocol):
     def onboard_user(self, details: dict) -> User:
         ...
@@ -1243,7 +1346,7 @@ class UserPortfolio(Protocol):
     def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
         ...
 
-    def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
+    def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
         ...
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
@@ -1302,9 +1405,9 @@ class StubUserPortfolio:
         with traced("StubUserPortfolio.import_transactions"):
             return []
 
-    def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
+    def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
         with traced("StubUserPortfolio.synchronize_portfolio"):
-            return PortfolioSnapshot(portfolio_id="stub-id", positions=[], exposure={})
+            return SyncResult(portfolio_id="stub-id")
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
         with traced("StubUserPortfolio.track_portfolio_state"):
@@ -1502,11 +1605,17 @@ class DefaultUserPortfolio:
                 transactions.append(transaction)
             return transactions
 
-    def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
+    def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
         with traced("DefaultUserPortfolio.synchronize_portfolio"):
+            sync_started_at = datetime.now(timezone.utc)
             self.import_holdings(portfolio)
             self.import_transactions(portfolio)
-            return self.track_portfolio_state(portfolio)
+            sync_completed_at = datetime.now(timezone.utc)
+            return SyncResult(
+                portfolio_id=portfolio.id,
+                sync_started_at=sync_started_at,
+                sync_completed_at=sync_completed_at,
+            )
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
         """Reads holdings already stored — via import_holdings above, or

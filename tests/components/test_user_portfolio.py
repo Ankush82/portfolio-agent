@@ -25,6 +25,7 @@ from components.c01_user_portfolio import (
     BrokerRateLimitError,
     BrokerTransaction,
     DefaultUserPortfolio,
+    FailedRecord,
     Holding,
     PlaceholderBrokerConnector,
     Portfolio,
@@ -32,6 +33,7 @@ from components.c01_user_portfolio import (
     Position,
     StubBrokerConnector,
     StubUserPortfolio,
+    SyncResult,
     Transaction,
     UnsupportedBrokerError,
     User,
@@ -281,13 +283,17 @@ def test_synchronize_portfolio_reimports_then_assembles_a_snapshot():
     portfolio_component = DefaultUserPortfolio(infrastructure=infra, broker_connector=connector)
     portfolio = Portfolio(id="pf-1", user_id="user-1")
 
-    snapshot = portfolio_component.synchronize_portfolio(portfolio)
+    result = portfolio_component.synchronize_portfolio(portfolio)
 
-    assert isinstance(snapshot, PortfolioSnapshot)
-    assert snapshot.portfolio_id == "pf-1"
-    assert len(snapshot.positions) == 1
-    assert snapshot.positions[0].holding.security_id == "AAPL"
-    assert snapshot.exposure == {"AAPL": {"market_value": 10.0, "weight": 1.0}}
+    assert isinstance(result, SyncResult)
+    assert result.portfolio_id == "pf-1"
+    assert result.holdings_added == 1
+    assert result.success is True
+    assert result.has_changes is True
+    assert result.sync_started_at is not None
+    assert result.sync_completed_at is not None
+    assert result.duration_ms is not None
+    assert result.duration_ms >= 0
 
 
 def test_track_portfolio_state_reads_previously_stored_holdings_without_calling_the_broker_again():
@@ -599,6 +605,8 @@ def test_stub_user_portfolio_untouched():
 
     assert stub.import_holdings(portfolio) == []
     assert stub.import_transactions(portfolio) == []
+    sync_result = stub.synchronize_portfolio(portfolio)
+    assert sync_result == SyncResult(portfolio_id="stub-id")
     assert stub.calculate_exposure(PortfolioSnapshot(portfolio_id="x", positions=[], exposure={})) == {}
     assert stub.determine_user_relevance(user, {}) is True
 
@@ -2617,3 +2625,189 @@ def test_connect_portfolio_no_upstox_in_default_user_portfolio():
             f"DefaultUserPortfolio must not contain {term!r}; found in source"
         )
 
+
+
+# --- SyncResult & FailedRecord (STORY-SYNC-01) ------------------------------
+
+
+def test_sync_result_success_is_true_when_no_failures():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_added=2,
+        holdings_updated=1,
+        holdings_failed=0,
+        transactions_failed=0,
+    )
+    assert result.success is True
+
+
+def test_sync_result_success_is_false_when_holdings_failed():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=1,
+        transactions_failed=0,
+    )
+    assert result.success is False
+
+
+def test_sync_result_success_is_false_when_transactions_failed():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=0,
+        transactions_failed=1,
+    )
+    assert result.success is False
+
+
+def test_sync_result_has_changes_is_true_when_holdings_added():
+    result = SyncResult(portfolio_id="pf-1", holdings_added=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_holdings_updated():
+    result = SyncResult(portfolio_id="pf-1", holdings_updated=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_holdings_removed():
+    result = SyncResult(portfolio_id="pf-1", holdings_removed=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_added():
+    result = SyncResult(portfolio_id="pf-1", transactions_added=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_updated():
+    result = SyncResult(portfolio_id="pf-1", transactions_updated=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_removed():
+    result = SyncResult(portfolio_id="pf-1", transactions_removed=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_false_when_all_unchanged():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_unchanged=5,
+        transactions_unchanged=10,
+    )
+    assert result.has_changes is False
+
+
+def test_sync_result_has_changes_is_false_when_only_failures():
+    """Failed-only sync makes no structural changes."""
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=2,
+        transactions_failed=1,
+    )
+    assert result.has_changes is False
+
+
+def test_sync_result_duration_ms_computes_from_timestamps():
+    from datetime import timezone
+
+    started = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    completed = datetime(2025, 1, 1, 12, 0, 1, tzinfo=timezone.utc)  # +1000 ms
+
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_started_at=started,
+        sync_completed_at=completed,
+    )
+    assert result.duration_ms == 1000
+
+
+def test_sync_result_duration_ms_is_none_when_started_at_is_missing():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_completed_at=datetime.now(timezone.utc),
+    )
+    assert result.duration_ms is None
+
+
+def test_sync_result_duration_ms_is_none_when_completed_at_is_missing():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_started_at=datetime.now(timezone.utc),
+    )
+    assert result.duration_ms is None
+
+
+def test_sync_result_duration_ms_is_none_when_both_timestamps_missing():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.duration_ms is None
+
+
+def test_sync_result_all_counters_default_to_zero():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.holdings_added == 0
+    assert result.holdings_updated == 0
+    assert result.holdings_unchanged == 0
+    assert result.holdings_removed == 0
+    assert result.holdings_failed == 0
+    assert result.transactions_added == 0
+    assert result.transactions_updated == 0
+    assert result.transactions_unchanged == 0
+    assert result.transactions_removed == 0
+    assert result.transactions_failed == 0
+
+
+def test_sync_result_failed_records_list_empty_by_default():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.failed_records == []
+
+
+def test_failed_record_construction_with_all_fields():
+    record = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="missing required field 'isin'",
+        raw_data={"symbol": "AAPL", "quantity": 10},
+    )
+    assert record.record_type == "holding"
+    assert record.broker_id == "upstox"
+    assert record.reason == "missing required field 'isin'"
+    assert record.raw_data == {"symbol": "AAPL", "quantity": 10}
+
+
+def test_failed_record_broker_id_can_be_none():
+    """Manual-entry failures have no broker source."""
+    record = FailedRecord(
+        record_type="transaction",
+        broker_id=None,
+        reason="amount must be positive",
+        raw_data={},
+    )
+    assert record.broker_id is None
+
+
+def test_failed_record_raw_data_defaults_to_empty_dict():
+    record = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="unparseable",
+    )
+    assert record.raw_data == {}
+
+
+def test_sync_result_with_failed_records_roundtrips_success_and_has_changes():
+    failed = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="parse error",
+        raw_data={},
+    )
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_added=1,
+        holdings_failed=1,
+        failed_records=[failed],
+    )
+    assert result.success is False
+    assert result.has_changes is True
+    assert result.failed_records == [failed]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """System Infrastructure (component 18) — concrete Postgres + Redis
 implementation of the Infrastructure interface.
 
@@ -91,6 +93,25 @@ class BrokerConnectionRecord:
             f"connected_at={self.connected_at!r}, last_import_at={self.last_import_at!r}, "
             f"created_at={self.created_at!r}, updated_at={self.updated_at!r})"
         )
+
+
+def _broker_connection_from_row(row: tuple) -> BrokerConnectionRecord:
+    """Build a BrokerConnectionRecord from a 13-column broker_connections row."""
+    return BrokerConnectionRecord(
+        id=row[0],
+        user_id=row[1],
+        broker_id=row[2],
+        broker_user_id=row[3],
+        access_token_encrypted=row[4],
+        token_type=row[5],
+        access_token_expires_at=row[6],
+        status=row[7],
+        last_error=row[8],
+        connected_at=row[9],
+        last_import_at=row[10],
+        created_at=str(row[11]),
+        updated_at=str(row[12]),
+    )
 
 
 class DefaultInfrastructure:
@@ -417,21 +438,7 @@ class DefaultInfrastructure:
                 row = cursor.fetchone()
             if row is None:
                 return None
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return _broker_connection_from_row(row)
 
     def upsert_broker_connection(
         self,
@@ -450,7 +457,7 @@ class DefaultInfrastructure:
         """
         import uuid as _uuid
 
-        now = datetime.now(timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
         conn_id = str(_uuid.uuid4())
         token_encrypted = encrypt_secret(credentials.access_token)
         expires_at = credentials.expires_at
@@ -488,21 +495,7 @@ class DefaultInfrastructure:
                     ),
                 )
                 row = cursor.fetchone()
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return _broker_connection_from_row(row)
 
     def mark_broker_connection_error(
         self,
@@ -519,5 +512,5 @@ class DefaultInfrastructure:
                     SET status = 'ERROR', last_error = %s, updated_at = %s
                     WHERE user_id = %s AND broker_id = %s
                     """,
-                    (error_message, datetime.now(timezone.utc), user_id, broker_id),
+                    (error_message, datetime.datetime.now(datetime.timezone.utc), user_id, broker_id),
                 )

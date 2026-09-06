@@ -6,6 +6,7 @@ import pytest
 import uuid
 from datetime import datetime, timedelta
 from src.infrastructure_postgres import DefaultInfrastructure, BrokerConnectionRecord
+from src.components.c01_user_portfolio import BrokerCredentials
 
 
 @pytest.fixture
@@ -26,11 +27,11 @@ def broker_id():
 
 @pytest.fixture
 def credentials():
-    return {
-        "access_token": "test_access_token_123",
-        "token_type": "Bearer",
-        "expires_at": int((datetime.now() + timedelta(hours=1)).timestamp()),
-    }
+    return BrokerCredentials(
+        access_token="test_access_token_123",
+        token_type="Bearer",
+        expires_at=datetime.now() + timedelta(hours=1),
+    )
 
 
 # --- Schema / record existence (already done in prior attempt) ---
