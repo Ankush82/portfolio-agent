@@ -18,6 +18,7 @@ hides a down Postgres or a down Redis behind a fake success.
 import json
 import os
 import uuid
+import datetime
 from typing import Any
 
 import psycopg
@@ -25,9 +26,71 @@ import redis
 from psycopg.types.json import Jsonb
 
 from cross_cutting.observability import traced
+from src.broker_token_crypto import encrypt_secret, decrypt_secret, BrokerConfigError
 
 DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+
+class BrokerConnectionRecord:
+    """Record representing a broker connection.
+
+    The access token is stored encrypted in the database and is only
+    exposed via the `access_token` property, which decrypts it on demand.
+    The __repr__ method redacts the token.
+    """
+
+    def __init__(
+        self,
+        id: str,
+        user_id: str,
+        broker_id: str,
+        broker_user_id: str | None,
+        access_token_encrypted: str,
+        token_type: str,
+        access_token_expires_at: str | None,
+        status: str,
+        last_error: str | None,
+        connected_at: str | None,
+        last_import_at: str | None,
+        created_at: str,
+        updated_at: str,
+    ) -> None:
+        self.id = id
+        self.user_id = user_id
+        self.broker_id = broker_id
+        self.broker_user_id = broker_user_id
+        self._access_token_encrypted = access_token_encrypted
+        self.token_type = token_type
+        self.access_token_expires_at = access_token_expires_at
+        self.status = status
+        self.last_error = last_error
+        self.connected_at = connected_at
+        self.last_import_at = last_import_at
+        self.created_at = created_at
+        self.updated_at = updated_at
+
+    @property
+    def access_token(self) -> str:
+        """Decrypt and return the access token."""
+        try:
+            return decrypt_secret(self._access_token_encrypted)
+        except BrokerConfigError:
+            # If decryption fails, we still want to be able to represent the record
+            # without crashing. Return a placeholder or re-raise? For safety, we
+            # re-raise so the caller knows the token is unusable.
+            raise
+
+    def __repr__(self) -> str:
+        return (
+            f"BrokerConnectionRecord(id={self.id!r}, user_id={self.user_id!r}, "
+            f"broker_id={self.broker_id!r}, broker_user_id={self.broker_user_id!r}, "
+            f"access_token_encrypted=**REDACTED**, token_type={self.token_type!r}, "
+            f"access_token_expires_at={self.access_token_expires_at!r}, "
+            f"status={self.status!r}, last_error={self.last_error!r}, "
+            f"connected_at={self.connected_at!r}, last_import_at={self.last_import_at!r}, "
+            f"created_at={self.created_at!r}, updated_at={self.updated_at!r})"
+        )
 
 
 class DefaultInfrastructure:
@@ -130,6 +193,27 @@ class DefaultInfrastructure:
                     id BIGSERIAL PRIMARY KEY,
                     migration_name VARCHAR NOT NULL UNIQUE,
                     applied_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            # Broker connections table for storing encrypted broker credentials
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broker_connections (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id),
+                    broker_id TEXT NOT NULL,
+                    broker_user_id TEXT,
+                    access_token_encrypted TEXT NOT NULL,
+                    token_type TEXT NOT NULL DEFAULT 'Bearer',
+                    access_token_expires_at TIMESTAMPTZ NULL,
+                    status TEXT NOT NULL CHECK (status IN ('CONNECTED','ERROR','DISCONNECTED')),
+                    last_error TEXT NULL,
+                    connected_at TIMESTAMPTZ NULL,
+                    last_import_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE(user_id, broker_id)
                 )
                 """
             )
