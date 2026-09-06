@@ -41,7 +41,7 @@ from exchange_rate_client import (
     fetch_exchange_rate,
 )
 from infrastructure import Infrastructure
-from infrastructure_postgres import DefaultInfrastructure
+from infrastructure_postgres import BrokerConnectionRecord, DefaultInfrastructure
 from upstox_config import UpstoxConfig
 
 if TYPE_CHECKING:
@@ -51,6 +51,36 @@ if TYPE_CHECKING:
     # ``BrokerAuthError`` / ``BrokerRateLimitError`` classes from this module
     # at module load time, so the reverse module-level import would deadlock).
     from upstox_http import _UpstoxHttp
+
+
+# ---------------------------------------------------------------------------
+# Broker connector registry (STORY-9 / STORY-13)
+# ---------------------------------------------------------------------------
+# In-memory registry of available BrokerConnector instances, keyed by
+# broker_id. Real connectors are registered at startup; tests register
+# StubBrokerConnector or other test doubles. No Upstox-specific values
+# appear here — only the Protocol shape and broker_id strings.
+_broker_connector_registry: dict[str, BrokerConnector] = {}
+
+
+def get_broker_connector(broker_id: str) -> BrokerConnector:
+    """Look up a registered BrokerConnector by broker_id (STORY-9).
+
+    Raises ``UnsupportedBrokerError`` if no connector is registered
+    for the given broker_id. The registry contains only broker_id
+    strings (no URLs, no field names) — everything broker-specific
+    lives behind the Protocol."""
+    connector = _broker_connector_registry.get(broker_id)
+    if connector is None:
+        raise UnsupportedBrokerError(
+            f"no connector registered for broker_id {broker_id!r}"
+        )
+    return connector
+
+
+def register_broker_connector(connector: BrokerConnector) -> None:
+    """Register a BrokerConnector instance (used by tests / startup)."""
+    _broker_connector_registry[connector.broker_id] = connector
 
 
 # Exception hierarchy for BrokerConnector (ADR-0022)
@@ -1199,7 +1229,12 @@ class UserPortfolio(Protocol):
     def onboard_user(self, details: dict) -> User:
         ...
 
-    def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
+    def connect_portfolio(
+        self,
+        user_id: str,
+        broker_id: str,
+        payload: dict,
+    ) -> BrokerConnectionRecord:
         ...
 
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
@@ -1234,9 +1269,30 @@ class StubUserPortfolio:
         with traced("StubUserPortfolio.onboard_user"):
             return User(id="stub-id", preferences={})
 
-    def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
+    def connect_portfolio(
+        self,
+        user_id: str,
+        broker_id: str,
+        payload: dict,
+    ) -> BrokerConnectionRecord:
         with traced("StubUserPortfolio.connect_portfolio"):
-            return Portfolio(id="stub-id", user_id="stub-id")
+            # Return a synthetic record with stub values — caller can assert
+            # on broker_id / user_id / status.
+            return BrokerConnectionRecord(
+                id="stub-record-id",
+                user_id=user_id,
+                broker_id=broker_id,
+                broker_user_id="stub-broker-user",
+                access_token_encrypted="stub-encrypted",
+                token_type="Bearer",
+                access_token_expires_at=None,
+                status="CONNECTED",
+                last_error=None,
+                connected_at=datetime.now(timezone.utc).isoformat(),
+                last_import_at=None,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
 
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
         with traced("StubUserPortfolio.import_holdings"):
@@ -1344,29 +1400,55 @@ class DefaultUserPortfolio:
             )
             return user
 
-    def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
+    def connect_portfolio(
+        self,
+        user_id: str,
+        broker_id: str,
+        payload: dict,
+    ) -> BrokerConnectionRecord:
+        """Exchange an OAuth auth code for broker credentials and persist the connection (STORY-13).
+
+        Resolution chain:
+          1. Validate payload['code'] — raise ValueError if absent or empty.
+          2. Resolve connector via get_broker_connector(broker_id) — raises UnsupportedBrokerError on unknown broker_id.
+          3. Call connector.exchange_auth_code(code=payload['code']).
+          4. Persist via infrastructure.upsert_broker_connection with status CONNECTED.
+          5. On BrokerAuthError or BrokerApiError: if a prior connection row exists,
+             call infrastructure.mark_broker_connection_error, then re-raise.
+
+        No Upstox-specific code, URLs, or field names appear in this method body —
+        everything broker-specific lives behind the BrokerConnector Protocol."""
         with traced("DefaultUserPortfolio.connect_portfolio"):
-            # Store the broker_credentials in the portfolio record (without calling the broker_connector)
-            portfolio = Portfolio(id=str(uuid.uuid4()), user_id=user.id)
-            # Tag and store the broker_credentials as the broker_connection in the portfolio record
-            tagged_credentials = self._boundary_gate.tag_provenance(broker_credentials, source="broker_connector")
-            self._infrastructure.store(
-                PORTFOLIOS_TABLE,
-                {
-                    "id": portfolio.id,
-                    "user_id": portfolio.user_id,
-                    "broker_connection": tagged_credentials,
-                },
+            code = payload.get("code")
+            if not code or not isinstance(code, str) or not code.strip():
+                raise ValueError(
+                    "connect_portfolio: payload['code'] is required and must be a non-empty string"
+                )
+
+            connector = get_broker_connector(broker_id)
+
+            # Check for an existing connection row before calling the connector,
+            # so we know whether to mark an error on failure.
+            existing = self._infrastructure.get_broker_connection(user_id, broker_id)
+
+            try:
+                credentials = connector.exchange_auth_code(code=code.strip())
+            except (BrokerAuthError, BrokerApiError) as exc:
+                if existing is not None:
+                    self._infrastructure.mark_broker_connection_error(
+                        user_id, broker_id, str(exc)
+                    )
+                raise
+
+            record = self._infrastructure.upsert_broker_connection(
+                user_id=user_id,
+                broker_id=broker_id,
+                credentials=credentials,
+                status="CONNECTED",
+                last_error=None,
+                connected_at=datetime.now(timezone.utc),
             )
-            self._audit_manager.record(
-                "portfolio_connected",
-                {
-                    "portfolio_id": portfolio.id,
-                    "user_id": user.id,
-                    "provenance": tagged_credentials.get("provenance"),
-                },
-            )
-            return portfolio
+            return record
 
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
         with traced("DefaultUserPortfolio.import_holdings"):

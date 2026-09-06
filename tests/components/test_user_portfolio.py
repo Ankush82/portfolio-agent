@@ -2369,3 +2369,251 @@ def test_stub_broker_connector_does_not_read_env_at_construction_time():
         f"observed reads: {env_reads!r}"
     )
 
+
+# ---------------------------------------------------------------------------
+# STORY-13: DefaultUserPortfolio.connect_portfolio
+# ---------------------------------------------------------------------------
+
+import pytest
+from datetime import datetime, timezone
+from unittest import mock
+
+from components.c01_user_portfolio import (
+    BrokerConnectionRecord,
+    BrokerCredentials,
+    DefaultUserPortfolio,
+    StubBrokerConnector,
+    get_broker_connector,
+    register_broker_connector,
+    UnsupportedBrokerError,
+    BrokerAuthError,
+    BrokerApiError,
+)
+from infrastructure_postgres import DefaultInfrastructure
+
+
+class _FakeInfrastructureForConnect:
+    """Minimal fake infrastructure that tracks calls for connect_portfolio tests."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, tuple, dict]] = []
+        self._connections: dict[tuple[str, str], BrokerConnectionRecord] = {}
+
+    def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
+        self.calls.append(("get_broker_connection", (user_id, broker_id), {}))
+        return self._connections.get((user_id, broker_id))
+
+    def upsert_broker_connection(
+        self,
+        user_id: str,
+        broker_id: str,
+        credentials: BrokerCredentials,
+        status: str = "CONNECTED",
+        last_error: str | None = None,
+        connected_at=None,
+    ) -> BrokerConnectionRecord:
+        self.calls.append(("upsert_broker_connection", (user_id, broker_id), {
+            "credentials": credentials, "status": status, "last_error": last_error,
+        }))
+        record = BrokerConnectionRecord(
+            id="fake-record-id",
+            user_id=user_id,
+            broker_id=broker_id,
+            broker_user_id=credentials.broker_user_id,
+            access_token_encrypted="fake-encrypted",
+            token_type=credentials.token_type,
+            access_token_expires_at=str(credentials.expires_at) if credentials.expires_at else None,
+            status=status,
+            last_error=last_error,
+            connected_at=connected_at.isoformat() if connected_at else None,
+            last_import_at=None,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._connections[(user_id, broker_id)] = record
+        return record
+
+    def mark_broker_connection_error(
+        self,
+        user_id: str,
+        broker_id: str,
+        error_message: str,
+    ) -> None:
+        self.calls.append(("mark_broker_connection_error", (user_id, broker_id), {
+            "error_message": error_message,
+        }))
+        existing = self._connections.get((user_id, broker_id))
+        if existing:
+            self._connections[(user_id, broker_id)] = BrokerConnectionRecord(
+                id=existing.id,
+                user_id=existing.user_id,
+                broker_id=existing.broker_id,
+                broker_user_id=existing.broker_user_id,
+                access_token_encrypted=existing._access_token_encrypted,
+                token_type=existing.token_type,
+                access_token_expires_at=existing.access_token_expires_at,
+                status="ERROR",
+                last_error=error_message,
+                connected_at=existing.connected_at,
+                last_import_at=existing.last_import_at,
+                created_at=existing.created_at,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+
+def test_connect_portfolio_happy_path():
+    """AC: happy path with StubBrokerConnector persists CONNECTED row and returns the record."""
+    stub = StubBrokerConnector()
+    register_broker_connector(stub)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    record = portfolio.connect_portfolio(
+        user_id="user-123",
+        broker_id="stub",
+        payload={"code": "auth-code-abc"},
+    )
+
+    assert record.status == "CONNECTED"
+    assert record.user_id == "user-123"
+    assert record.broker_id == "stub"
+
+    # upsert was called
+    upsert_calls = [c for c in infra.calls if c[0] == "upsert_broker_connection"]
+    assert len(upsert_calls) == 1
+    call_args = upsert_calls[0]
+    assert call_args[1] == ("user-123", "stub")
+    assert call_args[2]["credentials"].access_token == "stub-access-token"
+    assert call_args[2]["status"] == "CONNECTED"
+
+
+def test_connect_portfolio_missing_code_raises_valueerror():
+    """AC: missing or empty code raises ValueError before any connector call."""
+    stub = StubBrokerConnector()
+    register_broker_connector(stub)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    # Missing key entirely
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={})
+
+    # Present but empty string
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={"code": ""})
+
+    # Present but whitespace-only
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={"code": "   "})
+
+    # No connector calls were made
+    assert infra.calls == [], "ValueError must be raised before any connector call"
+
+
+def test_connect_portfolio_unknown_broker_id_raises_unsupported():
+    """AC: unknown broker_id raises UnsupportedBrokerError."""
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(UnsupportedBrokerError):
+        portfolio.connect_portfolio(
+            user_id="u", broker_id="nonexistent-broker", payload={"code": "x"}
+        )
+
+
+def test_connect_portfolio_broker_auth_error_marks_existing_row():
+    """AC: BrokerAuthError propagates, no CONNECTED row, existing row marked ERROR."""
+    auth_error_connector = StubBrokerConnector(raise_on=BrokerAuthError("auth failed"))
+    register_broker_connector(auth_error_connector)
+    infra = _FakeInfrastructureForConnect()
+
+    # Seed an existing row so the error-marking path is exercised
+    existing_record = infra.upsert_broker_connection(
+        user_id="user-existing",
+        broker_id="stub",
+        credentials=BrokerCredentials(access_token="old-token"),
+        status="CONNECTED",
+    )
+    assert existing_record.status == "CONNECTED"
+
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerAuthError):
+        portfolio.connect_portfolio(
+            user_id="user-existing",
+            broker_id="stub",
+            payload={"code": "invalid"},
+        )
+
+    # No CONNECTED upsert happened
+    upsert_calls = [c for c in infra.calls if c[0] == "upsert_broker_connection"]
+    assert upsert_calls == []
+
+    # mark_broker_connection_error WAS called
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert len(mark_calls) == 1
+    assert mark_calls[0][1] == ("user-existing", "stub")
+    assert "auth failed" in mark_calls[0][2]["error_message"]
+
+
+def test_connect_portfolio_broker_auth_error_no_prior_row():
+    """AC: BrokerAuthError propagates even when no prior row exists (no mark call)."""
+    auth_error_connector = StubBrokerConnector(raise_on=BrokerAuthError("auth failed"))
+    register_broker_connector(auth_error_connector)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerAuthError):
+        portfolio.connect_portfolio(
+            user_id="brand-new-user",
+            broker_id="stub",
+            payload={"code": "invalid"},
+        )
+
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert mark_calls == [], "mark_broker_connection_error must not be called when no prior row"
+
+
+def test_connect_portfolio_broker_api_error_marks_existing_row():
+    """AC: BrokerApiError propagates, existing row marked ERROR."""
+    api_error_connector = StubBrokerConnector(raise_on=BrokerApiError("api failed"))
+    register_broker_connector(api_error_connector)
+    infra = _FakeInfrastructureForConnect()
+
+    # Seed an existing row
+    infra.upsert_broker_connection(
+        user_id="user-api-err",
+        broker_id="stub",
+        credentials=BrokerCredentials(access_token="old-token"),
+        status="CONNECTED",
+    )
+
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerApiError):
+        portfolio.connect_portfolio(
+            user_id="user-api-err",
+            broker_id="stub",
+            payload={"code": "bad-code"},
+        )
+
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert len(mark_calls) == 1
+
+
+def test_connect_portfolio_no_upstox_in_default_user_portfolio():
+    """AC: grep of DefaultUserPortfolio class body shows zero occurrences of Upstox-specific names."""
+    import inspect
+    from components.c01_user_portfolio import DefaultUserPortfolio
+
+    source = inspect.getsource(DefaultUserPortfolio)
+    # Exclude imports and docstrings (the module-level Upstox connector class)
+    upstox_terms = [
+        "upstox", "api.upstox.com",
+        "client_id", "client_secret", "redirect_uri",  # Upstox field names
+    ]
+    for term in upstox_terms:
+        assert term.lower() not in source.lower(), (
+            f"DefaultUserPortfolio must not contain {term!r}; found in source"
+        )
+
