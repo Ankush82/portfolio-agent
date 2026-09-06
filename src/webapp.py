@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ from typing import Any
 from flask import Flask, jsonify, request, render_template
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
+from exchange_rate_client import (
+    ExchangeRateFetchError,
+    MissingExchangeRateAPIKeyError,
+    fetch_exchange_rate,
+)
 from market_hours import market_status, UnknownMarketError, MarketHoursConfigError
 
 # Currency symbol constants for Unicode with ASCII fallback
@@ -45,6 +51,9 @@ _STATIC_DIR = _REPO_ROOT / "static"
 
 # Quantum for currency formatting: 2 decimal places
 _PRICE_QUANTUM = Decimal("0.01")
+
+# Default base currency (can be overridden by user preference)
+_DEFAULT_BASE_CURRENCY = "INR"
 
 
 def get_currency_symbol(currency: str) -> str:
@@ -76,6 +85,40 @@ def format_price(value: Any) -> str:
         return str(decimal_value.quantize(_PRICE_QUANTUM, rounding=ROUND_HALF_UP))
     except (ValueError, TypeError):
         return str(value)
+
+
+def format_price_with_thousand_separators(value: Any) -> str:
+    """Format a price/value with thousand separators and 2 decimal places.
+    
+    Args:
+        value: Numeric value (int, float, Decimal, or string)
+        
+    Returns:
+        String formatted with thousand separators and 2 decimal places
+        (e.g., '1,234,567.89')
+    """
+    try:
+        decimal_value = Decimal(str(value)).quantize(_PRICE_QUANTUM, rounding=ROUND_HALF_UP)
+        # Format with thousand separators
+        integer_part, decimal_part = str(decimal_value).split('.')
+        # Add thousand separators to integer part
+        integer_with_separators = f"{int(integer_part):,}"
+        return f"{integer_with_separators}.{decimal_part}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def get_user_base_currency() -> str:
+    """Get the user's base currency preference.
+    
+    In a real implementation, this would read from the user's profile
+    in the database. For now, returns the default base currency.
+    
+    Returns:
+        Base currency code (INR or USD)
+    """
+    # TODO: Read from user preferences in database
+    return _DEFAULT_BASE_CURRENCY
 
 
 def format_quantity(value: Any) -> str:
@@ -170,6 +213,10 @@ def create_app() -> Flask:
     def _format_price(value):
         return format_price(value)
 
+    @app.template_filter("format_price_with_thousand_separators")
+    def _format_price_with_thousand_separators(value):
+        return format_price_with_thousand_separators(value)
+
     @app.template_filter("format_quantity")
     def _format_quantity(value):
         return format_quantity(value)
@@ -188,6 +235,9 @@ def create_app() -> Flask:
         This endpoint displays holdings grouped by currency (INR/USD),
         showing appropriate currency symbols (₹ for INR, $ for USD)
         next to prices and displaying exchange names for each holding.
+        
+        STORY-17: Also displays consolidated total in user's base currency
+        with exchange rate information.
         """
         # Mock holdings data for demonstration - in production this
         # would come from the user's connected broker or manual entries
@@ -253,9 +303,50 @@ def create_app() -> Flask:
         inr_symbol = get_currency_symbol("INR")
         usd_symbol = get_currency_symbol("USD")
 
-        # Format totals to 2 decimal places
-        inr_total_str = format_price(inr_total) if inr_total else None
-        usd_total_str = format_price(usd_total) if usd_total else None
+        # Format totals to 2 decimal places with thousand separators
+        inr_total_str = format_price_with_thousand_separators(inr_total) if inr_total else None
+        usd_total_str = format_price_with_thousand_separators(usd_total) if usd_total else None
+
+        # STORY-17: Calculate consolidated total in user's base currency
+        base_currency = get_user_base_currency()
+        consolidated_total = None
+        exchange_rate_info = None
+        exchange_rate_unavailable = False
+
+        # Try to fetch exchange rate for consolidated total calculation
+        try:
+            rate = fetch_exchange_rate()
+            # Get the timestamp from the rate (defaults to now if not available)
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            
+            # Format exchange rate display
+            rate_formatted = format_price(rate)
+            exchange_rate_info = f"1 USD = {rate_formatted} INR as of {timestamp}"
+            
+            # Calculate consolidated total based on base currency
+            inr_val = inr_total if inr_total else Decimal("0")
+            usd_val = usd_total if usd_total else Decimal("0")
+            
+            if base_currency == "INR":
+                # Convert USD to INR
+                consolidated_total = inr_val + (usd_val * rate)
+            else:
+                # Convert INR to USD
+                if rate > 0:
+                    consolidated_total = usd_val + (inr_val / rate)
+                else:
+                    consolidated_total = None
+        except (ExchangeRateFetchError, MissingExchangeRateAPIKeyError):
+            # Exchange rate unavailable - show currency subtotals only
+            exchange_rate_unavailable = True
+            consolidated_total = None
+
+        # Format consolidated total with thousand separators
+        consolidated_total_str = (
+            format_price_with_thousand_separators(consolidated_total) 
+            if consolidated_total is not None else None
+        )
+        base_currency_symbol = get_currency_symbol(base_currency)
 
         return render_template(
             "portfolio.html",
@@ -266,6 +357,12 @@ def create_app() -> Flask:
             usd_total=usd_total_str,
             inr_symbol=inr_symbol,
             usd_symbol=usd_symbol,
+            # STORY-17: Consolidated total in base currency
+            consolidated_total=consolidated_total_str,
+            base_currency=base_currency,
+            base_currency_symbol=base_currency_symbol,
+            exchange_rate_info=exchange_rate_info,
+            exchange_rate_unavailable=exchange_rate_unavailable,
         )
 
     def _validate_indian_stock_symbol_format(symbol: str) -> tuple[bool, str]:

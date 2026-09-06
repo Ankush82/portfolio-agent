@@ -39,7 +39,7 @@
       <div class="stat bg-base-100 rounded-lg border">
         <div class="stat-title">Indian Stocks (INR)</div>
         <div class="stat-value text-lg">
-          <span class="currency-symbol" data-currency="INR">{{ inr_symbol }}</span>{{ inr_total|format_price }}
+          <span class="currency-symbol" data-currency="INR">{{ inr_symbol }}</span>{{ inr_total|format_price_with_thousand_separators }}
         </div>
         <div class="stat-desc">{{ inr_holdings|length }} holding{% if inr_holdings|length != 1 %}s{% endif %}</div>
       </div>
@@ -48,7 +48,7 @@
       <div class="stat bg-base-100 rounded-lg border">
         <div class="stat-title">US Stocks (USD)</div>
         <div class="stat-value text-lg">
-          <span class="currency-symbol" data-currency="USD">{{ usd_symbol }}</span>{{ usd_total|format_price }}
+          <span class="currency-symbol" data-currency="USD">{{ usd_symbol }}</span>{{ usd_total|format_price_with_thousand_separators }}
         </div>
         <div class="stat-desc">{{ usd_holdings|length }} holding{% if usd_holdings|length != 1 %}s{% endif %}</div>
       </div>
@@ -57,6 +57,29 @@
       <p class="text-base-content/70">No holdings to display.</p>
       {% endif %}
     </div>
+    
+    <!-- STORY-17: Consolidated Total -->
+    {% if consolidated_total is not none %}
+    <div class="mt-4 pt-4 border-t border-base-300">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+        <div>
+          <span class="text-sm text-base-content/70">Consolidated Total ({{ base_currency }}):</span>
+          <div class="stat-value text-xl font-bold">
+            <span class="currency-symbol" data-currency="{{ base_currency }}">{{ base_currency_symbol }}</span>{{ consolidated_total }}
+          </div>
+        </div>
+        {% if exchange_rate_info %}
+        <div class="text-sm text-base-content/50">
+          {{ exchange_rate_info }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% elif exchange_rate_unavailable %}
+    <div class="mt-4 pt-4 border-t border-base-300">
+      <p class="text-sm text-base-content/70">Consolidated total unavailable - exchange rate service temporarily unavailable</p>
+    </div>
+    {% endif %}
   </div>
 </section>
 
