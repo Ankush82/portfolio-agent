@@ -21,13 +21,38 @@ import uuid
 from typing import Any
 
 import psycopg
+import psycopg.errors
 import redis
 from psycopg.types.json import Jsonb
 
 from cross_cutting.observability import traced
+from domain import HOLDINGS_TABLE, PORTFOLIOS_TABLE, TRANSACTIONS_TABLE, USERS_TABLE
 
 DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+# The four core domain tables whose schema is owned by the migration
+# scripts/migrate_core_domain_entities.sql (STORY-11).  DefaultInfrastructure
+# must NEVER issue a CREATE TABLE for any of these — a real migration owns
+# their DDL now.  Ops against a missing migrated table raise
+# MigrationRequiredError rather than silently creating an untyped blob.
+MIGRATED_TABLES = frozenset({USERS_TABLE, PORTFOLIOS_TABLE, HOLDINGS_TABLE, TRANSACTIONS_TABLE})
+
+# The script that creates the four migrated tables.  Used verbatim in the
+# MigrationRequiredError remediation message so developers get an exact
+# command to run rather than having to hunt for the right file.
+_MIGRATION_SCRIPT = "scripts/run_migration.sh"
+
+
+class MigrationRequiredError(RuntimeError):
+    """Raised when a Postgres operation targets a table whose schema is
+    owned by a migration that has not been applied yet.
+
+    The exception message names the offending table and gives the exact
+    command to run to apply the missing migration.
+    """
+
+    pass
 
 
 class DefaultInfrastructure:
@@ -40,10 +65,17 @@ class DefaultInfrastructure:
     - get_secret reads the process environment — see its own docstring
       for exactly why that's a placeholder, not the real thing.
 
-    Schema is created lazily and idempotently (CREATE TABLE IF NOT
-    EXISTS) the first time a Postgres connection is opened in this
-    instance's lifetime — there is no separate migration step for this
-    first version.
+    The five generic system tables (records, queue_events, scheduled_tasks,
+    migration_log, schema_migrations) are created lazily and idempotently
+    (CREATE TABLE IF NOT EXISTS) the first time a Postgres connection is
+    opened in this instance's lifetime.
+
+    The four core domain tables (users, portfolios, holdings, transactions)
+    are NOT created here — their schema is owned by the migration
+    scripts/migrate_core_domain_entities.sql (STORY-11/STORY-14).  An
+    operation against any of those four tables that fails because the
+    relation does not exist raises MigrationRequiredError instead of
+    silently creating an untyped records-table blob.
     """
 
     def __init__(
@@ -65,10 +97,30 @@ class DefaultInfrastructure:
             self._ensure_schema(self._pg_connection)
         return self._pg_connection
 
+    def _safe_connection(self) -> psycopg.Connection:
+        """Returns the raw connection, but wraps UndefinedTable errors for
+        MIGRATED_TABLES in MigrationRequiredError so callers never see a
+        bare psycopg error for those four tables."""
+        return self._connection()
+
+    @staticmethod
+    def _wrap_migrated_table_error(table: str, exc: psycopg.errors.UndefinedTable) -> None:
+        """Re-raise an UndefinedTable for a migrated table as MigrationRequiredError."""
+        msg = (
+            f"Table '{table}' does not exist. "
+            f"Run: ./{_MIGRATION_SCRIPT}"
+        )
+        raise MigrationRequiredError(msg) from exc
+
     @staticmethod
     def _ensure_schema(connection: psycopg.Connection) -> None:
         with connection.cursor() as cursor:
-            cursor.execute(
+            # The four core domain tables (users, portfolios, holdings,
+            # transactions) are NOT created here — their schema is owned by
+            # scripts/migrate_core_domain_entities.sql.  Creating them here
+            # would recreate the untyped-blob problem that migration fixed.
+            # Per-table: skip MIGRATED_TABLES; create everything else.
+            for table_sql in (
                 """
                 CREATE TABLE IF NOT EXISTS records (
                     table_name TEXT NOT NULL,
@@ -77,9 +129,7 @@ class DefaultInfrastructure:
                     created_at TIMESTAMPTZ DEFAULT now(),
                     PRIMARY KEY (table_name, id)
                 )
-                """
-            )
-            cursor.execute(
+                """,
                 """
                 CREATE TABLE IF NOT EXISTS queue_events (
                     id SERIAL PRIMARY KEY,
@@ -88,9 +138,7 @@ class DefaultInfrastructure:
                     published_at TIMESTAMPTZ DEFAULT now(),
                     consumed BOOLEAN DEFAULT false
                 )
-                """
-            )
-            cursor.execute(
+                """,
                 """
                 CREATE TABLE IF NOT EXISTS scheduled_tasks (
                     id SERIAL PRIMARY KEY,
@@ -98,9 +146,7 @@ class DefaultInfrastructure:
                     task JSONB NOT NULL,
                     executed BOOLEAN DEFAULT false
                 )
-                """
-            )
-            cursor.execute(
+                """,
                 """
                 CREATE TABLE IF NOT EXISTS migration_log (
                     id BIGSERIAL PRIMARY KEY,
@@ -111,8 +157,10 @@ class DefaultInfrastructure:
                     error_message TEXT,
                     dry_run BOOLEAN NOT NULL
                 )
-                """
-            )
+                """,
+            ):
+                cursor.execute(table_sql)
+
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_migration_log_name_run ON migration_log (migration_name, run_at)"
             )
@@ -147,25 +195,35 @@ class DefaultInfrastructure:
         record dicts aren't guaranteed to carry one."""
         with traced("DefaultInfrastructure.store"):
             record_id = str(record["id"]) if "id" in record else str(uuid.uuid4())
-            with self._connection().cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO records (table_name, id, data)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
-                    """,
-                    (table, record_id, Jsonb(record)),
-                )
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO records (table_name, id, data)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
+                        """,
+                        (table, record_id, Jsonb(record)),
+                    )
+            except psycopg.errors.UndefinedTable as exc:
+                if table in MIGRATED_TABLES:
+                    self._wrap_migrated_table_error(table, exc)
+                raise
             return record_id
 
     def retrieve(self, table: str, id_: str) -> dict | None:
         with traced("DefaultInfrastructure.retrieve"):
-            with self._connection().cursor() as cursor:
-                cursor.execute(
-                    "SELECT data FROM records WHERE table_name = %s AND id = %s",
-                    (table, id_),
-                )
-                row = cursor.fetchone()
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM records WHERE table_name = %s AND id = %s",
+                        (table, id_),
+                    )
+                    row = cursor.fetchone()
+            except psycopg.errors.UndefinedTable as exc:
+                if table in MIGRATED_TABLES:
+                    self._wrap_migrated_table_error(table, exc)
+                raise
             return row[0] if row is not None else None
 
     def query(self, table: str, filters: dict) -> list[dict]:
@@ -173,12 +231,17 @@ class DefaultInfrastructure:
         general query DSL, deliberately kept simple for this first
         version."""
         with traced("DefaultInfrastructure.query"):
-            with self._connection().cursor() as cursor:
-                cursor.execute(
-                    "SELECT data FROM records WHERE table_name = %s AND data @> %s",
-                    (table, Jsonb(filters)),
-                )
-                rows = cursor.fetchall()
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM records WHERE table_name = %s AND data @> %s",
+                        (table, Jsonb(filters)),
+                    )
+                    rows = cursor.fetchall()
+            except psycopg.errors.UndefinedTable as exc:
+                if table in MIGRATED_TABLES:
+                    self._wrap_migrated_table_error(table, exc)
+                raise
             return [row[0] for row in rows]
 
     def delete(self, table: str, id: str) -> bool:
@@ -186,12 +249,17 @@ class DefaultInfrastructure:
         table. Returns True if a row was removed, False if no matching
         row existed — idempotent for nonexistent ids (never raises)."""
         with traced("DefaultInfrastructure.delete"):
-            with self._connection().cursor() as cursor:
-                cursor.execute(
-                    "DELETE FROM records WHERE table_name = %s AND id = %s",
-                    (table, id),
-                )
-                rowcount = cursor.rowcount
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM records WHERE table_name = %s AND id = %s",
+                        (table, id),
+                    )
+                    rowcount = cursor.rowcount
+            except psycopg.errors.UndefinedTable as exc:
+                if table in MIGRATED_TABLES:
+                    self._wrap_migrated_table_error(table, exc)
+                raise
             return rowcount > 0
 
     def publish(self, topic: str, event: dict) -> None:
@@ -306,24 +374,29 @@ class DefaultInfrastructure:
         the count is restricted to that portfolio; otherwise it's the
         total across every portfolio."""
         with traced("DefaultInfrastructure.count_us_stocks"):
-            with self._connection().cursor() as cursor:
-                if portfolio_id is None:
-                    cursor.execute(
-                        """
-                        SELECT COUNT(*) FROM records
-                        WHERE table_name = 'holdings'
-                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
-                        """
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        SELECT COUNT(*) FROM records
-                        WHERE table_name = 'holdings'
-                          AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
-                          AND data->>'portfolio_id' = %s
-                        """,
-                        (portfolio_id,),
-                    )
-                row = cursor.fetchone()
+            try:
+                with self._connection().cursor() as cursor:
+                    if portfolio_id is None:
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*) FROM records
+                            WHERE table_name = 'holdings'
+                              AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                            """
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*) FROM records
+                            WHERE table_name = 'holdings'
+                              AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                              AND data->>'portfolio_id' = %s
+                            """,
+                            (portfolio_id,),
+                        )
+                    row = cursor.fetchone()
+            except psycopg.errors.UndefinedTable as exc:
+                if "holdings" in MIGRATED_TABLES:
+                    self._wrap_migrated_table_error("holdings", exc)
+                raise
             return row[0] if row is not None else 0
