@@ -9,3 +9,27 @@ import os
 from cryptography.fernet import Fernet
 
 os.environ["BROKER_TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+
+import psycopg
+import pytest
+
+
+def _postgres_available() -> bool:
+    try:
+        psycopg.connect(
+            "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent",
+            connect_timeout=2,
+        )
+        return True
+    except Exception:
+        return False
+
+
+POSTGRES_SKIP_REASON = "Postgres not available (start docker-compose.yml services)"
+
+
+@pytest.fixture
+def postgres_dsn() -> str:
+    if not _postgres_available():
+        pytest.skip(POSTGRES_SKIP_REASON)
+    return "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
