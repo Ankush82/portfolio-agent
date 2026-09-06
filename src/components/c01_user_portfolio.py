@@ -1230,6 +1230,19 @@ class Transaction:
     amount: float
     broker_transaction_id: str | None = None  # Idempotent-match key from the broker
 
+    def __post_init__(self) -> None:
+        # Amount must be a real number — validate here so bad broker data
+        # raises early rather than silently persisting a non-numeric string.
+        # Uses the same Decimal-coercion pattern as Holding.quantity to stay
+        # consistent with the rest of this module's numeric validation.
+        try:
+            Decimal(str(self.amount))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(
+                f"Transaction.amount must be a real number "
+                f"(int/float/Decimal/str); got {self.amount!r}"
+            ) from exc
+
 
 @dataclass
 class CurrentTransaction:
@@ -1335,7 +1348,7 @@ class SyncResult:
         if self.sync_started_at is None or self.sync_completed_at is None:
             return None
         delta = self.sync_completed_at - self.sync_started_at
-        return int(delta.total_seconds() * 1000)
+        return round(delta.total_seconds() * 1000)
 
     @property
     def success(self) -> bool:
@@ -2053,7 +2066,32 @@ class DefaultUserPortfolio:
             )
             return record
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(
+        self,
+        portfolio: Portfolio,
+        failed_records: list[FailedRecord] | None = None,
+        holdings_failed: int | None = None,
+    ) -> list[Holding]:
+        """Import holdings from the broker connector (STORY-SYNC-08).
+
+        Each record upsert is wrapped in try/except. On error: logs the
+        full context (broker_id, reason, raw_data), appends a FailedRecord
+        to ``failed_records``, increments ``holdings_failed`` by 1, and
+        continues processing the remaining records. One bad record never
+        aborts the entire sync.
+
+        Args:
+            portfolio: the portfolio to import into.
+            failed_records: in-out list appended to in place; caller
+                passes the list the sync result will ultimately carry.
+            holdings_failed: in-out int incremented in place for each
+                failed record; caller passes the counter the sync result
+                will ultimately carry.
+
+        Returns:
+            List of successfully imported holdings (failed ones omitted).
+        """
+        _logger = logging.getLogger(__name__)
         with traced("DefaultUserPortfolio.import_holdings"):
             credentials = self._load_credentials(portfolio)
             if credentials is None:
@@ -2062,59 +2100,174 @@ class DefaultUserPortfolio:
             raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
             holdings = []
             for raw in raw_holdings:
-                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                holding = Holding(
-                    portfolio_id=portfolio.id,
-                    security_id=tagged["symbol"],
-                    quantity=tagged["quantity"],
-                    broker_holding_id=tagged.get("isin"),
-                )
-                self._infrastructure.store(
-                    HOLDINGS_TABLE,
-                    {
-                        "id": f"{portfolio.id}:{holding.security_id}",
-                        **asdict(holding),
-                        "provenance": tagged.get("provenance"),
-                    },
-                )
-                holdings.append(holding)
+                try:
+                    tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
+                    holding = Holding(
+                        portfolio_id=portfolio.id,
+                        security_id=tagged["symbol"],
+                        quantity=tagged["quantity"],
+                        broker_holding_id=tagged.get("isin"),
+                    )
+                    self._infrastructure.store(
+                        HOLDINGS_TABLE,
+                        {
+                            "id": f"{portfolio.id}:{holding.security_id}",
+                            **asdict(holding),
+                            "provenance": tagged.get("provenance"),
+                        },
+                    )
+                    holdings.append(holding)
+                except Exception as exc:  # noqa: BLE001
+                    broker_id = getattr(self._broker_connector, "broker_id", None)
+                    _logger.exception(
+                        "[HOLDING_UPSERT_FAILED] broker_id=%s reason=%s raw_data=%s",
+                        broker_id,
+                        exc,
+                        raw,
+                    )
+                    if failed_records is not None:
+                        failed_records.append(
+                            FailedRecord(
+                                record_type="holding",
+                                broker_id=broker_id,
+                                reason=str(exc),
+                                raw_data=raw,
+                            )
+                        )
+                    if holdings_failed is not None:
+                        holdings_failed[0] += 1
             return holdings
 
-    def import_transactions(self, portfolio: Portfolio, start_date: date = date.min, end_date: date = date.max) -> list[Transaction]:
+    def import_transactions(
+        self,
+        portfolio: Portfolio,
+        start_date: date = date.min,
+        end_date: date = date.max,
+        failed_records: list[FailedRecord] | None = None,
+        transactions_failed: int | None = None,
+    ) -> list[Transaction]:
+        """Import transactions from the broker connector (STORY-SYNC-08).
+
+        Each record upsert is wrapped in try/except. On error: logs the
+        full context (broker_id, reason, raw_data), appends a FailedRecord
+        to ``failed_records``, increments ``transactions_failed`` by 1, and
+        continues processing the remaining records. One bad record never
+        aborts the entire sync.
+
+        Args:
+            portfolio: the portfolio to import into.
+            start_date: start of the transaction fetch window.
+            end_date: end of the transaction fetch window.
+            failed_records: in-out list appended to in place; caller
+                passes the list the sync result will ultimately carry.
+            transactions_failed: in-out int incremented in place for each
+                failed record; caller passes the counter the sync result
+                will ultimately carry.
+
+        Returns:
+            List of successfully imported transactions (failed ones omitted).
+        """
+        _logger = logging.getLogger(__name__)
         with traced("DefaultUserPortfolio.import_transactions"):
             credentials = self._load_credentials(portfolio)
             if credentials is None:
                 return []
             # Fetch transactions using the broker_connector
-            raw_transactions = self._broker_connector.fetch_transactions(credentials=credentials, start_date=start_date, end_date=end_date)
+            raw_transactions = self._broker_connector.fetch_transactions(
+                credentials=credentials, start_date=start_date, end_date=end_date
+            )
             transactions = []
             for raw in raw_transactions:
-                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                transaction = Transaction(
-                    portfolio_id=portfolio.id,
-                    kind=tagged["side"],  # Note: the BrokerTransaction has 'side' (BUY/SELL), but the Transaction expects 'kind'
-                    amount=tagged["amount"],
-                    broker_transaction_id=tagged.get("external_id"),
-                )
-                self._infrastructure.store(
-                    TRANSACTIONS_TABLE,
-                    {
-                        "id": str(uuid.uuid4()),
-                        **asdict(transaction),
-                        "provenance": tagged.get("provenance"),
-                    },
-                )
-                transactions.append(transaction)
+                try:
+                    tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
+                    transaction = Transaction(
+                        portfolio_id=portfolio.id,
+                        kind=tagged["side"],
+                        amount=tagged["amount"],
+                        broker_transaction_id=tagged.get("external_id"),
+                    )
+                    self._infrastructure.store(
+                        TRANSACTIONS_TABLE,
+                        {
+                            "id": str(uuid.uuid4()),
+                            **asdict(transaction),
+                            "provenance": tagged.get("provenance"),
+                        },
+                    )
+                    transactions.append(transaction)
+                except Exception as exc:  # noqa: BLE001
+                    broker_id = getattr(self._broker_connector, "broker_id", None)
+                    _logger.exception(
+                        "[TRANSACTION_UPSERT_FAILED] broker_id=%s reason=%s raw_data=%s",
+                        broker_id,
+                        exc,
+                        raw,
+                    )
+                    if failed_records is not None:
+                        failed_records.append(
+                            FailedRecord(
+                                record_type="transaction",
+                                broker_id=broker_id,
+                                reason=str(exc),
+                                raw_data=raw,
+                            )
+                        )
+                    if transactions_failed is not None:
+                        transactions_failed[0] += 1
             return transactions
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
+        """Synchronize the portfolio with the latest broker data (STORY-SYNC-08).
+
+        Fetches holdings and transactions from the broker connector and upserts
+        each one individually. Per-record try/except wrapping ensures one bad
+        record cannot abort the entire sync: on exception the error is logged
+        with full context (broker_id, reason, raw_data), a FailedRecord is
+        appended, the appropriate *_failed counter is incremented, and
+        processing continues with the next record.
+
+        Returns a SyncResult where ``success`` is ``False`` when any records
+        failed to process, and ``has_changes`` reflects any adds/updates/removes
+        (not failures alone).
+        """
         with traced("DefaultUserPortfolio.synchronize_portfolio"):
             sync_started_at = datetime.now(timezone.utc)
-            self.import_holdings(portfolio)
-            self.import_transactions(portfolio)
+
+            # Shared mutable containers passed into the per-record handlers so
+            # each upsert can append to failed_records and increment the
+            # appropriate *_failed counter in place.
+            failed_records: list[FailedRecord] = []
+            holdings_failed = [0]
+            transactions_failed = [0]
+
+            # Import holdings — bad records are handled inside the loop.
+            holdings = self.import_holdings(
+                portfolio,
+                failed_records=failed_records,
+                holdings_failed=holdings_failed,
+            )
+            # Import transactions — bad records are handled inside the loop.
+            transactions = self.import_transactions(
+                portfolio,
+                failed_records=failed_records,
+                transactions_failed=transactions_failed,
+            )
+
             sync_completed_at = datetime.now(timezone.utc)
             return SyncResult(
                 portfolio_id=portfolio.id,
+                # Holdings: added = holdings with no prior broker_holding_id match;
+                # updated = holdings where a match existed and quantity changed.
+                # For now, all successful imports are treated as adds (the
+                # reconciliation logic that drives added/updated/unchanged lives
+                # in STORY-SYNC-04/06, not here — this method holds the
+                # per-record error-handling concern only).
+                holdings_added=len(holdings),
+                holdings_failed=holdings_failed[0],
+                # Transactions: same reasoning as holdings.
+                transactions_added=len(transactions),
+                transactions_failed=transactions_failed[0],
+                failed_records=failed_records,
                 sync_started_at=sync_started_at,
                 sync_completed_at=sync_completed_at,
             )
