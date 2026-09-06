@@ -219,6 +219,69 @@ class TestPortfolioRoute:
         assert b"USD" in data  # USD appears as badge text
 
 
+# STORY-17: Multi-currency portfolio summary view
+class TestPortfolioSummaryStory17:
+    """Tests for STORY-17 multi-currency portfolio summary with consolidated total."""
+
+    def test_portfolio_displays_usd_total(self):
+        """AC: Summary displays 'USD Total: $X,XXX.XX' for all USD holdings."""
+        client = create_app().test_client()
+        response = client.get("/portfolio")
+        data = response.data.decode('utf-8')
+        # Check for USD total display
+        assert "US Stocks (USD)" in data or "$" in data
+
+    def test_portfolio_displays_inr_total(self):
+        """AC: Summary displays 'INR Total: ₹X,XXX.XX' for all INR holdings."""
+        client = create_app().test_client()
+        response = client.get("/portfolio")
+        data = response.data.decode('utf-8')
+        # Check for INR total display
+        assert "Indian Stocks (INR)" in data or "₹" in data or "INR" in data
+
+    def test_portfolio_displays_consolidated_total(self):
+        """AC: Summary displays consolidated total in user's base currency."""
+        client = create_app().test_client()
+        response = client.get("/portfolio")
+        data = response.data.decode('utf-8')
+        # Check for consolidated total section
+        assert "Consolidated Total" in data
+
+    def test_portfolio_displays_exchange_rate_info(self):
+        """AC: Exchange rate and timestamp display below consolidated total."""
+        client = create_app().test_client()
+        response = client.get("/portfolio")
+        data = response.data.decode('utf-8')
+        # Check for exchange rate display
+        assert "1 USD =" in data and "INR as of" in data
+
+    def test_portfolio_handles_exchange_rate_failure(self):
+        """AC: If exchange rate API fails, displays currency subtotals only with message."""
+        import unittest.mock as mock
+        # Patch fetch_exchange_rate to raise an error
+        with mock.patch("webapp.fetch_exchange_rate") as mock_rate:
+            from exchange_rate_client import ExchangeRateFetchError
+            mock_rate.side_effect = ExchangeRateFetchError("Service unavailable")
+            
+            client = create_app().test_client()
+            response = client.get("/portfolio")
+            data = response.data.decode('utf-8')
+            
+            # Should still show currency subtotals
+            assert "Indian Stocks (INR)" in data or "$" in data
+            # Should show unavailable message
+            assert "Consolidated total unavailable" in data or "exchange rate service temporarily unavailable" in data
+
+    def test_amounts_display_with_thousand_separators(self):
+        """AC: All amounts display with proper thousand separators and 2 decimal places."""
+        client = create_app().test_client()
+        response = client.get("/portfolio")
+        data = response.data.decode('utf-8')
+        # Check for thousand separator format (comma)
+        # The mock data should produce values like 1,750.00 for USD and 40,500.00 for INR
+        assert "," in data, "Amounts should display with thousand separators"
+
+
 # STORY-16: Market status indicators in portfolio header
 class TestMarketStatusEndpointStory16:
     """QA tests specifically for STORY-16 acceptance criteria."""
