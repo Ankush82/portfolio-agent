@@ -7,8 +7,53 @@ from src.cross_cutting import observability
 from src.cross_cutting.observability import (
     AuditReader,
     DefaultAuditManager,
+    DefaultAuditReader,
     redact_secrets,
 )
+
+
+# ---------------------------------------------------------------------------
+# QA Story-12: DefaultAuditReader docstring for operators
+# ---------------------------------------------------------------------------
+
+def test_story12_default_audit_reader_docstring():
+    """
+    STORY-12 acceptance criteria: DefaultAuditReader docstring must document
+    usage for operators.
+
+    AC1: DefaultAuditReader class has a docstring.
+    AC2: Docstring explicitly states 'To obtain an instance, call
+         infrastructure.get_audit_reader()'.
+    AC3: Docstring references that 'infrastructure' is the Infrastructure
+         object available via the existing DI/injection pattern.
+    AC4: Docstring includes a minimal code example:
+         'reader = infrastructure.get_audit_reader();
+          events = reader.query(component="x")'
+    AC5: Docstring clarifies this is for operators and investigative queries,
+         not routine component logic.
+    """
+    doc = DefaultAuditReader.__doc__
+    assert doc is not None, "AC1: DefaultAuditReader class has no docstring"
+
+    # AC2: explicit phrase
+    assert "infrastructure.get_audit_reader()" in doc, \
+        "AC2: Docstring does not include 'infrastructure.get_audit_reader()'"
+
+    # AC3: references Infrastructure and DI/injection pattern
+    assert "infrastructure" in doc.lower(), \
+        "AC3: Docstring does not reference 'infrastructure'"
+    assert "injection" in doc.lower() or "di" in doc.lower() or "dependency" in doc.lower(), \
+        "AC3: Docstring does not reference DI/injection pattern"
+
+    # AC4: minimal code example with semicolons on one line
+    assert "reader = infrastructure.get_audit_reader(); events = reader.query(component=\"x\")" in doc, \
+        "AC4: Docstring does not include the exact minimal code example"
+
+    # AC5: clarifies operators / not routine component logic
+    assert "operator" in doc.lower(), \
+        "AC5: Docstring does not mention 'operators'"
+    assert "routine component logic" in doc.lower() or "routine logic" in doc.lower(), \
+        "AC5: Docstring does not clarify this is not routine component logic"
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +126,58 @@ def test_story5_audit_reader_protocol_signature():
     # AC-4: docstring contains usage instructions
     assert "infrastructure.get_audit_reader()" in doc, \
         "Protocol docstring does not include 'infrastructure.get_audit_reader()'"
+
+
+# ---------------------------------------------------------------------------
+# QA Story-12: Independent verification of DefaultAuditReader docstring
+# ---------------------------------------------------------------------------
+
+def test_story12_default_audit_reader_docstring_qa_verification():
+    """
+    QA VERIFICATION for STORY-12: Independent test validating DefaultAuditReader
+    docstring meets all acceptance criteria.
+
+    This test was written by QA to verify the implementation independently,
+    not by the dev who made the change.
+
+    AC1: DefaultAuditReader class has a docstring.
+    AC2: Docstring explicitly states: 'To obtain an instance, call infrastructure.get_audit_reader()'.
+    AC3: Docstring references that 'infrastructure' is the Infrastructure object
+         available via the existing DI/injection pattern.
+    AC4: Docstring includes minimal code example:
+         'reader = infrastructure.get_audit_reader(); events = reader.query(component="x")'.
+    AC5: Docstring clarifies this is for operators and investigative queries,
+         not routine component logic.
+    """
+    doc = DefaultAuditReader.__doc__
+
+    # AC1: Docstring exists
+    assert doc is not None, \
+        "AC1 FAILED: DefaultAuditReader has no docstring"
+
+    doc_lower = doc.lower()
+
+    # AC2: Explicit phrase present
+    assert "infrastructure.get_audit_reader()" in doc, \
+        "AC2 FAILED: Docstring missing exact phrase 'infrastructure.get_audit_reader()'"
+
+    # AC3: DI/injection pattern reference
+    assert "infrastructure" in doc_lower, \
+        "AC3 FAILED: Docstring does not reference 'infrastructure'"
+    di_mentioned = any(term in doc_lower for term in ["injection", "dependency", "di"])
+    assert di_mentioned, \
+        "AC3 FAILED: Docstring does not reference DI/injection/dependency pattern"
+
+    # AC4: Minimal code example with exact syntax
+    expected_example = 'reader = infrastructure.get_audit_reader(); events = reader.query(component="x")'
+    assert expected_example in doc, \
+        f"AC4 FAILED: Docstring missing exact minimal code example.\nExpected: {expected_example}"
+
+    # AC5: Operators and not-routine-component-logic clarification
+    assert "operator" in doc_lower, \
+        "AC5 FAILED: Docstring does not mention 'operators'"
+    assert "routine" in doc_lower and "logic" in doc_lower, \
+        "AC5 FAILED: Docstring does not clarify this is not routine component logic"
 
 
 # ---------------------------------------------------------------------------
