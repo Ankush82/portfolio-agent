@@ -34,6 +34,7 @@ from components.c01_user_portfolio import (
     BrokerConfigError,
     DefaultUserPortfolio,
     get_broker_connector,
+    list_available_brokers,
 )
 from oauth_state import (
     InvalidOAuthStateError,
@@ -554,6 +555,32 @@ def create_app() -> Flask:
         return jsonify({"base_currency": base_currency})
 
     # -------------------------------------------------------------------------
+    # STORY-20: Broker connections settings
+    # -------------------------------------------------------------------------
+
+    @app.get("/settings/brokers")
+    def settings_brokers():
+        """Render the broker connections settings page.
+
+        Loads the list of available brokers (display_name + broker_id)
+        from the connector registry and passes them to the template so
+        one Connect <display_name> button is rendered per entry.
+        """
+        available_brokers = list_available_brokers()
+        return render_template(
+            "settings_brokers.html",
+            available_brokers=available_brokers,
+        )
+
+    @app.get("/api/brokers/connections")
+    def api_brokers_connections():
+        """Return the list of available broker connections.
+
+        Returns ``{"available_brokers": [{"broker_id": "...", "display_name": "..."}, ...]}``.
+        """
+        return jsonify({"available_brokers": list_available_brokers()})
+
+    # -------------------------------------------------------------------------
     # STORY-16: Upstox OAuth connect flow — initiate
     # -------------------------------------------------------------------------
 
@@ -587,21 +614,24 @@ def create_app() -> Flask:
         # the "no state row created" AC is satisfied when the env is not set.
         try:
             from upstox_config import UpstoxConfig
-
             UpstoxConfig.from_env()
-        except BrokerConfigError as exc:
-            return jsonify({
-                "error": "broker_not_configured",
-                "message": str(exc),
-            }), 503
+        except (BrokerConfigError, Exception) as exc:
+            # Catch both c01_user_portfolio.BrokerConfigError AND
+            # upstox_config.BrokerConfigError (two different classes).
+            # Also catch the bare Exception as a fallback: if the import
+            # succeeds but from_env() raises something unexpected we still
+            # want a 503 rather than a 500.
+            if exc.__class__.__name__ == "BrokerConfigError":
+                return jsonify({
+                    "error": "broker_not_configured",
+                    "message": str(exc),
+                }), 503
+            raise  # re-raise non-BrokerConfigError so other handlers catch it
 
         # Issue a single-use CSRF state token for this user + broker
         state = issue_state(user_id, "upstox")
 
         # Build the authorization URL via the registered Upstox connector.
-        # BrokerConfigError is already handled above, but we keep this in a
-        # try/except for robustness in case any other caller-level error
-        # surfaces.
         try:
             connector = get_broker_connector("upstox")
             authorize_url = connector.build_authorize_url(state=state)
