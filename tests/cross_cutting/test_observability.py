@@ -1,9 +1,91 @@
 import copy
+import inspect
 import json
 
 import pytest
 from src.cross_cutting import observability
-from src.cross_cutting.observability import DefaultAuditManager, redact_secrets
+from src.cross_cutting.observability import (
+    AuditReader,
+    DefaultAuditManager,
+    redact_secrets,
+)
+
+
+# ---------------------------------------------------------------------------
+# QA Story-5: AuditReader Protocol
+# ---------------------------------------------------------------------------
+
+def test_story5_audit_reader_protocol_signature():
+    """
+    STORY-5 acceptance criteria for AuditReader Protocol.
+
+    AC-1: Protocol exists.
+    AC-2: query() method has exactly the specified parameters with correct
+          types and defaults: event_type (str|None), actor (dict|None),
+          component (str|None), resource_id (str|None), start_time
+          (datetime|None), end_time (datetime|None), limit (int=100),
+          offset (int=0) -> list[dict].
+    AC-3: Protocol docstring mentions purpose for operators/investigative
+          tools (not routine component logic).
+    AC-4: Protocol docstring includes the exact phrase
+          'Obtain an instance via infrastructure.get_audit_reader()'.
+    """
+    # AC-1: Protocol exists
+    assert AuditReader is not None
+
+    # AC-2: verify query method signature exactly
+    sig = inspect.signature(AuditReader.query)
+    params = dict(sig.parameters)
+
+    assert "event_type" in params
+    p = params["event_type"]
+    assert p.annotation in (str, type(None)) or "str | None" in str(p.annotation), \
+        f"event_type annotation: {p.annotation}"
+
+    assert "actor" in params
+    assert params["actor"].annotation in (dict, type(None)) or "dict | None" in str(params["actor"].annotation), \
+        f"actor annotation: {params['actor'].annotation}"
+
+    assert "component" in params
+    assert params["component"].annotation in (str, type(None)) or "str | None" in str(params["component"].annotation)
+
+    assert "resource_id" in params
+    assert params["resource_id"].annotation in (str, type(None)) or "str | None" in str(params["resource_id"].annotation)
+
+    assert "start_time" in params
+    assert params["start_time"].annotation in (observability.datetime, type(None)) or "datetime | None" in str(params["start_time"].annotation)
+
+    assert "end_time" in params
+    assert params["end_time"].annotation in (observability.datetime, type(None)) or "datetime | None" in str(params["end_time"].annotation)
+
+    assert "limit" in params
+    assert params["limit"].annotation in (int, type(None)) or "int" in str(params["limit"].annotation)
+    assert params["limit"].default == 100
+
+    assert "offset" in params
+    assert params["offset"].annotation in (int, type(None)) or "int" in str(params["offset"].annotation)
+    assert params["offset"].default == 0
+
+    assert sig.return_annotation in (list, type(None)) or "list" in str(sig.return_annotation)
+
+    # AC-3: docstring mentions operators / not routine component logic
+    doc = AuditReader.__doc__
+    assert doc is not None, "AuditReader Protocol has no docstring"
+    assert any(
+        phrase in doc.lower()
+        for phrase in ("operator", "investigative tool")
+    ), "Protocol docstring does not mention operators or investigative tools"
+    assert "routine component logic" in doc.lower(), \
+        "Protocol docstring does not mention 'routine component logic' purpose"
+
+    # AC-4: docstring contains usage instructions
+    assert "infrastructure.get_audit_reader()" in doc, \
+        "Protocol docstring does not include 'infrastructure.get_audit_reader()'"
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing tests
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

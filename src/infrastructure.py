@@ -13,9 +13,15 @@ ADR-0010, is also unresolved and may bypass parts of this for component
 06 specifically — see that component's file).
 """
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from cross_cutting.observability import traced
+
+if TYPE_CHECKING:
+    from cross_cutting.observability import AuditManager, AuditReader
+
+AuditManagerLike = "AuditManager"
+AuditReaderLike = "AuditReader"
 
 
 class Infrastructure(Protocol):
@@ -60,6 +66,19 @@ class Infrastructure(Protocol):
         credential-shaped (ADR-0019)."""
         ...
 
+    def get_audit_manager(self) -> "AuditManagerLike":
+        """Returns an AuditManager instance for recording audit events."""
+        ...
+
+    def get_audit_reader(self) -> "AuditReaderLike":
+        """Returns an AuditReader instance for querying audit events.
+        
+        Obtain via: ``infrastructure.get_audit_reader()`` where ``infrastructure``
+        is the dependency-injected Infrastructure instance passed to components
+        via constructor injection.
+        """
+        ...
+
 
 class StubInfrastructure:
     """Structural implementation of Infrastructure. Every method is a
@@ -100,3 +119,13 @@ class StubInfrastructure:
     def get_secret(self, name: str) -> str:
         with traced("StubInfrastructure.get_secret"):
             return ""
+
+    def get_audit_manager(self) -> "AuditManagerLike":
+        with traced("StubInfrastructure.get_audit_manager"):
+            from cross_cutting.observability import StubAuditManager
+            return StubAuditManager()
+
+    def get_audit_reader(self) -> "AuditReaderLike":
+        with traced("StubInfrastructure.get_audit_reader"):
+            from cross_cutting.observability import StubAuditReader
+            return StubAuditReader()
