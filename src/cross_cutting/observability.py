@@ -68,11 +68,9 @@ def traced(name: str, parent: Span | None = None):
 
 
 class AuditManager(Protocol):
-    def record(self, event_type: str, detail: dict) -> None:
-        """Audit-relevant events: quarantine decisions (Memory, fig.
-        1), blocked claims (Evidence & Verification, fig. 2), circuit
-        breaker trips (Reliability & Resilience, fig. 15.1)."""
-        ...
+    """Audit-relevant events: quarantine decisions (Memory, fig. 1),
+    blocked claims (Evidence & Verification, fig. 2), circuit breaker
+    trips (Reliability & Resilience, fig. 15.1)."""
 
 
 class AuditReader(Protocol):
@@ -104,25 +102,19 @@ class AuditReader(Protocol):
     ) -> list[dict]: ...
 
 
-class StubAuditManager:
+class StubAuditManager(AuditManager):
     """Structural implementation of AuditManager. Every method is a
     traced no-op — see cross_cutting/observability.py."""
-
-    def record(self, event_type: str, detail: dict) -> None:
-        with traced(f"StubAuditManager.record[{event_type}]"):
-            return None
+    pass
 
 
-class StubAuditReader:
+class StubAuditReader(AuditReader):
     """Structural implementation of AuditReader. Every method is a
     traced no-op — see cross_cutting/observability.py."""
-
-    def query(self, **kwargs) -> list[dict]:
-        with traced("StubAuditReader.query"):
-            return []
+    pass
 
 
-class DefaultAuditManager:
+class DefaultAuditManager(AuditManager):
     """Real implementation of AuditManager: appends each event as one JSON line to AUDIT_LOG_PATH."""
 
     def record(self, event_type: str, detail: dict) -> None:
@@ -136,6 +128,49 @@ class DefaultAuditManager:
             )
             with AUDIT_LOG_PATH.open("a") as f:
                 f.write(line + "\n")
+
+
+class DefaultAuditReader(AuditReader):
+    """Real implementation of AuditReader: reads from AUDIT_LOG_PATH.
+
+    Enforces AUDIT_MAX_QUERY_LIMIT as a hard ceiling on the number of
+    rows returned per call, and uses AUDIT_DEFAULT_LIMIT when no explicit
+    limit is provided.
+    """
+
+    def query(self, **kwargs) -> list[dict]:
+        with traced("DefaultAuditReader.query"):
+            # Pull out what we care about; ignore any unknown kwargs so
+            # future Protocol-extended parameters are handled gracefully.
+            from src.config import AUDIT_MAX_QUERY_LIMIT, AUDIT_DEFAULT_LIMIT
+
+            event_type = kwargs.get("event_type")
+            component = kwargs.get("component")
+            resource_id = kwargs.get("resource_id")
+            limit = kwargs.get("limit", AUDIT_DEFAULT_LIMIT)
+            offset = kwargs.get("offset", 0)
+
+            effective_limit = min(limit, AUDIT_MAX_QUERY_LIMIT)
+
+            if not AUDIT_LOG_PATH.exists():
+                return []
+
+            events: list[dict] = []
+            for line in AUDIT_LOG_PATH.read_text().splitlines():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+            # Apply basic filters
+            if event_type is not None:
+                events = [e for e in events if e.get("event_type") == event_type]
+            if component is not None:
+                events = [e for e in events if e.get("detail", {}).get("component") == component]
+            if resource_id is not None:
+                events = [e for e in events if e.get("detail", {}).get("resource_id") == resource_id]
+
+            return events[offset : offset + effective_limit]
 
 
 # ---------------------------------------------------------------------------

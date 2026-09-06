@@ -127,5 +127,5 @@ class StubInfrastructure:
 
     def get_audit_reader(self) -> "AuditReaderLike":
         with traced("StubInfrastructure.get_audit_reader"):
-            from cross_cutting.observability import StubAuditReader
-            return StubAuditReader()
+            from src.cross_cutting.observability import DefaultAuditReader
+            return DefaultAuditReader()
