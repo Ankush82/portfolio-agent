@@ -398,3 +398,126 @@ class DefaultInfrastructure:
                     )
                 row = cursor.fetchone()
             return row[0] if row is not None else 0
+
+    def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
+        """Fetch a broker connection row by user_id and broker_id, or None if not found."""
+        with traced("DefaultInfrastructure.get_broker_connection"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, user_id, broker_id, broker_user_id,
+                           access_token_encrypted, token_type,
+                           access_token_expires_at, status, last_error,
+                           connected_at, last_import_at, created_at, updated_at
+                    FROM broker_connections
+                    WHERE user_id = %s AND broker_id = %s
+                    """,
+                    (user_id, broker_id),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return None
+            return BrokerConnectionRecord(
+                id=row[0],
+                user_id=row[1],
+                broker_id=row[2],
+                broker_user_id=row[3],
+                access_token_encrypted=row[4],
+                token_type=row[5],
+                access_token_expires_at=row[6],
+                status=row[7],
+                last_error=row[8],
+                connected_at=row[9],
+                last_import_at=row[10],
+                created_at=str(row[11]),
+                updated_at=str(row[12]),
+            )
+
+    def upsert_broker_connection(
+        self,
+        user_id: str,
+        broker_id: str,
+        credentials: "BrokerCredentials",
+        status: str = "CONNECTED",
+        last_error: str | None = None,
+        connected_at: datetime | None = None,
+    ) -> BrokerConnectionRecord:
+        """Insert or update a broker connection row (STORY-11).
+
+        On INSERT: generates a UUID id, sets created_at/updated_at to now.
+        On UPDATE: updates updated_at to now, leaves created_at unchanged.
+        Returns the resulting BrokerConnectionRecord.
+        """
+        import uuid as _uuid
+
+        now = datetime.now(timezone.utc)
+        conn_id = str(_uuid.uuid4())
+        token_encrypted = encrypt_secret(credentials.access_token)
+        expires_at = credentials.expires_at
+
+        with traced("DefaultInfrastructure.upsert_broker_connection"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO broker_connections
+                      (id, user_id, broker_id, broker_user_id,
+                       access_token_encrypted, token_type,
+                       access_token_expires_at, status, last_error,
+                       connected_at, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id, broker_id) DO UPDATE SET
+                        broker_user_id  = EXCLUDED.broker_user_id,
+                        access_token_encrypted = EXCLUDED.access_token_encrypted,
+                        token_type       = EXCLUDED.token_type,
+                        access_token_expires_at = EXCLUDED.access_token_expires_at,
+                        status           = EXCLUDED.status,
+                        last_error       = EXCLUDED.last_error,
+                        connected_at     = EXCLUDED.connected_at,
+                        updated_at       = EXCLUDED.updated_at
+                    RETURNING
+                        id, user_id, broker_id, broker_user_id,
+                        access_token_encrypted, token_type,
+                        access_token_expires_at, status, last_error,
+                        connected_at, last_import_at, created_at, updated_at
+                    """,
+                    (
+                        conn_id, user_id, broker_id, credentials.broker_user_id,
+                        token_encrypted, credentials.token_type,
+                        expires_at, status, last_error,
+                        connected_at or now, now, now,
+                    ),
+                )
+                row = cursor.fetchone()
+            return BrokerConnectionRecord(
+                id=row[0],
+                user_id=row[1],
+                broker_id=row[2],
+                broker_user_id=row[3],
+                access_token_encrypted=row[4],
+                token_type=row[5],
+                access_token_expires_at=row[6],
+                status=row[7],
+                last_error=row[8],
+                connected_at=row[9],
+                last_import_at=row[10],
+                created_at=str(row[11]),
+                updated_at=str(row[12]),
+            )
+
+    def mark_broker_connection_error(
+        self,
+        user_id: str,
+        broker_id: str,
+        error_message: str,
+    ) -> None:
+        """Mark a broker connection row as ERROR (STORY-11). Idempotent: no-op if no row exists."""
+        with traced("DefaultInfrastructure.mark_broker_connection_error"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE broker_connections
+                    SET status = 'ERROR', last_error = %s, updated_at = %s
+                    WHERE user_id = %s AND broker_id = %s
+                    """,
+                    (error_message, datetime.now(timezone.utc), user_id, broker_id),
+                )
