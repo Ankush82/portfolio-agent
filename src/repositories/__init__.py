@@ -16,7 +16,9 @@ no module-level caches, no connection handling, no use of
 ``infrastructure.store``/``retrieve``/``query``/``delete``.
 """
 
-from repositories.user_repository import UserRepository
-from repositories.portfolio_repository import PortfolioRepository
+from .holding_repository import HoldingRepository
+from .portfolio_repository import PortfolioRepository
+from .transaction_repository import TransactionRepository
+from .user_repository import UserRepository
 
-__all__ = ["UserRepository", "PortfolioRepository"]
+__all__ = ["HoldingRepository", "PortfolioRepository", "TransactionRepository", "UserRepository"]
