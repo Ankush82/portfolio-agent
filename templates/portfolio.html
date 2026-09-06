@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Portfolio{% endblock %}
+{% block content %}
+<h2 class="text-2xl font-bold mb-4">Your Portfolio</h2>
+
+<!-- Portfolio Summary -->
+<section class="card w-full mb-6">
+  <div class="card-body">
+    <h3 class="card-title text-lg font-medium">Portfolio Summary</h3>
+    <div class="grid gap-4 md:grid-cols-2">
+      {% if inr_total is not none or usd_total is not none %}
+      <!-- Currency Groupings -->
+      {% if inr_total is not none %}
+      <div class="stat bg-base-100 rounded-lg border">
+        <div class="stat-title">Indian Stocks (INR)</div>
+        <div class="stat-value text-lg">
+          <span class="currency-symbol" data-currency="INR">{{ inr_symbol }}</span>{{ inr_total|format_price }}
+        </div>
+        <div class="stat-desc">{{ inr_holdings|length }} holding{% if inr_holdings|length != 1 %}s{% endif %}</div>
+      </div>
+      {% endif %}
+      {% if usd_total is not none %}
+      <div class="stat bg-base-100 rounded-lg border">
+        <div class="stat-title">US Stocks (USD)</div>
+        <div class="stat-value text-lg">
+          <span class="currency-symbol" data-currency="USD">{{ usd_symbol }}</span>{{ usd_total|format_price }}
+        </div>
+        <div class="stat-desc">{{ usd_holdings|length }} holding{% if usd_holdings|length != 1 %}s{% endif %}</div>
+      </div>
+      {% endif %}
+      {% else %}
+      <p class="text-base-content/70">No holdings to display.</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<!-- Holdings Table -->
+<section class="card w-full">
+  <div class="card-body">
+    <h3 class="card-title text-lg font-medium mb-4">Holdings</h3>
+    {% if holdings %}
+    <div class="overflow-x-auto">
+      <table class="table table-zebra">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Exchange</th>
+            <th>Quantity</th>
+            <th>Avg. Price</th>
+            <th>Current Price</th>
+            <th>Currency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for holding in holdings %}
+          <tr>
+            <td class="font-mono font-medium">{{ holding.symbol }}</td>
+            <td>
+              {% if holding.exchange %}
+              <span class="badge badge-outline">{{ holding.exchange }}</span>
+              {% else %}
+              <span class="text-base-content/50">—</span>
+              {% endif %}
+            </td>
+            <td>{{ holding.quantity|format_quantity }}</td>
+            <td>
+              {% if holding.average_price %}
+              <span class="currency-symbol" data-currency="{{ holding.currency }}">{{ get_currency_symbol(holding.currency) }}</span>{{ holding.average_price|format_price }}
+              {% else %}
+              <span class="text-base-content/50">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if holding.last_price %}
+              <span class="currency-symbol" data-currency="{{ holding.currency }}">{{ get_currency_symbol(holding.currency) }}</span>{{ holding.last_price|format_price }}
+              {% else %}
+              <span class="text-base-content/50">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if holding.currency == 'INR' %}
+              <span class="badge badge-info">INR</span>
+              {% elif holding.currency == 'USD' %}
+              <span class="badge badge-success">USD</span>
+              {% else %}
+              <span class="badge badge-ghost">{{ holding.currency }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-base-content/70">No holdings found. Connect a broker or add stocks manually.</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+// Currency symbol fallback handling - gracefully handle Unicode rendering failures
+document.addEventListener('DOMContentLoaded', function() {
+  const currencySymbols = document.querySelectorAll('.currency-symbol');
+  
+  currencySymbols.forEach(function(el) {
+    const currency = el.dataset.currency;
+    const parent = el.parentElement;
+    
+    // Test if the symbol renders correctly
+    if (parent && parent.textContent.includes('�')) {
+      // Unicode rendering failed, use ASCII fallback
+      if (currency === 'INR') {
+        el.textContent = 'INR ';
+      } else if (currency === 'USD') {
+        el.textContent = '$';
+      }
+    }
+  });
+});
+</script>
+{% endblock %}
