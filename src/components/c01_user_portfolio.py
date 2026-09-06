@@ -53,36 +53,6 @@ if TYPE_CHECKING:
     from upstox_http import _UpstoxHttp
 
 
-# ---------------------------------------------------------------------------
-# Broker connector registry (STORY-9 / STORY-13)
-# ---------------------------------------------------------------------------
-# In-memory registry of available BrokerConnector instances, keyed by
-# broker_id. Real connectors are registered at startup; tests register
-# StubBrokerConnector or other test doubles. No Upstox-specific values
-# appear here — only the Protocol shape and broker_id strings.
-_broker_connector_registry: dict[str, BrokerConnector] = {}
-
-
-def get_broker_connector(broker_id: str) -> BrokerConnector:
-    """Look up a registered BrokerConnector by broker_id (STORY-9).
-
-    Raises ``UnsupportedBrokerError`` if no connector is registered
-    for the given broker_id. The registry contains only broker_id
-    strings (no URLs, no field names) — everything broker-specific
-    lives behind the Protocol."""
-    connector = _broker_connector_registry.get(broker_id)
-    if connector is None:
-        raise UnsupportedBrokerError(
-            f"no connector registered for broker_id {broker_id!r}"
-        )
-    return connector
-
-
-def register_broker_connector(connector: BrokerConnector) -> None:
-    """Register a BrokerConnector instance (used by tests / startup)."""
-    _broker_connector_registry[connector.broker_id] = connector
-
-
 # Exception hierarchy for BrokerConnector (ADR-0022)
 class BrokerError(Exception):
     """Base exception for all broker-related errors."""
@@ -141,7 +111,7 @@ class BrokerHolding:
 
 @dataclass(frozen=True)
 class BrokerTransaction:
-    external_id: str
+    broker_transaction_id: str  # Idempotent-match key from the broker
     symbol: str
     isin: str
     trade_date: date
@@ -151,7 +121,15 @@ class BrokerTransaction:
     amount: Decimal
     exchange: str
     segment: str
+    broker_modified_at: datetime  # Timestamp from broker for idempotent comparison
     raw: dict = field(default_factory=dict)
+
+    # Backwards-compat alias: old code used `external_id`; map it to the
+    # canonical `broker_transaction_id` field so existing callers continue
+    # to work and the two names are interchangeable.
+    @property
+    def external_id(self) -> str:
+        return self.broker_transaction_id
 
 
 # BrokerConnector Protocol (ADR-0022)
@@ -175,6 +153,25 @@ class BrokerConnector(Protocol):
     def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
         """Fetch transactions for the given credentials and date range."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# Broker connector registry (STORY-9 / STORY-13)
+# ---------------------------------------------------------------------------
+_broker_connector_registry: dict[str, BrokerConnector] = {}
+
+
+def get_broker_connector(broker_id: str) -> BrokerConnector:
+    connector = _broker_connector_registry.get(broker_id)
+    if connector is None:
+        raise UnsupportedBrokerError(
+            f"No broker connector registered for broker_id {broker_id!r}"
+        )
+    return connector
+
+
+def register_broker_connector(connector: BrokerConnector) -> None:
+    _broker_connector_registry[connector.broker_id] = connector
 
 
 class PlaceholderBrokerConnector:
@@ -941,7 +938,7 @@ _DEFAULT_STUB_HOLDINGS: list[BrokerHolding] = [
 # rows clearly outside the window.
 _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
     BrokerTransaction(
-        external_id="stub-tx-001",
+        broker_transaction_id="stub-tx-001",
         symbol="AAPL",
         isin="US0378331005",
         trade_date=date(2024, 1, 15),
@@ -951,10 +948,11 @@ _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
         amount=Decimal("300.00"),
         exchange="NASDAQ",
         segment="EQ",
+        broker_modified_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
         raw={"stub": True},
     ),
     BrokerTransaction(
-        external_id="stub-tx-002",
+        broker_transaction_id="stub-tx-002",
         symbol="AAPL",
         isin="US0378331005",
         trade_date=date(2024, 2, 10),
@@ -964,10 +962,11 @@ _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
         amount=Decimal("160.00"),
         exchange="NASDAQ",
         segment="EQ",
+        broker_modified_at=datetime(2024, 2, 10, 14, 30, 0, tzinfo=timezone.utc),
         raw={"stub": True},
     ),
     BrokerTransaction(
-        external_id="stub-tx-003",
+        broker_transaction_id="stub-tx-003",
         symbol="RELIANCE.NS",
         isin="INE002A01018",
         trade_date=date(2024, 3, 5),
@@ -977,10 +976,11 @@ _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
         amount=Decimal("2400.00"),
         exchange="NSE",
         segment="EQ",
+        broker_modified_at=datetime(2024, 3, 5, 9, 15, 0, tzinfo=timezone.utc),
         raw={"stub": True},
     ),
     BrokerTransaction(
-        external_id="stub-tx-004",
+        broker_transaction_id="stub-tx-004",
         symbol="RELIANCE.NS",
         isin="INE002A01018",
         trade_date=date(2024, 4, 20),
@@ -990,6 +990,7 @@ _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
         amount=Decimal("2500.00"),
         exchange="NSE",
         segment="EQ",
+        broker_modified_at=datetime(2024, 4, 20, 15, 30, 0, tzinfo=timezone.utc),
         raw={"stub": True},
     ),
 ]
@@ -1223,21 +1224,23 @@ class CurrentHolding:
 
 
 @dataclass
-class CurrentTransaction:
-    """A Transaction as stored in the DB: the Transaction fields plus
-    the database-level ``id`` and ``is_active`` flag used by the sync
-    logic for removed-record detection."""
-    id: str
-    is_active: bool
-    transaction: Transaction
-
-
 @dataclass
 class Transaction:
     portfolio_id: str
     kind: str
     amount: float
     broker_transaction_id: str | None = None  # Idempotent-match key from the broker
+
+
+class CurrentTransaction:
+    """A Transaction as stored in the DB: the Transaction fields plus
+    the database-level ``id`` and ``is_active`` flag used by the sync
+    logic for removed-record detection, and ``updated_at`` for
+    idempotent timestamp comparison (STORY-SYNC-04)."""
+    id: str
+    is_active: bool
+    transaction: Transaction
+    updated_at: datetime  # Persisted updated_at for broker_modified_at comparison
 
 
 @dataclass
@@ -1400,6 +1403,70 @@ class TransactionRepository(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ReconciliationOp:
+    """The result of a single transaction reconciliation decision
+    (STORY-SYNC-04).
+
+    ``transaction`` is the broker transaction being reconciled.
+
+    ``status`` is one of:
+      * ``'added'``   — ``broker_transaction_id`` not found in DB;
+                        should be inserted as a new record.
+      * ``'updated'`` — ``broker_transaction_id`` found and
+                        ``broker_modified_at`` is strictly later than the
+                        stored ``updated_at``; should update the record.
+      * ``'unchanged'`` — ``broker_transaction_id`` found and
+                        ``broker_modified_at`` is at or before the stored
+                        ``updated_at``; no action needed."""
+    transaction: BrokerTransaction
+    status: Literal['added', 'updated', 'unchanged']
+
+
+def reconcile_transactions(
+    broker_transactions: list[BrokerTransaction],
+    repository: TransactionRepository,
+) -> list[ReconciliationOp]:
+    """Idempotent transaction reconciliation (STORY-SYNC-04).
+
+    Pure function: given a list of broker transactions and a repository
+    that can look them up by ``broker_transaction_id``, produces a list
+    of ``ReconciliationOp`` describing the action to take for each
+    transaction. No persistence is performed — callers decide whether
+    and how to apply the operations.
+
+    Decision rules (checked in order):
+
+      1. If no stored record has a matching ``broker_transaction_id``,
+         the operation is ``'added'`` — the caller should insert it.
+      2. If a stored record exists and ``broker_modified_at`` is
+         strictly later than its ``updated_at``, the operation is
+         ``'updated'`` — the caller should update it.
+      3. Otherwise (record exists and timestamp is not strictly later),
+         the operation is ``'unchanged'`` — no action needed.
+
+    Args:
+        broker_transactions: list of transactions as returned by
+            ``BrokerConnector.fetch_transactions``.
+        repository: an implementation of ``TransactionRepository``;
+            used only for read operations (``find_by_broker_transaction_id``).
+
+    Returns:
+        A ``ReconciliationOp`` for every input broker transaction, in the
+        same order as ``broker_transactions`` was passed. The returned
+        list length always equals the input list length."""
+    ops: list[ReconciliationOp] = []
+    for broker_tx in broker_transactions:
+        existing = repository.find_by_broker_transaction_id(broker_tx.broker_transaction_id)
+        if existing is None:
+            ops.append(ReconciliationOp(transaction=broker_tx, status='added'))
+        elif broker_tx.broker_modified_at > existing.updated_at:
+            ops.append(ReconciliationOp(transaction=broker_tx, status='updated'))
+        else:
+            ops.append(ReconciliationOp(transaction=broker_tx, status='unchanged'))
+    return ops
+
+
 class StubHoldingRepository:
     """Structural no-op implementation of ``HoldingRepository``."""
 
@@ -1426,6 +1493,42 @@ class StubTransactionRepository:
         self, account_id: str
     ) -> list[CurrentTransaction]:
         return []
+
+
+class _FakeTransactionRepository:
+    """In-memory test double for ``TransactionRepository`` that stores
+    records in a dict keyed by ``broker_transaction_id``, supporting
+    all three reconciliation scenarios (added / updated / unchanged)
+    via optional constructor injection.
+
+    Usage::
+
+        repo = _FakeTransactionRepository({
+            "tx-001": CurrentTransaction(
+                id="db-001",
+                is_active=True,
+                transaction=Transaction(...),
+                updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            ),
+        })
+        ops = reconcile_transactions(broker_txs, repo)
+    """
+
+    def __init__(
+        self,
+        initial: dict[str, CurrentTransaction] | None = None,
+    ) -> None:
+        self._store: dict[str, CurrentTransaction] = dict(initial) if initial else {}
+
+    def find_by_broker_transaction_id(
+        self, broker_transaction_id: str
+    ) -> CurrentTransaction | None:
+        return self._store.get(broker_transaction_id)
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentTransaction]:
+        return [ct for ct in self._store.values() if ct.is_active]
 
 
 class UserPortfolio(Protocol):
@@ -1617,6 +1720,21 @@ class DefaultTransactionRepository:
             if not records:
                 return None
             record = records[0]
+            # Persisted updated_at: prefer the real stored value, default
+            # to epoch for backwards-compat with records stored before
+            # this field existed. The epoch choice biases towards
+            # 'updated' (the broker's record will almost always be newer
+            # than 1970), which is the conservative choice — an extra
+            # update is safe and correct, whereas a missed update would
+            # silently leave stale data in place.
+            updated_at: datetime
+            raw_updated = record.get("updated_at")
+            if isinstance(raw_updated, datetime):
+                updated_at = raw_updated
+            elif isinstance(raw_updated, str):
+                updated_at = datetime.fromisoformat(raw_updated)
+            else:
+                updated_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
             return CurrentTransaction(
                 id=record["id"],
                 is_active=record.get("is_active", True),
@@ -1626,6 +1744,7 @@ class DefaultTransactionRepository:
                     amount=record["amount"],
                     broker_transaction_id=record.get("broker_transaction_id"),
                 ),
+                updated_at=updated_at,
             )
 
     def find_active_by_account_id(
@@ -1635,20 +1754,31 @@ class DefaultTransactionRepository:
             all_records = self._infrastructure.query(
                 TRANSACTIONS_TABLE, {"portfolio_id": account_id}
             )
-            return [
-                CurrentTransaction(
-                    id=record["id"],
-                    is_active=record.get("is_active", True),
-                    transaction=Transaction(
-                        portfolio_id=record["portfolio_id"],
-                        kind=record["kind"],
-                        amount=record["amount"],
-                        broker_transaction_id=record.get("broker_transaction_id"),
-                    ),
+            results: list[CurrentTransaction] = []
+            for record in all_records:
+                if not record.get("is_active", True):
+                    continue
+                raw_updated = record.get("updated_at")
+                if isinstance(raw_updated, datetime):
+                    updated_at = raw_updated
+                elif isinstance(raw_updated, str):
+                    updated_at = datetime.fromisoformat(raw_updated)
+                else:
+                    updated_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                results.append(
+                    CurrentTransaction(
+                        id=record["id"],
+                        is_active=True,
+                        transaction=Transaction(
+                            portfolio_id=record["portfolio_id"],
+                            kind=record["kind"],
+                            amount=record["amount"],
+                            broker_transaction_id=record.get("broker_transaction_id"),
+                        ),
+                        updated_at=updated_at,
+                    )
                 )
-                for record in all_records
-                if record.get("is_active", True)
-            ]
+            return results
 
 
 # Entity.kind values (c04_knowledge_entity.py's "Company | Security |
