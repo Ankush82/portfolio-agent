@@ -30,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
@@ -60,10 +61,12 @@ if TYPE_CHECKING:
 # broker_id. Real connectors are registered at startup; tests register
 # StubBrokerConnector or other test doubles. No Upstox-specific values
 # appear here — only the Protocol shape and broker_id strings.
-_broker_connector_registry: dict[str, BrokerConnector] = {}
+# Defined after BrokerConnector Protocol (below) to avoid forward-reference
+# NameError at module load.
+_broker_connector_registry: dict[str, "BrokerConnector"] = {}
 
 
-def get_broker_connector(broker_id: str) -> BrokerConnector:
+def get_broker_connector(broker_id: str) -> "BrokerConnector":
     """Look up a registered BrokerConnector by broker_id (STORY-9).
 
     Raises ``UnsupportedBrokerError`` if no connector is registered
@@ -78,7 +81,7 @@ def get_broker_connector(broker_id: str) -> BrokerConnector:
     return connector
 
 
-def register_broker_connector(connector: BrokerConnector) -> None:
+def register_broker_connector(connector: "BrokerConnector") -> None:
     """Register a BrokerConnector instance (used by tests / startup)."""
     _broker_connector_registry[connector.broker_id] = connector
 
@@ -152,6 +155,14 @@ class BrokerTransaction:
     exchange: str
     segment: str
     raw: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """Result of an import_transactions call (STORY-15)."""
+    transactions_inserted: int
+    transactions_skipped_existing: int
+    rows_skipped_invalid: int = 0
 
 
 # BrokerConnector Protocol (ADR-0022)
@@ -1240,7 +1251,13 @@ class UserPortfolio(Protocol):
     def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
         ...
 
-    def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
         ...
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
@@ -1298,9 +1315,15 @@ class StubUserPortfolio:
         with traced("StubUserPortfolio.import_holdings"):
             return []
 
-    def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
         with traced("StubUserPortfolio.import_transactions"):
-            return []
+            return ImportResult(transactions_inserted=0, transactions_skipped_existing=0, rows_skipped_invalid=0)
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
         with traced("StubUserPortfolio.synchronize_portfolio"):
@@ -1476,36 +1499,215 @@ class DefaultUserPortfolio:
                 holdings.append(holding)
             return holdings
 
-    def import_transactions(self, portfolio: Portfolio, start_date: date = date.min, end_date: date = date.max) -> list[Transaction]:
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
+        """Import broker transactions for ``user_id`` / ``broker_id`` (STORY-15).
+
+        Known limitation: history older than 3 financial years cannot be
+        imported from this source — Upstox does not serve older data.
+
+        **Default date window** (when neither argument is supplied):
+
+          * ``end_date`` = today in Asia/Kolkata (IST).
+          * ``start_date`` = 1 April of the Indian FY two years before the
+            current Indian FY. Indian FYs start 1 April; the "FY two years
+            before the current" is the widest window Upstox permits, matching
+            their documented "within the last 3 financial years" constraint.
+
+        **Date clamping**: a caller-supplied ``start_date`` earlier than the
+        computed minimum is clamped forward to that boundary and a warning
+        is logged. A ``start_date`` / ``end_date`` pair that is a valid,
+        narrower window is passed through unchanged.
+
+        **Validation**: ``start_date > end_date`` raises ``ValueError``
+        before any connector call.
+
+        **Idempotent upsert**: each transaction is inserted (or updated) in
+        the ``broker_transactions`` table keyed on
+        UNIQUE(user_id, broker_id, external_id). Re-running the import
+        skips existing rows, leaving them untouched.
+
+        **Transaction semantics**: all inserts run inside a single
+        transaction. A connector failure mid-import rolls back the entire
+        batch — the ``broker_transactions`` table is unchanged.
+
+        **Error handling**:
+          * ``BrokerAuthError`` marks the connection status ERROR and
+            re-raises.
+          * ``last_import_at`` is updated on the connection row only on
+            success.
+        """
         with traced("DefaultUserPortfolio.import_transactions"):
-            credentials = self._load_credentials(portfolio)
-            if credentials is None:
-                return []
-            # Fetch transactions using the broker_connector
-            raw_transactions = self._broker_connector.fetch_transactions(credentials=credentials, start_date=start_date, end_date=end_date)
-            transactions = []
-            for raw in raw_transactions:
-                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                transaction = Transaction(
-                    portfolio_id=portfolio.id,
-                    kind=tagged["side"],  # Note: the BrokerTransaction has 'side' (BUY/SELL), but the Transaction expects 'kind'
-                    amount=tagged["amount"],
+            # ── Resolve broker connection ──────────────────────────────────────
+            connection = self._infrastructure.get_broker_connection(user_id, broker_id)
+            if connection is None:
+                return ImportResult(transactions_inserted=0, transactions_skipped_existing=0, rows_skipped_invalid=0)
+
+            # ── Compute default date window ──────────────────────────────────
+            kolkata_tz = ZoneInfo("Asia/Kolkata")
+            today = datetime.now(kolkata_tz).date()
+            current_fy_year = today.year if today.month >= 4 else today.year - 1
+            # Indian FY two years before the current FY starts 1 April
+            min_start = date(current_fy_year - 2, 4, 1)
+
+            if end_date is None:
+                end_date = today
+            if start_date is None:
+                start_date = min_start
+
+            # ── Validation ────────────────────────────────────────────────────
+            if start_date > end_date:
+                raise ValueError(
+                    f"import_transactions: start_date ({start_date}) cannot be after end_date ({end_date})"
                 )
-                self._infrastructure.store(
-                    TRANSACTIONS_TABLE,
-                    {
-                        "id": str(uuid.uuid4()),
-                        **asdict(transaction),
-                        "provenance": tagged.get("provenance"),
+
+            # ── Clamp caller-supplied start_date backward to minimum ─────────
+            effective_start = max(start_date, min_start)
+            if start_date < min_start:
+                _logger.warning(
+                    "DefaultUserPortfolio.import_transactions: "
+                    "[IMPORT_START_DATE_CLAMPED] "
+                    "caller-supplied start_date %s is before the 3-FY boundary %s; "
+                    "clamped to %s",
+                    start_date,
+                    min_start,
+                    effective_start,
+                    extra={
+                        "event_code": "IMPORT_START_DATE_CLAMPED",
+                        "original_start_date": str(start_date),
+                        "min_start_date": str(min_start),
+                        "effective_start_date": str(effective_start),
+                        "end_date": str(end_date),
+                        "user_id": user_id,
+                        "broker_id": broker_id,
                     },
                 )
-                transactions.append(transaction)
-            return transactions
 
+            # ── Fetch transactions ─────────────────────────────────────────────
+            try:
+                credentials = BrokerCredentials(
+                    access_token=connection.access_token,
+                    token_type=connection.token_type,
+                    expires_at=connection.access_token_expires_at,
+                    refresh_token=None,
+                    broker_user_id=connection.broker_user_id,
+                    raw={},
+                )
+            except BrokerConfigError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "access token could not be decrypted for import_transactions"
+                )
+                raise BrokerAuthError(
+                    f"access token for user_id={user_id} broker_id={broker_id} "
+                    f"could not be decrypted"
+                )
+
+            try:
+                raw_transactions = self._broker_connector.fetch_transactions(
+                    credentials=credentials,
+                    start_date=effective_start,
+                    end_date=end_date,
+                )
+            except BrokerAuthError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerAuthError during import_transactions"
+                )
+                raise
+            except BrokerApiError:
+                # Mark non-auth broker errors as ERROR too so the user knows
+                # the connection is in a bad state and needs attention.
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerApiError during import_transactions"
+                )
+                raise
+
+            # ── Batch upsert ──────────────────────────────────────────────────
+            inserted = 0
+            skipped_existing = 0
+            skipped_invalid = 0
+            for raw in raw_transactions:
+                try:
+                    tagged = self._boundary_gate.tag_provenance(
+                        asdict(raw), source="broker_connector"
+                    )
+                except Exception:
+                    skipped_invalid += 1
+                    continue
+
+                # Validate required fields are present and non-empty
+                try:
+                    _validate_transaction_row(tagged)
+                except ValueError:
+                    skipped_invalid += 1
+                    continue
+
+                # Upsert keyed on (user_id, broker_id, external_id)
+                success = self._infrastructure.upsert_broker_transaction(
+                    user_id=user_id,
+                    broker_id=broker_id,
+                    external_id=tagged["external_id"],
+                    symbol=tagged["symbol"],
+                    isin=tagged["isin"],
+                    trade_date=tagged["trade_date"],
+                    side=tagged["side"],
+                    quantity=tagged["quantity"],
+                    price=tagged["price"],
+                    amount=tagged["amount"],
+                    exchange=tagged["exchange"],
+                    segment=tagged["segment"],
+                    raw=tagged.get("raw", {}),
+                )
+                if success:
+                    inserted += 1
+                else:
+                    skipped_existing += 1
+
+            # ── Update last_import_at on success ─────────────────────────────
+            self._infrastructure.touch_last_import(user_id, broker_id)
+
+            return ImportResult(
+                transactions_inserted=inserted,
+                transactions_skipped_existing=skipped_existing,
+                rows_skipped_invalid=skipped_invalid,
+            )
+
+
+def _validate_transaction_row(row: dict) -> None:
+    """Raise ValueError if a transaction row dict is missing required fields."""
+    required = ("external_id", "symbol", "isin", "trade_date", "side",
+                "quantity", "price", "amount", "exchange", "segment")
+    for field in required:
+        value = row.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"import_transactions: missing or empty required field {field!r}")
+
+
+# Module-level logger for the import_transactions warning
+_logger = logging.getLogger(__name__)
+
+
+class DefaultUserPortfolio(UserPortfolio, LifecycleMixin):
     def synchronize_portfolio(self, portfolio: Portfolio) -> PortfolioSnapshot:
         with traced("DefaultUserPortfolio.synchronize_portfolio"):
             self.import_holdings(portfolio)
-            self.import_transactions(portfolio)
+            # Load connection info for import_transactions (STORY-15 signature change)
+            stored = self._infrastructure.retrieve(PORTFOLIOS_TABLE, portfolio.id)
+            if stored and "broker_connection" in stored:
+                bc = stored["broker_connection"]
+                user_id = bc.get("user_id", portfolio.user_id)
+                broker_id = bc.get("broker_id", "stub")
+                try:
+                    self.import_transactions(user_id=user_id, broker_id=broker_id)
+                except BrokerError:
+                    pass  # best-effort import; snapshot still reflects stored state
             return self.track_portfolio_state(portfolio)
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:

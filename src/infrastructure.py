@@ -60,6 +60,35 @@ class Infrastructure(Protocol):
         credential-shaped (ADR-0019)."""
         ...
 
+    def upsert_broker_transaction(
+        self,
+        user_id: str,
+        broker_id: str,
+        external_id: str,
+        symbol: str,
+        isin: str,
+        trade_date: "date",
+        side: str,
+        quantity: "Decimal",
+        price: "Decimal",
+        amount: "Decimal",
+        exchange: str,
+        segment: str,
+        raw: dict,
+    ) -> bool:
+        """Insert or update a broker transaction, keyed on (user_id, broker_id, external_id).
+
+        Returns True if a new row was inserted, False if an existing row was
+        updated (i.e. the external_id already existed). The UNIQUE constraint
+        on (user_id, broker_id, external_id) enforces idempotency — re-running
+        the import skips existing rows.
+        """
+        ...
+
+    def touch_last_import(self, user_id: str, broker_id: str) -> None:
+        """Update last_import_at to now on the broker connection row."""
+        ...
+
 
 class StubInfrastructure:
     """Structural implementation of Infrastructure. Every method is a

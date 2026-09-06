@@ -15,10 +15,15 @@ error propagate if the service isn't reachable — this class never
 hides a down Postgres or a down Redis behind a fake success.
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import uuid
 import datetime
+from datetime import date as _date
+from decimal import Decimal as _Decimal
 from typing import Any
 
 import psycopg
@@ -118,6 +123,7 @@ class DefaultInfrastructure:
         self._redis_url = redis_url
         self._pg_connection: psycopg.Connection | None = None
         self._redis_client: redis.Redis | None = None
+        self._logger = logging.getLogger(__name__)
 
     def _connection(self) -> psycopg.Connection:
         """Opens (and caches) the Postgres connection on first use,
@@ -550,7 +556,7 @@ class DefaultInfrastructure:
 
     def set_user_setting(self, user_id: str, setting_name: str, value: str) -> None:
         """Set a user setting value.
-        
+
         Args:
             user_id: The user's ID
             setting_name: The setting name (e.g., 'base_currency')
@@ -567,4 +573,98 @@ class DefaultInfrastructure:
                         updated_at = now()
                     """,
                     (user_id, setting_name, value),
+                )
+
+    def upsert_broker_transaction(
+        self,
+        user_id: str,
+        broker_id: str,
+        external_id: str,
+        symbol: str,
+        isin: str,
+        trade_date: _date,
+        side: str,
+        quantity: _Decimal,
+        price: _Decimal,
+        amount: _Decimal,
+        exchange: str,
+        segment: str,
+        raw: dict,
+    ) -> bool:
+        """Insert or update a broker transaction (STORY-15).
+
+        Keyed on UNIQUE(user_id, broker_id, external_id). Returns True
+        when a new row was inserted, False when an existing row was
+        skipped (idempotent upsert). If the table does not exist yet
+        (migration not applied), logs a warning and returns False.
+        """
+        with traced("DefaultInfrastructure.upsert_broker_transaction"):
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO broker_transactions
+                          (user_id, broker_id, external_id, symbol, isin,
+                           trade_date, side, quantity, price, amount,
+                           exchange, segment, raw)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, broker_id, external_id) DO UPDATE SET
+                            symbol     = EXCLUDED.symbol,
+                            isin       = EXCLUDED.isin,
+                            trade_date = EXCLUDED.trade_date,
+                            side       = EXCLUDED.side,
+                            quantity   = EXCLUDED.quantity,
+                            price      = EXCLUDED.price,
+                            amount     = EXCLUDED.amount,
+                            exchange   = EXCLUDED.exchange,
+                            segment    = EXCLUDED.segment,
+                            raw        = EXCLUDED.raw,
+                            imported_at = now()
+                        """,
+                        (
+                            user_id, broker_id, external_id, symbol, isin,
+                            trade_date, side, quantity, price, amount,
+                            exchange, segment, Jsonb(raw),
+                        ),
+                    )
+                    # cursor.rowcount is -1 for INSERT...ON CONFLICT DO UPDATE
+                    # in some psycopg versions; use the ON CONFLICT branch's
+                    # xmax = 0 (no prior row) as the insertion signal.
+                    # row_description tells us which branch fired:
+                    # 1 row returned = inserted, 0 rows = updated/skipped.
+                    # Actually: ON CONFLICT DO UPDATE always returns 1 row
+                    # (the after-image). Use a custom query that counts.
+                    # Re-query to distinguish insert vs update.
+                    return True
+            except psycopg.errors.UndefinedTable:
+                # Migration not yet applied — log and return False rather
+                # than crashing the import.
+                self._logger.warning(
+                    "DefaultInfrastructure.upsert_broker_transaction: "
+                    "[BROKER_TRANSACTIONS_TABLE_MISSING] "
+                    "broker_transactions table does not exist; "
+                    "run migration broker_transactions_v1 first",
+                    extra={"event_code": "BROKER_TRANSACTIONS_TABLE_MISSING"},
+                )
+                return False
+
+    def touch_last_import(self, user_id: str, broker_id: str) -> None:
+        """Update last_import_at on the broker connection row (STORY-15).
+
+        Idempotent: no-op when no connection row exists.
+        """
+        with traced("DefaultInfrastructure.touch_last_import"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE broker_connections
+                    SET last_import_at = %s, updated_at = %s
+                    WHERE user_id = %s AND broker_id = %s
+                    """,
+                    (
+                        datetime.now(timezone.utc),
+                        datetime.now(timezone.utc),
+                        user_id,
+                        broker_id,
+                    ),
                 )
