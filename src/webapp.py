@@ -29,6 +29,11 @@ from typing import Any
 from flask import Flask, jsonify, request, render_template, session, redirect, url_for
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
+from components.c01_user_portfolio import (
+    BrokerConfigError,
+    get_broker_connector,
+)
+from oauth_state import issue_state
 from exchange_rate_client import (
     ExchangeRateFetchError,
     MissingExchangeRateAPIKeyError,
@@ -539,6 +544,66 @@ def create_app() -> Flask:
         user_id = session.get("user_id", "default-user")
         base_currency = get_user_base_currency(user_id)
         return jsonify({"base_currency": base_currency})
+
+    # -------------------------------------------------------------------------
+    # STORY-16: Upstox OAuth connect flow — initiate
+    # -------------------------------------------------------------------------
+
+    @app.post("/api/brokers/upstox/connect")
+    def api_brokers_upstox_connect():
+        """POST /api/brokers/upstox/connect — start the Upstox OAuth flow.
+
+        Authenticated users only (session must carry a user_id).
+        Returns 200 with ``{"authorize_url": "...", "state": "..."}`` on
+        success, where ``authorize_url`` is the Upstox authorization URL
+        the frontend navigates to (302-redirect is deliberately omitted so
+        the caller controls navigation).
+
+        Returns 401 when no user is authenticated.
+
+        Returns 503 with ``{"error": "broker_not_configured", "message": "..."}``
+        when ``UPSTOX_CLIENT_ID``, ``UPSTOX_CLIENT_SECRET``, or
+        ``UPSTOX_REDIRECT_URI`` is not set in the environment — the
+        message names the missing variables so the operator can fix them
+        without guesswork. No state token is created in this case.
+
+        No network call to Upstox is made by this endpoint.
+        """
+        # Auth guard — unauthenticated users cannot initiate OAuth
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # Validate the Upstox config (reads env vars, raises BrokerConfigError
+        # on missing/empty values) BEFORE issuing a state token so that
+        # the "no state row created" AC is satisfied when the env is not set.
+        try:
+            from upstox_config import UpstoxConfig
+
+            UpstoxConfig.from_env()
+        except BrokerConfigError as exc:
+            return jsonify({
+                "error": "broker_not_configured",
+                "message": str(exc),
+            }), 503
+
+        # Issue a single-use CSRF state token for this user + broker
+        state = issue_state(user_id, "upstox")
+
+        # Build the authorization URL via the registered Upstox connector.
+        # BrokerConfigError is already handled above, but we keep this in a
+        # try/except for robustness in case any other caller-level error
+        # surfaces.
+        try:
+            connector = get_broker_connector("upstox")
+            authorize_url = connector.build_authorize_url(state=state)
+        except BrokerConfigError as exc:
+            return jsonify({
+                "error": "broker_not_configured",
+                "message": str(exc),
+            }), 503
+
+        return jsonify({"authorize_url": authorize_url, "state": state}), 200
 
     return app
 
