@@ -72,6 +72,8 @@ class AuditManager(Protocol):
     blocked claims (Evidence & Verification, fig. 2), circuit breaker
     trips (Reliability & Resilience, fig. 15.1)."""
 
+    def record(self, event_type: str, detail: dict) -> None: ...
+
 
 class AuditReader(Protocol):
     """Protocol for reading audit events, intended for operators and
