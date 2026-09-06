@@ -1134,6 +1134,7 @@ class Holding:
     currency: str = "USD"
     exchange: str | None = None
     symbol_suffix: str | None = None
+    broker_holding_id: str | None = None  # Idempotent-match key from the broker
 
     def __post_init__(self) -> None:
         # Currency: ENUM-like, restricted to {USD, INR}. Anything else
@@ -1212,10 +1213,31 @@ class Position:
 
 
 @dataclass
+class CurrentHolding:
+    """A Holding as stored in the DB: the Holding fields plus the
+    database-level ``id`` and ``is_active`` flag used by the sync logic
+    for removed-record detection."""
+    id: str
+    is_active: bool
+    holding: Holding
+
+
+@dataclass
+class CurrentTransaction:
+    """A Transaction as stored in the DB: the Transaction fields plus
+    the database-level ``id`` and ``is_active`` flag used by the sync
+    logic for removed-record detection."""
+    id: str
+    is_active: bool
+    transaction: Transaction
+
+
+@dataclass
 class Transaction:
     portfolio_id: str
     kind: str
     amount: float
+    broker_transaction_id: str | None = None  # Idempotent-match key from the broker
 
 
 @dataclass
@@ -1328,6 +1350,84 @@ class SyncResult:
         )
 
 
+# ---------------------------------------------------------------------------
+# Repository protocols (STORY-179 / STORY-SYNC-02)
+# ---------------------------------------------------------------------------
+
+
+class HoldingRepository(Protocol):
+    """Repository protocol for portfolio holdings.
+
+    ``find_by_broker_holding_id`` supports idempotent matching: given a
+    broker's own identifier for a holding, it returns the stored record
+    if one exists (so a re-import of the same broker holding is an
+    update, not a duplicate insert).
+
+    ``find_active_by_account_id`` returns all non-removed holdings for
+    an account, enabling the sync logic to detect holdings that exist in
+    the DB but were removed from the broker feed."""
+
+    def find_by_broker_holding_id(
+        self, broker_holding_id: str
+    ) -> CurrentHolding | None:
+        ...
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentHolding]:
+        ...
+
+
+class TransactionRepository(Protocol):
+    """Repository protocol for portfolio transactions.
+
+    ``find_by_broker_transaction_id`` supports idempotent matching:
+    given a broker's own identifier for a transaction, it returns the
+    stored record if one exists (so a re-import of the same broker
+    transaction is an update, not a duplicate insert).
+
+    ``find_active_by_account_id`` returns all non-removed transactions
+    for an account, enabling the sync logic to detect removed records."""
+
+    def find_by_broker_transaction_id(
+        self, broker_transaction_id: str
+    ) -> CurrentTransaction | None:
+        ...
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentTransaction]:
+        ...
+
+
+class StubHoldingRepository:
+    """Structural no-op implementation of ``HoldingRepository``."""
+
+    def find_by_broker_holding_id(
+        self, broker_holding_id: str
+    ) -> CurrentHolding | None:
+        return None
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentHolding]:
+        return []
+
+
+class StubTransactionRepository:
+    """Structural no-op implementation of ``TransactionRepository``."""
+
+    def find_by_broker_transaction_id(
+        self, broker_transaction_id: str
+    ) -> CurrentTransaction | None:
+        return None
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentTransaction]:
+        return []
+
+
 class UserPortfolio(Protocol):
     def onboard_user(self, details: dict) -> User:
         ...
@@ -1433,6 +1533,123 @@ USERS_TABLE = "users"
 PORTFOLIOS_TABLE = "portfolios"
 HOLDINGS_TABLE = "holdings"
 TRANSACTIONS_TABLE = "transactions"
+
+
+# ---------------------------------------------------------------------------
+# Repository implementations (STORY-179 / STORY-SYNC-02)
+# ---------------------------------------------------------------------------
+
+
+class DefaultHoldingRepository:
+    """Real implementation of ``HoldingRepository`` backed by the shared
+    ``Infrastructure`` store (defaulting to ``DefaultInfrastructure``).
+
+    Uses the ``broker_holding_id`` field on stored holding records for
+    idempotent lookup. ``is_active`` defaults to ``True`` for any record
+    that lacks the field, preserving backwards-compat with holdings
+    stored before the field existed."""
+
+    def __init__(self, infrastructure: Infrastructure | None = None) -> None:
+        self._infrastructure = infrastructure or DefaultInfrastructure()
+
+    def find_by_broker_holding_id(
+        self, broker_holding_id: str
+    ) -> CurrentHolding | None:
+        with traced("DefaultHoldingRepository.find_by_broker_holding_id"):
+            records = self._infrastructure.query(
+                HOLDINGS_TABLE, {"broker_holding_id": broker_holding_id}
+            )
+            if not records:
+                return None
+            record = records[0]
+            return CurrentHolding(
+                id=record["id"],
+                is_active=record.get("is_active", True),
+                holding=Holding(
+                    portfolio_id=record["portfolio_id"],
+                    security_id=record["security_id"],
+                    quantity=record["quantity"],
+                    broker_holding_id=record.get("broker_holding_id"),
+                ),
+            )
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentHolding]:
+        with traced("DefaultHoldingRepository.find_active_by_account_id"):
+            all_records = self._infrastructure.query(
+                HOLDINGS_TABLE, {"portfolio_id": account_id}
+            )
+            return [
+                CurrentHolding(
+                    id=record["id"],
+                    is_active=record.get("is_active", True),
+                    holding=Holding(
+                        portfolio_id=record["portfolio_id"],
+                        security_id=record["security_id"],
+                        quantity=record["quantity"],
+                        broker_holding_id=record.get("broker_holding_id"),
+                    ),
+                )
+                for record in all_records
+                if record.get("is_active", True)
+            ]
+
+
+class DefaultTransactionRepository:
+    """Real implementation of ``TransactionRepository`` backed by the
+    shared ``Infrastructure`` store (defaulting to ``DefaultInfrastructure``).
+
+    Uses the ``broker_transaction_id`` field on stored transaction records
+    for idempotent lookup. ``is_active`` defaults to ``True`` for any record
+    that lacks the field, preserving backwards-compat."""
+
+    def __init__(self, infrastructure: Infrastructure | None = None) -> None:
+        self._infrastructure = infrastructure or DefaultInfrastructure()
+
+    def find_by_broker_transaction_id(
+        self, broker_transaction_id: str
+    ) -> CurrentTransaction | None:
+        with traced("DefaultTransactionRepository.find_by_broker_transaction_id"):
+            records = self._infrastructure.query(
+                TRANSACTIONS_TABLE, {"broker_transaction_id": broker_transaction_id}
+            )
+            if not records:
+                return None
+            record = records[0]
+            return CurrentTransaction(
+                id=record["id"],
+                is_active=record.get("is_active", True),
+                transaction=Transaction(
+                    portfolio_id=record["portfolio_id"],
+                    kind=record["kind"],
+                    amount=record["amount"],
+                    broker_transaction_id=record.get("broker_transaction_id"),
+                ),
+            )
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentTransaction]:
+        with traced("DefaultTransactionRepository.find_active_by_account_id"):
+            all_records = self._infrastructure.query(
+                TRANSACTIONS_TABLE, {"portfolio_id": account_id}
+            )
+            return [
+                CurrentTransaction(
+                    id=record["id"],
+                    is_active=record.get("is_active", True),
+                    transaction=Transaction(
+                        portfolio_id=record["portfolio_id"],
+                        kind=record["kind"],
+                        amount=record["amount"],
+                        broker_transaction_id=record.get("broker_transaction_id"),
+                    ),
+                )
+                for record in all_records
+                if record.get("is_active", True)
+            ]
+
 
 # Entity.kind values (c04_knowledge_entity.py's "Company | Security |
 # Person | Sector | Industry | Index | Geography") that represent
@@ -1567,6 +1784,7 @@ class DefaultUserPortfolio:
                     portfolio_id=portfolio.id,
                     security_id=tagged["symbol"],
                     quantity=tagged["quantity"],
+                    broker_holding_id=tagged.get("isin"),
                 )
                 self._infrastructure.store(
                     HOLDINGS_TABLE,
@@ -1593,6 +1811,7 @@ class DefaultUserPortfolio:
                     portfolio_id=portfolio.id,
                     kind=tagged["side"],  # Note: the BrokerTransaction has 'side' (BUY/SELL), but the Transaction expects 'kind'
                     amount=tagged["amount"],
+                    broker_transaction_id=tagged.get("external_id"),
                 )
                 self._infrastructure.store(
                     TRANSACTIONS_TABLE,
@@ -1958,6 +2177,7 @@ class DefaultUserPortfolio:
                 portfolio_id=record["portfolio_id"],
                 security_id=record["security_id"],
                 quantity=record["quantity"],
+                broker_holding_id=record.get("broker_holding_id"),
             )
             for record in records
         ]
