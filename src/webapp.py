@@ -27,6 +27,8 @@ from typing import Any
 from flask import Flask, jsonify, request, render_template
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
+from market_hours import market_status, UnknownMarketError, MarketHoursConfigError
+
 # Currency symbol constants for Unicode with ASCII fallback
 _CURRENCY_SYMBOLS = {
     "INR": "₹",  # Unicode Indian Rupee sign
@@ -317,6 +319,64 @@ def create_app() -> Flask:
         except Exception as e:
             # Catch-all for unexpected errors
             return jsonify({"error": "An unexpected error occurred"}), 500
+
+    @app.get("/api/market-status")
+    def api_market_status():
+        """Return market status for NSE/BSE and US markets.
+        
+        Returns JSON with status for both Indian and US markets,
+        including holiday information when markets are closed for holidays.
+        """
+        result = {}
+        
+        # NSE/BSE status (use NSE as the representative)
+        try:
+            nse_status = market_status("NSE")
+            bse_status = market_status("BSE")
+            
+            # Use NSE's status but check if BSE has a holiday when NSE doesn't
+            nse_bse_info = {
+                "status": nse_status["status"],
+                "status_text": "Market Open" if nse_status["status"] == "open" else "Market Closed",
+                "holiday_name": nse_status.get("holiday_name") or bse_status.get("holiday_name"),
+                "timezone": nse_status.get("timezone"),
+                "now_local": nse_status.get("now_local"),
+            }
+            if nse_bse_info["holiday_name"]:
+                nse_bse_info["status_text"] = f"Market Closed - {nse_bse_info['holiday_name']}"
+            result["nse_bse"] = nse_bse_info
+        except (UnknownMarketError, MarketHoursConfigError) as e:
+            result["nse_bse"] = {
+                "status": "unknown",
+                "status_text": "Status Unavailable",
+                "holiday_name": None,
+                "error": str(e),
+            }
+        
+        # US markets status (use NYSE as the representative)
+        try:
+            nyse_status = market_status("NYSE")
+            nasdaq_status = market_status("NASDAQ")
+            
+            us_markets_info = {
+                "status": nyse_status["status"],
+                "status_text": "Market Open" if nyse_status["status"] == "open" else "Market Closed",
+                "holiday_name": nyse_status.get("holiday_name") or nasdaq_status.get("holiday_name"),
+                "timezone": nyse_status.get("timezone"),
+                "now_local": nyse_status.get("now_local"),
+            }
+            if us_markets_info["holiday_name"]:
+                us_markets_info["status_text"] = f"Market Closed - {us_markets_info['holiday_name']}"
+            result["us_markets"] = us_markets_info
+        except (UnknownMarketError, MarketHoursConfigError) as e:
+            result["us_markets"] = {
+                "status": "unknown",
+                "status_text": "Status Unavailable",
+                "holiday_name": None,
+                "error": str(e),
+            }
+        
+        return jsonify(result)
 
     return app
 
