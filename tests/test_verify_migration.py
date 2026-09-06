@@ -58,6 +58,77 @@ def stocks_and_log_tables():
             # but truncate it so prior runs from this or other tests
             # can't accidentally make a failing scenario look passing.
             cur.execute("TRUNCATE TABLE migration_log")
+            # STORY-13: ensure the four core-domain tables exist with correct
+            # DDL so the additive core-domain checks in verify_migration.py
+            # find them in place.  Each table is created with its target
+            # schema including PK, indexes, and FKs where applicable.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id           TEXT        NOT NULL,
+                    email        TEXT,
+                    preferences  JSONB      NOT NULL DEFAULT '{}'::jsonb,
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portfolios (
+                    id         TEXT        NOT NULL,
+                    user_id    TEXT        NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_portfolios_user_id ON portfolios (user_id)"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS holdings (
+                    id             TEXT            NOT NULL,
+                    portfolio_id   TEXT            NOT NULL,
+                    security_id    TEXT            NOT NULL,
+                    quantity       NUMERIC(38, 10) NOT NULL DEFAULT 0,
+                    currency       TEXT,
+                    exchange       TEXT,
+                    symbol_suffix  TEXT,
+                    created_at     TIMESTAMPTZ     NOT NULL DEFAULT now(),
+                    updated_at     TIMESTAMPTZ     NOT NULL DEFAULT now(),
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_holdings_portfolio_id ON holdings (portfolio_id)"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_holdings_portfolio_security ON holdings (portfolio_id, security_id)"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id           TEXT            NOT NULL,
+                    portfolio_id TEXT            NOT NULL,
+                    kind         TEXT            NOT NULL,
+                    amount       NUMERIC(38, 10) NOT NULL,
+                    created_at   TIMESTAMPTZ     NOT NULL DEFAULT now(),
+                    updated_at   TIMESTAMPTZ     NOT NULL DEFAULT now(),
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_transactions_portfolio_id ON transactions (portfolio_id)"
+            )
 
     yield
 
@@ -65,6 +136,11 @@ def stocks_and_log_tables():
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS stocks")
             cur.execute("TRUNCATE TABLE migration_log")
+            # STORY-13: clean up core-domain tables created by this fixture.
+            cur.execute("DROP TABLE IF EXISTS transactions")
+            cur.execute("DROP TABLE IF EXISTS holdings")
+            cur.execute("DROP TABLE IF EXISTS portfolios")
+            cur.execute("DROP TABLE IF EXISTS users")
 
 
 def _seed_normalized(conn, ids: list[str]) -> None:
@@ -320,4 +396,166 @@ def test_verify_migration_does_not_modify_data(
     )
     assert log_after == log_before, (
         "verify_migration must not modify any row in migration_log"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STORY-13: core-domain table checks
+# ---------------------------------------------------------------------------
+
+
+def _assert_core_domain_tables_pass(captured) -> None:
+    """Shared assertions for a fully-passing core-domain check scenario.
+
+    After the fixture has created all four tables with correct DDL,
+    verify_migration must emit exists=1, pk=present, and indexes=present
+    for each table. FKs are absent because no FKs were added in the
+    fixture (no parent-child relationships were seeded), and since
+    orphan_count=0, the FK-absent case must be reported as absent
+    (not as an error, because the migration itself would have skipped
+    adding them in the same situation).
+    """
+    for table in ("users", "portfolios", "holdings", "transactions"):
+        assert f"{table}.exists = 1" in captured.out, (
+            f"expected {table}.exists = 1; stdout={captured.out!r}"
+        )
+        assert f"{table}.pk = present" in captured.out, (
+            f"expected {table}.pk = present; stdout={captured.out!r}"
+        )
+    # Both holdings indexes present
+    assert "holdings.indexes = all present (2)" in captured.out
+    # FKs: absent (no rows, no FKs added) but no failure lines
+    assert "FK fk_portfolios_user: ABSENT (0 orphan" in captured.out
+    assert "FK fk_holdings_portfolio: ABSENT (0 orphan" in captured.out
+    assert "FK fk_transactions_portfolio: ABSENT (0 orphan" in captured.out
+    # No failure lines
+    assert "FAIL:" not in captured.err
+
+
+def test_verify_migration_core_domain_passes_with_correct_tables(
+    stocks_and_log_tables, capsys
+):
+    """STORY-13 acceptance: when all four core-domain tables exist with
+    correct DDL (PK on id, correct columns, correct indexes), the script
+    exits 0 and prints per-table / per-FK summary lines."""
+    _log_success(psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True))
+    # stocks_and_log_tables already created all four core-domain tables.
+    exit_code = verify_migration()
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_PASS, (
+        f"expected EXIT_PASS (0) when all four tables exist with correct "
+        f"DDL; got exit_code={exit_code}; stdout={captured.out!r}; "
+        f"stderr={captured.err!r}"
+    )
+    _assert_core_domain_tables_pass(captured)
+
+
+def test_verify_migration_core_domain_fails_with_missing_table(
+    stocks_and_log_tables, capsys
+):
+    """STORY-13 acceptance: when any of the four core-domain tables is
+    absent, the script exits non-zero and names the missing table in
+    its output."""
+    # Drop one table after the fixture has set everything up.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE holdings")
+        _log_success(conn)
+
+    exit_code = verify_migration()
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_FAIL, (
+        f"expected EXIT_FAIL (1) when holdings table is absent; "
+        f"got exit_code={exit_code}; stdout={captured.out!r}; "
+        f"stderr={captured.err!r}"
+    )
+    # The missing table name must appear in the output.
+    assert "holdings" in captured.out or "holdings" in captured.err, (
+        f"expected 'holdings' to be named in output when table is missing; "
+        f"stdout={captured.out!r}; stderr={captured.err!r}"
+    )
+
+
+def test_verify_migration_core_domain_checks_columns_and_types(
+    stocks_and_log_tables, capsys
+):
+    """STORY-13 acceptance: the script detects a column that is missing,
+    has the wrong type, or has the wrong nullability."""
+    # Add a column with a wrong type (TEXT instead of JSONB) to users.preferences.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE users DROP COLUMN preferences")
+            cur.execute("ALTER TABLE users ADD COLUMN preferences TEXT DEFAULT '{}'")
+        _log_success(conn)
+
+    exit_code = verify_migration()
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_FAIL, (
+        f"expected EXIT_FAIL (1) when users.preferences has wrong type; "
+        f"got exit_code={exit_code}"
+    )
+    assert "FAIL:" in captured.err, (
+        f"expected a FAIL: line for wrong column type; stderr={captured.err!r}"
+    )
+
+
+def test_verify_migration_core_domain_reports_fk_absent_with_orphans(
+    stocks_and_log_tables, capsys
+):
+    """STORY-13 acceptance: when a FK is absent but orphan rows exist,
+    the script reports it as ABSENT (not as a failure) with the orphan
+    count, per the STORY-12 design where FKs are intentionally skipped
+    when legacy orphan rows are present."""
+    # Create a portfolio with a user_id that does not exist in users.
+    # This makes the FK fk_portfolios_user impossible to add.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO portfolios (id, user_id) VALUES ('orphan-pf', 'ghost-user')"
+            )
+        _log_success(conn)
+
+    exit_code = verify_migration()
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_PASS, (
+        f"FK absent with orphans must NOT fail verification; "
+        f"got exit_code={exit_code}; stdout={captured.out!r}; "
+        f"stderr={captured.err!r}"
+    )
+    assert "FK fk_portfolios_user: ABSENT (1 orphan row(s)" in captured.out, (
+        f"expected ABSENT with orphan count; stdout={captured.out!r}"
+    )
+    assert "FAIL:" not in captured.err, (
+        f"FK absent with orphans must not be a failure; stderr={captured.err!r}"
+    )
+
+
+def test_verify_migration_core_domain_fk_absent_zero_orphans_fails(
+    stocks_and_log_tables, capsys
+):
+    """STORY-13 acceptance: when a FK is absent but orphan_count == 0,
+    the script must exit non-zero and report it as a failure, because
+    the FK should have been added by the migration and wasn't.
+
+    This differs from the orphan>0 case which is permitted by design
+    (STORY-12 deliberately skips FKs when orphan rows exist)."""
+    # The fixture created tables but no FKs.  Since there are also no
+    # orphan rows (the tables are empty), fk_portfolios_user should
+    # have been added by the migration and is missing → FAIL.
+    _log_success(psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True))
+
+    exit_code = verify_migration()
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_FAIL, (
+        f"FK absent with 0 orphans must exit non-zero; "
+        f"got exit_code={exit_code}; stdout={captured.out!r}; "
+        f"stderr={captured.err!r}"
+    )
+    assert "FK fk_portfolios_user: ABSENT but 0 orphan rows" in captured.err, (
+        f"expected FAIL line for absent FK with 0 orphans; "
+        f"stderr={captured.err!r}"
     )
