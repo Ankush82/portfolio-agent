@@ -18,6 +18,7 @@ pytest, simply:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, session, redirect, url_for
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
 from exchange_rate_client import (
@@ -34,6 +35,7 @@ from exchange_rate_client import (
     fetch_exchange_rate,
 )
 from market_hours import market_status, UnknownMarketError, MarketHoursConfigError
+from infrastructure_postgres import DefaultInfrastructure
 
 # Currency symbol constants for Unicode with ASCII fallback
 _CURRENCY_SYMBOLS = {
@@ -53,7 +55,7 @@ _STATIC_DIR = _REPO_ROOT / "static"
 _PRICE_QUANTUM = Decimal("0.01")
 
 # Default base currency (can be overridden by user preference)
-_DEFAULT_BASE_CURRENCY = "INR"
+_DEFAULT_BASE_CURRENCY = "USD"
 
 
 def get_currency_symbol(currency: str) -> str:
@@ -108,16 +110,33 @@ def format_price_with_thousand_separators(value: Any) -> str:
         return str(value)
 
 
-def get_user_base_currency() -> str:
+def get_user_base_currency(user_id: str | None = None) -> str:
     """Get the user's base currency preference.
     
-    In a real implementation, this would read from the user's profile
-    in the database. For now, returns the default base currency.
+    Reads from the database if user_id is provided, otherwise
+    falls back to the default.
     
+    Args:
+        user_id: Optional user ID to look up the preference for.
+                 If None, returns the default base currency.
+        
     Returns:
         Base currency code (INR or USD)
     """
-    # TODO: Read from user preferences in database
+    # Use default for anonymous/unauthenticated users
+    if user_id is None:
+        return _DEFAULT_BASE_CURRENCY
+    
+    # Try to read from database
+    try:
+        infra = DefaultInfrastructure()
+        setting = infra.get_user_setting(user_id, "base_currency")
+        if setting in ("INR", "USD"):
+            return setting
+    except Exception:
+        # If database is unavailable, fall back to default
+        pass
+    
     return _DEFAULT_BASE_CURRENCY
 
 
@@ -195,6 +214,7 @@ def create_app() -> Flask:
         template_folder=str(_TEMPLATES_DIR),
         static_folder=str(_STATIC_DIR),
     )
+    app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
 
     @app.get("/")
     def index():
@@ -308,7 +328,8 @@ def create_app() -> Flask:
         usd_total_str = format_price_with_thousand_separators(usd_total) if usd_total else None
 
         # STORY-17: Calculate consolidated total in user's base currency
-        base_currency = get_user_base_currency()
+        user_id = session.get("user_id", "default-user")
+        base_currency = get_user_base_currency(user_id)
         consolidated_total = None
         exchange_rate_info = None
         exchange_rate_unavailable = False
@@ -474,6 +495,50 @@ def create_app() -> Flask:
             }
         
         return jsonify(result)
+
+    # STORY-18: User settings routes
+    @app.get("/settings")
+    def settings():
+        """Display user settings page with base currency preference."""
+        # For demo purposes, use a default user ID
+        # In production, this would come from authentication
+        user_id = session.get("user_id", "default-user")
+        
+        # Get current base currency setting
+        current_base_currency = get_user_base_currency(user_id)
+        
+        return render_template(
+            "settings.html",
+            current_base_currency=current_base_currency,
+            base_currency_options=["USD", "INR"],
+        )
+
+    @app.post("/settings/base-currency")
+    def update_base_currency():
+        """Update the user's base currency preference."""
+        data = request.get_json() if request.is_json else request.form.to_dict()
+        
+        base_currency = data.get("base_currency")
+        if base_currency not in ("USD", "INR"):
+            return jsonify({"error": "Invalid currency. Must be USD or INR."}), 400
+        
+        # For demo purposes, use a default user ID
+        # In production, this would come from authentication
+        user_id = session.get("user_id", "default-user")
+        
+        try:
+            infra = DefaultInfrastructure()
+            infra.set_user_setting(user_id, "base_currency", base_currency)
+            return jsonify({"success": True, "base_currency": base_currency})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/api/user/base-currency")
+    def api_get_base_currency():
+        """Get the user's current base currency preference (API endpoint)."""
+        user_id = session.get("user_id", "default-user")
+        base_currency = get_user_base_currency(user_id)
+        return jsonify({"base_currency": base_currency})
 
     return app
 

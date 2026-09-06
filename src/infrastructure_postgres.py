@@ -217,6 +217,19 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            # User settings table for storing user preferences (STORY-18)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id TEXT NOT NULL,
+                    setting_name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (user_id, setting_name)
+                )
+                """
+            )
 
     def _redis(self) -> redis.Redis:
         if self._redis_client is None:
@@ -399,6 +412,24 @@ class DefaultInfrastructure:
                 row = cursor.fetchone()
             return row[0] if row is not None else 0
 
+    def _broker_connection_from_row(self, row: tuple) -> BrokerConnectionRecord:
+        """Build a BrokerConnectionRecord from a SELECT row (13 columns, 0-indexed)."""
+        return BrokerConnectionRecord(
+            id=row[0],
+            user_id=row[1],
+            broker_id=row[2],
+            broker_user_id=row[3],
+            access_token_encrypted=row[4],
+            token_type=row[5],
+            access_token_expires_at=row[6],
+            status=row[7],
+            last_error=row[8],
+            connected_at=row[9],
+            last_import_at=row[10],
+            created_at=str(row[11]),
+            updated_at=str(row[12]),
+        )
+
     def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
         """Fetch a broker connection row by user_id and broker_id, or None if not found."""
         with traced("DefaultInfrastructure.get_broker_connection"):
@@ -417,21 +448,7 @@ class DefaultInfrastructure:
                 row = cursor.fetchone()
             if row is None:
                 return None
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return self._broker_connection_from_row(row)
 
     def upsert_broker_connection(
         self,
@@ -488,21 +505,7 @@ class DefaultInfrastructure:
                     ),
                 )
                 row = cursor.fetchone()
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return self._broker_connection_from_row(row)
 
     def mark_broker_connection_error(
         self,
@@ -520,4 +523,48 @@ class DefaultInfrastructure:
                     WHERE user_id = %s AND broker_id = %s
                     """,
                     (error_message, datetime.now(timezone.utc), user_id, broker_id),
+                )
+
+    # STORY-18: User settings (base currency preference)
+    def get_user_setting(self, user_id: str, setting_name: str) -> str | None:
+        """Get a user setting value by name.
+        
+        Args:
+            user_id: The user's ID
+            setting_name: The setting name (e.g., 'base_currency')
+            
+        Returns:
+            The setting value as a string, or None if not found.
+        """
+        with traced("DefaultInfrastructure.get_user_setting"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value FROM user_settings
+                    WHERE user_id = %s AND setting_name = %s
+                    """,
+                    (user_id, setting_name),
+                )
+                row = cursor.fetchone()
+            return row[0] if row is not None else None
+
+    def set_user_setting(self, user_id: str, setting_name: str, value: str) -> None:
+        """Set a user setting value.
+        
+        Args:
+            user_id: The user's ID
+            setting_name: The setting name (e.g., 'base_currency')
+            value: The setting value as a string
+        """
+        with traced("DefaultInfrastructure.set_user_setting"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO user_settings (user_id, setting_name, value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id, setting_name) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = now()
+                    """,
+                    (user_id, setting_name, value),
                 )
