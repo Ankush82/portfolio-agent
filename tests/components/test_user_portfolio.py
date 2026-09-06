@@ -2811,3 +2811,250 @@ def test_sync_result_with_failed_records_roundtrips_success_and_has_changes():
     assert result.success is False
     assert result.has_changes is True
     assert result.failed_records == [failed]
+
+
+# --- STORY-179: Repository methods for reconciliation -------------------------
+
+
+def test_qa_story179_holding_repository_protocol_has_required_methods():
+    """AC: HoldingRepository Protocol declares the two required methods with
+    correct signatures for the reconciliation use-case."""
+    import inspect
+    from typing import get_type_hints
+
+    # Method 1: find_by_broker_holding_id
+    sig1 = inspect.signature(HoldingRepository.find_by_broker_holding_id)
+    params1 = list(sig1.parameters.keys())
+    assert "broker_holding_id" in params1, (
+        "HoldingRepository.find_by_broker_holding_id must accept broker_holding_id"
+    )
+    hints1 = get_type_hints(HoldingRepository.find_by_broker_holding_id)
+    assert hints1.get("return") in (CurrentHolding, "CurrentHolding"), (
+        f"HoldingRepository.find_by_broker_holding_id must return CurrentHolding | None; "
+        f"got {hints1.get('return')}"
+    )
+
+    # Method 2: find_active_by_account_id
+    sig2 = inspect.signature(HoldingRepository.find_active_by_account_id)
+    params2 = list(sig2.parameters.keys())
+    assert "account_id" in params2, (
+        "HoldingRepository.find_active_by_account_id must accept account_id"
+    )
+    hints2 = get_type_hints(HoldingRepository.find_active_by_account_id)
+    assert "list" in repr(hints2.get("return", "")), (
+        f"HoldingRepository.find_active_by_account_id must return list[CurrentHolding]; "
+        f"got {hints2.get('return')}"
+    )
+
+
+def test_qa_story179_transaction_repository_protocol_has_required_methods():
+    """AC: TransactionRepository Protocol declares the two required methods with
+    correct signatures for the reconciliation use-case."""
+    import inspect
+    from typing import get_type_hints
+
+    # Method 1: find_by_broker_transaction_id
+    sig1 = inspect.signature(TransactionRepository.find_by_broker_transaction_id)
+    params1 = list(sig1.parameters.keys())
+    assert "broker_transaction_id" in params1, (
+        "TransactionRepository.find_by_broker_transaction_id must accept broker_transaction_id"
+    )
+    hints1 = get_type_hints(TransactionRepository.find_by_broker_transaction_id)
+    assert hints1.get("return") in (CurrentTransaction, "CurrentTransaction"), (
+        f"TransactionRepository.find_by_broker_transaction_id must return CurrentTransaction | None; "
+        f"got {hints1.get('return')}"
+    )
+
+    # Method 2: find_active_by_account_id
+    sig2 = inspect.signature(TransactionRepository.find_active_by_account_id)
+    params2 = list(sig2.parameters.keys())
+    assert "account_id" in params2, (
+        "TransactionRepository.find_active_by_account_id must accept account_id"
+    )
+    hints2 = get_type_hints(TransactionRepository.find_active_by_account_id)
+    assert "list" in repr(hints2.get("return", "")), (
+        f"TransactionRepository.find_active_by_account_id must return list[CurrentTransaction]; "
+        f"got {hints2.get('return')}"
+    )
+
+
+def test_qa_story179_default_holding_repository_implements_protocol_methods():
+    """AC: DefaultHoldingRepository implements find_by_broker_holding_id and
+    find_active_by_account_id, using existing DB infrastructure (query)."""
+    import inspect
+
+    repo = DefaultHoldingRepository(infrastructure=_InMemoryInfrastructure())
+
+    # Method exists with correct name and is callable
+    assert hasattr(repo, "find_by_broker_holding_id")
+    assert callable(repo.find_by_broker_holding_id)
+    sig1 = inspect.signature(repo.find_by_broker_holding_id)
+    assert "broker_holding_id" in list(sig1.parameters.keys())
+
+    assert hasattr(repo, "find_active_by_account_id")
+    assert callable(repo.find_active_by_account_id)
+    sig2 = inspect.signature(repo.find_active_by_account_id)
+    assert "account_id" in list(sig2.parameters.keys())
+
+
+def test_qa_story179_default_transaction_repository_implements_protocol_methods():
+    """AC: DefaultTransactionRepository implements find_by_broker_transaction_id
+    and find_active_by_account_id, using existing DB infrastructure (query)."""
+    import inspect
+
+    repo = DefaultTransactionRepository(infrastructure=_InMemoryInfrastructure())
+
+    # Method exists with correct name and is callable
+    assert hasattr(repo, "find_by_broker_transaction_id")
+    assert callable(repo.find_by_broker_transaction_id)
+    sig1 = inspect.signature(repo.find_by_broker_transaction_id)
+    assert "broker_transaction_id" in list(sig1.parameters.keys())
+
+    assert hasattr(repo, "find_active_by_account_id")
+    assert callable(repo.find_active_by_account_id)
+    sig2 = inspect.signature(repo.find_active_by_account_id)
+    assert "account_id" in list(sig2.parameters.keys())
+
+
+def test_qa_story179_holding_repository_find_by_broker_holding_id_returns_record():
+    """AC: find_by_broker_holding_id returns the stored CurrentHolding when
+    a matching broker_holding_id exists (idempotent matching support)."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultHoldingRepository(infrastructure=infra)
+
+    # Persist a holding with a broker_holding_id
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-1",
+            "portfolio_id": "pf-1",
+            "security_id": "AAPL",
+            "quantity": 10.0,
+            "broker_holding_id": "broker-holding-abc",
+            "is_active": True,
+        },
+    )
+
+    result = repo.find_by_broker_holding_id("broker-holding-abc")
+
+    assert result is not None
+    assert result.id == "holding-1"
+    assert result.holding.broker_holding_id == "broker-holding-abc"
+    assert result.holding.security_id == "AAPL"
+    assert result.is_active is True
+
+
+def test_qa_story179_holding_repository_find_by_broker_holding_id_returns_none_when_not_found():
+    """AC: find_by_broker_holding_id returns None when no matching record exists."""
+    repo = DefaultHoldingRepository(infrastructure=_InMemoryInfrastructure())
+
+    result = repo.find_by_broker_holding_id("non-existent-id")
+
+    assert result is None
+
+
+def test_qa_story179_holding_repository_find_active_by_account_id_returns_only_active():
+    """AC: find_active_by_account_id returns only non-removed (is_active=True)
+    holdings for the account, enabling removed-record detection."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultHoldingRepository(infrastructure=infra)
+
+    # Persist two holdings for the same account: one active, one removed
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-active",
+            "portfolio_id": "pf-1",
+            "security_id": "AAPL",
+            "quantity": 5.0,
+            "is_active": True,
+        },
+    )
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-removed",
+            "portfolio_id": "pf-1",
+            "security_id": "MSFT",
+            "quantity": 3.0,
+            "is_active": False,
+        },
+    )
+
+    result = repo.find_active_by_account_id("pf-1")
+
+    assert len(result) == 1
+    assert result[0].id == "holding-active"
+    assert result[0].holding.security_id == "AAPL"
+
+
+def test_qa_story179_transaction_repository_find_by_broker_transaction_id_returns_record():
+    """AC: find_by_broker_transaction_id returns the stored CurrentTransaction
+    when a matching broker_transaction_id exists (idempotent matching support)."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultTransactionRepository(infrastructure=infra)
+
+    # Persist a transaction with a broker_transaction_id
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-1",
+            "portfolio_id": "pf-1",
+            "kind": "buy",
+            "amount": 1000.0,
+            "broker_transaction_id": "broker-txn-xyz",
+            "is_active": True,
+        },
+    )
+
+    result = repo.find_by_broker_transaction_id("broker-txn-xyz")
+
+    assert result is not None
+    assert result.id == "txn-1"
+    assert result.transaction.broker_transaction_id == "broker-txn-xyz"
+    assert result.transaction.kind == "buy"
+    assert result.is_active is True
+
+
+def test_qa_story179_transaction_repository_find_by_broker_transaction_id_returns_none_when_not_found():
+    """AC: find_by_broker_transaction_id returns None when no matching record exists."""
+    repo = DefaultTransactionRepository(infrastructure=_InMemoryInfrastructure())
+
+    result = repo.find_by_broker_transaction_id("non-existent-id")
+
+    assert result is None
+
+
+def test_qa_story179_transaction_repository_find_active_by_account_id_returns_only_active():
+    """AC: find_active_by_account_id returns only non-removed (is_active=True)
+    transactions for the account, enabling removed-record detection."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultTransactionRepository(infrastructure=infra)
+
+    # Persist two transactions for the same account: one active, one removed
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-active",
+            "portfolio_id": "pf-1",
+            "kind": "buy",
+            "amount": 500.0,
+            "is_active": True,
+        },
+    )
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-removed",
+            "portfolio_id": "pf-1",
+            "kind": "sell",
+            "amount": 200.0,
+            "is_active": False,
+        },
+    )
+
+    result = repo.find_active_by_account_id("pf-1")
+
+    assert len(result) == 1
+    assert result[0].id == "txn-active"
+    assert result[0].transaction.kind == "buy"
