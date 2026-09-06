@@ -3,14 +3,27 @@ from cryptography.fernet import Fernet
 os.environ["BROKER_TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 import pytest
+import psycopg.errors
 import uuid
 from datetime import datetime, timedelta
-from src.infrastructure_postgres import DefaultInfrastructure, BrokerConnectionRecord
+from src.infrastructure_postgres import DefaultInfrastructure, BrokerConnectionRecord, DEFAULT_POSTGRES_DSN
 from src.components.c01_user_portfolio import BrokerCredentials
 
 
 @pytest.fixture
 def infra():
+    """DefaultInfrastructure with the users table pre-created so that
+    broker_connections REFERENCES users(id) FK succeeds."""
+    import psycopg
+    with psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS users ("
+                "  id TEXT PRIMARY KEY,"
+                "  email TEXT UNIQUE,"
+                "  created_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+                ")"
+            )
     return DefaultInfrastructure()
 
 
@@ -190,3 +203,155 @@ def test_upsert_get_mark_touch_full_flow(infra, user_id, broker_id, credentials)
     rec6 = infra.get_broker_connection(user_id, broker_id)
     assert rec6.last_import_at is not None
     assert rec6.last_import_at != before
+
+
+# --- STORY-188: Idempotency key UNIQUE constraints ---
+
+def test_holdings_idempotency_key_unique_constraint_prevents_duplicates(
+    infra: DefaultInfrastructure,
+) -> None:
+    """Duplicate broker_holding_id inserts raise psycopg.errors.UniqueViolation.
+
+    After migration migrate_idempotency_keys is applied, the shadow table
+    holdings_idempotency_keys enforces a UNIQUE constraint on broker_holding_id.
+    An INSERT into records (table_name='holdings') with a duplicate
+    broker_holding_id value must raise UniqueViolation.
+    """
+    portfolio_id = str(uuid.uuid4())
+    holding_data = {
+        "id": str(uuid.uuid4()),
+        "portfolio_id": portfolio_id,
+        "security_id": "AAPL",
+        "quantity": "10.0000",
+        "currency": "USD",
+        "broker_holding_id": "broker-holding-abc-123",
+    }
+    other_data = {
+        "id": str(uuid.uuid4()),
+        "portfolio_id": portfolio_id,
+        "security_id": "MSFT",
+        "quantity": "5.0000",
+        "currency": "USD",
+        "broker_holding_id": "broker-holding-abc-123",  # same idempotency key
+    }
+
+    # First insert succeeds
+    infra.store("holdings", holding_data)
+
+    # Duplicate broker_holding_id must raise UniqueViolation
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        infra.store("holdings", other_data)
+
+
+def test_holdings_idempotency_key_unique_constraint_prevents_duplicates_on_update(
+    infra: DefaultInfrastructure,
+) -> None:
+    """An UPDATE that changes broker_holding_id to a conflicting value raises UniqueViolation.
+
+    The trigger fires on UPDATE (not just INSERT), so changing a holding's
+    broker_holding_id to match an existing shadow-table key must also raise.
+    """
+    portfolio_id = str(uuid.uuid4())
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-1",
+            "portfolio_id": portfolio_id,
+            "security_id": "AAPL",
+            "quantity": "10.0000",
+            "currency": "USD",
+            "broker_holding_id": "key-alpha",
+        },
+    )
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-2",
+            "portfolio_id": portfolio_id,
+            "security_id": "MSFT",
+            "quantity": "5.0000",
+            "currency": "USD",
+            "broker_holding_id": "key-beta",
+        },
+    )
+    # Update holding-1 to use holding-2's broker_holding_id — must raise.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        infra.store(
+            "holdings",
+            {
+                "id": "holding-1",
+                "portfolio_id": portfolio_id,
+                "security_id": "AAPL",
+                "quantity": "10.0000",
+                "currency": "USD",
+                "broker_holding_id": "key-beta",  # collides with holding-2
+            },
+        )
+
+
+def test_transactions_idempotency_key_unique_constraint_prevents_duplicates(
+    infra: DefaultInfrastructure,
+) -> None:
+    """Duplicate broker_transaction_id inserts raise psycopg.errors.UniqueViolation.
+
+    After migration migrate_idempotency_keys is applied, the shadow table
+    transactions_idempotency_keys enforces a UNIQUE constraint on
+    broker_transaction_id. An INSERT into records (table_name='transactions')
+    with a duplicate broker_transaction_id value must raise UniqueViolation.
+    """
+    portfolio_id = str(uuid.uuid4())
+    tx_data = {
+        "id": str(uuid.uuid4()),
+        "portfolio_id": portfolio_id,
+        "kind": "BUY",
+        "amount": "100.00",
+        "broker_transaction_id": "broker-tx-xyz-789",
+    }
+    other_data = {
+        "id": str(uuid.uuid4()),
+        "portfolio_id": portfolio_id,
+        "kind": "SELL",
+        "amount": "50.00",
+        "broker_transaction_id": "broker-tx-xyz-789",  # same idempotency key
+    }
+
+    # First insert succeeds
+    infra.store("transactions", tx_data)
+
+    # Duplicate broker_transaction_id must raise UniqueViolation
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        infra.store("transactions", other_data)
+
+
+def test_idempotency_keys_null_broker_id_allows_multiple_inserts(
+    infra: DefaultInfrastructure,
+) -> None:
+    """Multiple holdings/transactions with NULL broker_id must NOT raise.
+
+    The UNIQUE constraint is only on non-NULL values (Postgres standard
+    behaviour: NULL != NULL in a unique index). The trigger skips inserting
+    NULL values into the shadow table, so multiple records with a NULL
+    broker_holding_id or broker_transaction_id are allowed.
+    """
+    portfolio_id = str(uuid.uuid4())
+    for i in range(3):
+        infra.store(
+            "holdings",
+            {
+                "id": str(uuid.uuid4()),
+                "portfolio_id": portfolio_id,
+                "security_id": f"SYM{i}",
+                "quantity": "1.0000",
+                "currency": "USD",
+                "broker_holding_id": None,  # all NULL
+            },
+        )
+    # Must not raise — NULL is not constrained
+    count = sum(
+        1
+        for row in infra.query(
+            "holdings",
+            {"portfolio_id": portfolio_id, "broker_holding_id": None},
+        )
+    )
+    assert count == 3
