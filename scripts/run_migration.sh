@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_migration.sh
 #
-# Wrapper around migrate_us_stocks.sql. Designed to be invoked from the
+# Wrapper around migrate_core_domain_entities.sql. Designed to be invoked from the
 # migration container image, where this file lives at /app/scripts/run_migration.sh.
 # In this repo (no /app directory locally) we keep it under scripts/ so the
 # skeleton + tests are exercisable on a developer machine. A symlink/copy
@@ -28,7 +28,7 @@ set -euo pipefail
 # the image mounts / invokes us.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(dirname "${SCRIPT_PATH}")"
-SQL_SCRIPT="${SCRIPT_DIR}/migrate_us_stocks.sql"
+SQL_SCRIPT="${SCRIPT_DIR}/migrate_core_domain_entities.sql"
 
 # --- Required environment: DATABASE_URL ------------------------------------
 if [[ -z "${DATABASE_URL:-}" ]]; then
@@ -46,7 +46,7 @@ if [[ "${MIGRATION_DRY_RUN}" == "true" ]]; then
 fi
 
 # --- Log file --------------------------------------------------------------
-LOG_FILE="${LOG_FILE:-/tmp/migrate_us_stocks.log}"
+LOG_FILE="${LOG_FILE:-/tmp/migrate_core_domain_entities.log}"
 mkdir -p "$(dirname "${LOG_FILE}")"
 
 # --- Sanity: psql + SQL script exist ---------------------------------------

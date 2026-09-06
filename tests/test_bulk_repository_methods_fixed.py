@@ -238,17 +238,17 @@ def test_transaction_create_many_append_only():
 
     # Second call with the same transactions
     result2 = repo.create_many("p1", transactions)
-    assert len(result2) = 2
+    assert len(result2) == 2
 
     # Now we should have 4 rows
     rows = fake_infra.query("transactions", {})
-    assert len(rows) = 4
+    assert len(rows) == 4
 
     # We can also check that the transactions are in the order they were inserted? Not required, but we can check that we have two buys and two sells.
     buys = [row for row in rows if row["kind"] == "BUY"]
     sells = [row for row in rows if row["kind"] == "SELL"]
-    assert len(buys) = 2
-    assert len(sells) = 2
+    assert len(buys) == 2
+    assert len(sells) == 2
 
 
 def test_holding_upsert_many_has_deliberate_comment():
