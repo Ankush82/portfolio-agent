@@ -1,6 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Portfolio{% endblock %}
 {% block content %}
+<!-- Market Status Bar -->
+<div id="market-status-bar" class="mb-4 p-3 rounded-lg bg-base-100 border" role="status" aria-live="polite">
+  <div class="flex flex-wrap items-center gap-4 text-sm">
+    <!-- NSE/BSE Status -->
+    <div class="flex items-center gap-2" id="nse-bse-status">
+      <span class="font-medium">NSE/BSE:</span>
+      <span class="status-indicator badge badge-neutral" data-market="nse_bse">
+        <span class="loading loading-spinner loading-xs"></span>
+        <span class="status-text text-base-content/70">Loading...</span>
+      </span>
+    </div>
+    <div class="divider divider-horizontal mx-0 h-5"></div>
+    <!-- US Markets Status -->
+    <div class="flex items-center gap-2" id="us-markets-status">
+      <span class="font-medium">US Markets:</span>
+      <span class="status-indicator badge badge-neutral" data-market="us_markets">
+        <span class="loading loading-spinner loading-xs"></span>
+        <span class="status-text text-base-content/70">Loading...</span>
+      </span>
+    </div>
+    <div class="flex-grow"></div>
+    <div class="text-xs text-base-content/50" id="market-status-timestamp"></div>
+  </div>
+</div>
+
 <h2 class="text-2xl font-bold mb-4">Your Portfolio</h2>
 
 <!-- Portfolio Summary -->
@@ -118,6 +143,74 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     }
   });
+  
+  // Fetch and display market status
+  fetchMarketStatus();
+  
+  // Update market status every 60 seconds for real-time updates without page refresh
+  setInterval(fetchMarketStatus, 60000);
 });
+
+async function fetchMarketStatus() {
+  try {
+    const response = await fetch('/api/market-status');
+    if (!response.ok) {
+      throw new Error('Failed to fetch market status');
+    }
+    const data = await response.json();
+    updateMarketStatusDisplay(data);
+  } catch (error) {
+    console.error('Error fetching market status:', error);
+    // Show error state in both indicators
+    updateStatusIndicator('nse_bse', { status: 'unknown', status_text: 'Error' });
+    updateStatusIndicator('us_markets', { status: 'unknown', status_text: 'Error' });
+  }
+}
+
+function updateMarketStatusDisplay(data) {
+  // Update NSE/BSE status
+  updateStatusIndicator('nse_bse', data.nse_bse);
+  
+  // Update US Markets status
+  updateStatusIndicator('us_markets', data.us_markets);
+  
+  // Update timestamp
+  const timestampEl = document.getElementById('market-status-timestamp');
+  if (timestampEl) {
+    const now = new Date();
+    timestampEl.textContent = `Updated: ${now.toLocaleTimeString()}`;
+  }
+}
+
+function updateStatusIndicator(marketKey, statusData) {
+  const indicator = document.querySelector(`.status-indicator[data-market="${marketKey}"]`);
+  if (!indicator) return;
+  
+  const statusText = indicator.querySelector('.status-text');
+  if (!statusText) return;
+  
+  // Remove existing status classes
+  indicator.classList.remove('badge-success', 'badge-error', 'badge-warning', 'badge-neutral');
+  
+  // Set the status text
+  statusText.textContent = statusData.status_text;
+  
+  // Add appropriate color class based on status
+  // Green for open, red for closed, yellow/amber for unknown/error
+  if (statusData.status === 'open') {
+    indicator.classList.add('badge', 'badge-success');
+    statusText.classList.remove('text-error', 'text-warning');
+    statusText.classList.add('text-success');
+  } else if (statusData.status === 'closed') {
+    indicator.classList.add('badge', 'badge-error');
+    statusText.classList.remove('text-success', 'text-warning');
+    statusText.classList.add('text-error');
+  } else {
+    // Unknown or error state
+    indicator.classList.add('badge', 'badge-warning');
+    statusText.classList.remove('text-success', 'text-error');
+    statusText.classList.add('text-warning');
+  }
+}
 </script>
 {% endblock %}
