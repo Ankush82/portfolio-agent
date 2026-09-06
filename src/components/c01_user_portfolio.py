@@ -1224,7 +1224,6 @@ class CurrentHolding:
 
 
 @dataclass
-@dataclass
 class Transaction:
     portfolio_id: str
     kind: str
@@ -1232,6 +1231,7 @@ class Transaction:
     broker_transaction_id: str | None = None  # Idempotent-match key from the broker
 
 
+@dataclass
 class CurrentTransaction:
     """A Transaction as stored in the DB: the Transaction fields plus
     the database-level ``id`` and ``is_active`` flag used by the sync
@@ -1423,6 +1423,32 @@ class ReconciliationOp:
     status: Literal['added', 'updated', 'unchanged']
 
 
+@dataclass(frozen=True)
+class RemovedHoldingOp:
+    """The result of a single holding removed-record decision (STORY-SYNC-05).
+
+    ``current_holding`` is the currently-stored holding that is no longer
+    present in the broker feed.
+
+    ``status`` is always ``'removed'`` — the holding existed in the DB but
+    is absent from the current broker data set."""
+    current_holding: CurrentHolding
+    status: Literal['removed'] = 'removed'
+
+
+@dataclass(frozen=True)
+class RemovedTransactionOp:
+    """The result of a single transaction removed-record decision (STORY-SYNC-05).
+
+    ``current_transaction`` is the currently-stored transaction that is no
+    longer present in the broker feed.
+
+    ``status`` is always ``'removed'`` — the transaction existed in the DB
+    but is absent from the current broker data set."""
+    current_transaction: CurrentTransaction
+    status: Literal['removed'] = 'removed'
+
+
 def reconcile_transactions(
     broker_transactions: list[BrokerTransaction],
     repository: TransactionRepository,
@@ -1465,6 +1491,84 @@ def reconcile_transactions(
         else:
             ops.append(ReconciliationOp(transaction=broker_tx, status='unchanged'))
     return ops
+
+
+def find_holdings_to_remove(
+    current_broker_holding_ids: set[str],
+    repository: HoldingRepository,
+    account_id: str,
+) -> list[RemovedHoldingOp]:
+    """Detect holdings that exist in the DB but are no longer in broker data (STORY-SYNC-05).
+
+    After processing incoming broker records, holdings that exist in the DB
+    (active, matching ``account_id``) whose ``broker_holding_id`` is not in
+    ``current_broker_holding_ids`` must be marked as ``'removed'``.
+
+    Pure function: no persistence is performed — callers decide whether
+    and how to apply the ``'removed'`` status (typically by setting
+    ``is_active = False`` on the stored record).
+
+    Args:
+        current_broker_holding_ids: the set of broker holding IDs currently
+            reported by the broker (e.g. the ISINs from the latest
+            ``BrokerConnector.fetch_holdings`` call).
+        repository: an implementation of ``HoldingRepository``; used only
+            for read operations (``find_active_by_account_id``).
+        account_id: the account/portfolio to scope the query to; only
+            records with ``portfolio_id == account_id`` are considered.
+
+    Returns:
+        A ``RemovedHoldingOp`` for every active stored holding whose
+        ``broker_holding_id`` is absent from ``current_broker_holding_ids``,
+        in the order returned by ``find_active_by_account_id``. Empty list
+        when all stored holdings are still present in the broker feed."""
+    with traced("find_holdings_to_remove"):
+        stored = repository.find_active_by_account_id(account_id)
+        ops: list[RemovedHoldingOp] = []
+        for current in stored:
+            broker_id = current.holding.broker_holding_id
+            if broker_id is not None and broker_id not in current_broker_holding_ids:
+                ops.append(RemovedHoldingOp(current_holding=current))
+        return ops
+
+
+def find_transactions_to_remove(
+    current_broker_transaction_ids: set[str],
+    repository: TransactionRepository,
+    account_id: str,
+) -> list[RemovedTransactionOp]:
+    """Detect transactions that exist in the DB but are no longer in broker data (STORY-SYNC-05).
+
+    After processing incoming broker records, transactions that exist in the DB
+    (active, matching ``account_id``) whose ``broker_transaction_id`` is not in
+    ``current_broker_transaction_ids`` must be marked as ``'removed'``.
+
+    Pure function: no persistence is performed — callers decide whether
+    and how to apply the ``'removed'`` status (typically by setting
+    ``is_active = False`` on the stored record).
+
+    Args:
+        current_broker_transaction_ids: the set of broker transaction IDs
+            currently reported by the broker (e.g. the transaction IDs from
+            the latest ``BrokerConnector.fetch_transactions`` call).
+        repository: an implementation of ``TransactionRepository``; used only
+            for read operations (``find_active_by_account_id``).
+        account_id: the account/portfolio to scope the query to; only
+            records with ``portfolio_id == account_id`` are considered.
+
+    Returns:
+        A ``RemovedTransactionOp`` for every active stored transaction whose
+        ``broker_transaction_id`` is absent from ``current_broker_transaction_ids``,
+        in the order returned by ``find_active_by_account_id``. Empty list
+        when all stored transactions are still present in the broker feed."""
+    with traced("find_transactions_to_remove"):
+        stored = repository.find_active_by_account_id(account_id)
+        ops: list[RemovedTransactionOp] = []
+        for current in stored:
+            broker_id = current.transaction.broker_transaction_id
+            if broker_id is not None and broker_id not in current_broker_transaction_ids:
+                ops.append(RemovedTransactionOp(current_transaction=current))
+        return ops
 
 
 class StubHoldingRepository:
@@ -1528,7 +1632,56 @@ class _FakeTransactionRepository:
     def find_active_by_account_id(
         self, account_id: str
     ) -> list[CurrentTransaction]:
-        return [ct for ct in self._store.values() if ct.is_active]
+        return [
+            ct for ct in self._store.values()
+            if ct.is_active and ct.transaction.portfolio_id == account_id
+        ]
+
+
+class _FakeHoldingRepository:
+    """In-memory test double for ``HoldingRepository`` that stores records
+    in a dict keyed by ``broker_holding_id``, supporting removed-record
+    detection (STORY-SYNC-05) via optional constructor injection.
+
+    Usage::
+
+        repo = _FakeHoldingRepository({
+            "INE002A01018": CurrentHolding(
+                id="db-001",
+                is_active=True,
+                holding=Holding(
+                    portfolio_id="portfolio-001",
+                    security_id="RELIANCE",
+                    quantity=Decimal("10"),
+                    broker_holding_id="INE002A01018",
+                ),
+            ),
+        })
+        ops = find_holdings_to_remove(
+            current_broker_holding_ids={"INE002A01018"},
+            repository=repo,
+            account_id="portfolio-001",
+        )
+    """
+
+    def __init__(
+        self,
+        initial: dict[str, CurrentHolding] | None = None,
+    ) -> None:
+        self._store: dict[str, CurrentHolding] = dict(initial) if initial else {}
+
+    def find_by_broker_holding_id(
+        self, broker_holding_id: str
+    ) -> CurrentHolding | None:
+        return self._store.get(broker_holding_id)
+
+    def find_active_by_account_id(
+        self, account_id: str
+    ) -> list[CurrentHolding]:
+        return [
+            ch for ch in self._store.values()
+            if ch.is_active and ch.holding.portfolio_id == account_id
+        ]
 
 
 class UserPortfolio(Protocol):
