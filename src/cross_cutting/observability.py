@@ -25,6 +25,7 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -74,6 +75,35 @@ class AuditManager(Protocol):
         ...
 
 
+class AuditReader(Protocol):
+    """Protocol for reading audit events, intended for operators and
+    investigative tools rather than routine component logic.
+
+    Obtain an instance via ``infrastructure.get_audit_reader()`` where
+    ``infrastructure`` is the dependency-injected Infrastructure instance
+    passed to components via constructor injection (the same pattern
+    used for ``AuditManager`` and other infrastructure services).
+
+    Example usage::
+
+        infrastructure = self._infrastructure  # injected via constructor
+        reader = infrastructure.get_audit_reader()
+        events = reader.query(event_type="quarantine", limit=50)
+    """
+
+    def query(
+        self,
+        event_type: str | None = None,
+        actor: dict | None = None,
+        component: str | None = None,
+        resource_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]: ...
+
+
 class StubAuditManager:
     """Structural implementation of AuditManager. Every method is a
     traced no-op — see cross_cutting/observability.py."""
@@ -81,6 +111,15 @@ class StubAuditManager:
     def record(self, event_type: str, detail: dict) -> None:
         with traced(f"StubAuditManager.record[{event_type}]"):
             return None
+
+
+class StubAuditReader:
+    """Structural implementation of AuditReader. Every method is a
+    traced no-op — see cross_cutting/observability.py."""
+
+    def query(self, **kwargs) -> list[dict]:
+        with traced("StubAuditReader.query"):
+            return []
 
 
 class DefaultAuditManager:
