@@ -1,0 +1,74 @@
+name: c01 Public-API Snapshot
+
+# STORY-16: enforce that the c01_user_portfolio.py refactor never
+# silently changes the component's public surface.
+#
+# Two jobs:
+#   public-api  — run the snapshot check against the current branch
+#   test-file   — assert the c01 test file is byte-identical to main
+#                 (no silent edits)
+
+on:
+  push:
+    branches: [main, "**"]
+    paths:
+      - "src/components/c01_user_portfolio.py"
+      - "scripts/check_public_api.py"
+      - "tests/components/test_user_portfolio.py"
+      - "tests/snapshots/c01_public_api.json"
+      - ".github/workflows/c01_public_api.yml"
+  pull_request:
+    paths:
+      - "src/components/c01_user_portfolio.py"
+      - "scripts/check_public_api.py"
+      - "tests/components/test_user_portfolio.py"
+      - "tests/snapshots/c01_public_api.json"
+      - ".github/workflows/c01_public_api.yml"
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: public-API snapshot guard
+  # ------------------------------------------------------------------
+  public-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Run public-API check
+        run: python scripts/check_public_api.py
+
+  # ------------------------------------------------------------------
+  # Job 2: test-file byte-identity guard
+  # ------------------------------------------------------------------
+  test-file:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need main for the comparison
+
+      - name: Assert test file unchanged from main
+        run: |
+          set -e
+          # Guard: "main" may not exist in all repo layouts (e.g. newly-created
+          # workspaces without an initial commit).  git rev-parse exits non-zero
+          # when the ref is unknown.  Skip the check gracefully in that case.
+          if git rev-parse --verify --quiet main > /dev/null 2>&1; then
+            if git diff --exit-code main -- tests/components/test_user_portfolio.py; then
+              echo "✓ tests/components/test_user_portfolio.py is byte-identical to main"
+            else
+              echo "ERROR: tests/components/test_user_portfolio.py has changed relative to main"
+              echo "The c01 refactor may not alter the existing test file; revert and re-run."
+              git diff main -- tests/components/test_user_portfolio.py || true
+              exit 1
+            fi
+          else
+            echo "SKIP: 'main' branch not found in this repo — test-file guard not applicable"
+          fi
