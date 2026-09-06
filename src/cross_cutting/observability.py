@@ -133,7 +133,20 @@ class DefaultAuditManager(AuditManager):
 
 
 class DefaultAuditReader(AuditReader):
-    """Real implementation of AuditReader: reads from AUDIT_LOG_PATH.
+    """Production implementation of AuditReader: reads from AUDIT_LOG_PATH.
+
+    This is the real implementation operators should use for investigative
+    queries and ad-hoc analysis. Routine component logic should use the
+    AuditManager interface to emit events instead.
+
+    To obtain an instance, call infrastructure.get_audit_reader() where
+    ``infrastructure`` is the Infrastructure object available via the existing
+    dependency-injection pattern (e.g., passed into your function/class
+    constructor, retrieved from the application container).
+
+    Minimal usage example::
+
+        reader = infrastructure.get_audit_reader(); events = reader.query(component="x")
 
     Enforces AUDIT_MAX_QUERY_LIMIT as a hard ceiling on the number of
     rows returned per call, and uses AUDIT_DEFAULT_LIMIT when no explicit
