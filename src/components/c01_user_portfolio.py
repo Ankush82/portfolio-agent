@@ -91,6 +91,19 @@ def unregister_broker_connector(broker_id: str) -> None:
     _broker_connector_registry.pop(broker_id, None)
 
 
+def list_available_brokers() -> list[dict]:
+    """Return display metadata for every registered BrokerConnector.
+
+    Each dict contains the fields required by STORY-20's settings/brokers
+    UI: ``broker_id`` and ``display_name``. The registry is the single
+    source of truth; nothing is hard-coded here.
+    """
+    return [
+        {"broker_id": connector.broker_id, "display_name": connector.display_name}
+        for connector in _broker_connector_registry.values()
+    ]
+
+
 # Exception hierarchy for BrokerConnector (ADR-0022)
 class BrokerError(Exception):
     """Base exception for all broker-related errors."""

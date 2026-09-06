@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}Broker Connections - Portfolio Agent{% endblock %}
+
+{% block content %}
+<div class="card bg-base-100 shadow-md">
+  <div class="card-body">
+    <h2 class="card-title text-2xl mb-2">Broker Connections</h2>
+    <p class="text-sm text-base-content/70 mb-6">
+      Connect your brokerage accounts to import holdings and transactions automatically.
+    </p>
+
+    <div id="broker-list" class="space-y-4">
+      {% for broker in available_brokers %}
+      <div class="border border-base-300 rounded-lg p-4" data-broker-id="{{ broker.broker_id }}">
+        <div class="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <span class="font-semibold text-lg">{{ broker.display_name }}</span>
+            <span class="text-xs text-base-content/50 ml-2">{{ broker.broker_id }}</span>
+          </div>
+          <div class="flex flex-col items-end gap-1">
+            <button
+              class="btn btn-primary broker-connect-btn"
+              data-broker-id="{{ broker.broker_id }}"
+              data-display-name="{{ broker.display_name }}"
+            >
+              Connect {{ broker.display_name }}
+            </button>
+            <span
+              class="broker-not-configured-msg text-sm text-error hidden"
+              role="alert"
+            ></span>
+          </div>
+        </div>
+
+        <!-- Inline error + retry for non-503 errors -->
+        <div
+          class="broker-error-msg alert alert-error mt-3 hidden"
+          role="alert"
+        >
+          <span class="broker-error-text"></span>
+          <button
+            class="btn btn-sm broker-retry-btn"
+            data-broker-id="{{ broker.broker_id }}"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+
+  // ---------- helpers ----------
+
+  function getButton(brokerId) {
+    return document.querySelector(
+      '.broker-connect-btn[data-broker-id="' + brokerId + '"]'
+    );
+  }
+
+  function getNotConfiguredMsg(brokerId) {
+    return document.querySelector(
+      '.broker-not-configured-msg[data-broker-id="' + brokerId + '"]'
+    ) || document.querySelector(
+      '.broker-not-configured-msg[data-broker-id="' + brokerId + '"]'
+    );
+  }
+
+  function getErrorBlock(brokerId) {
+    return document.querySelector(
+      '.broker-error-msg[data-broker-id="' + brokerId + '"]'
+    ) || document.querySelector(
+      '.broker-error-msg[data-broker-id="' + brokerId + '"]'
+    );
+  }
+
+  /** Returns the first not-configured-msg or error-msg sibling for a broker div */
+  function getBrokerContainer(brokerId) {
+    return document.querySelector('[data-broker-id="' + brokerId + '"]');
+  }
+
+  function setLoading(brokerId, loading) {
+    var btn = getButton(brokerId);
+    if (!btn) return;
+    if (loading) {
+      btn.disabled = true;
+      btn.classList.add('loading');
+      var label = btn.getAttribute('data-display-name');
+      btn.textContent = 'Connecting ' + label + '…';
+    } else {
+      var label = btn.getAttribute('data-display-name');
+      btn.disabled = false;
+      btn.classList.remove('loading');
+      btn.textContent = 'Connect ' + label;
+    }
+  }
+
+  function showNotConfigured(brokerId, message) {
+    // Walk up to the broker container div
+    var container = getBrokerContainer(brokerId);
+    if (!container) return;
+    var msgEl = container.querySelector('.broker-not-configured-msg');
+    if (msgEl) {
+      msgEl.textContent = message;
+      msgEl.classList.remove('hidden');
+    }
+    var btn = getButton(brokerId);
+    if (btn) btn.disabled = true;
+  }
+
+  function showError(brokerId, message) {
+    var container = getBrokerContainer(brokerId);
+    if (!container) return;
+    var errorBlock = container.querySelector('.broker-error-msg');
+    if (errorBlock) {
+      var textEl = errorBlock.querySelector('.broker-error-text');
+      if (textEl) textEl.textContent = message;
+      errorBlock.classList.remove('hidden');
+    }
+  }
+
+  function hideError(brokerId) {
+    var container = getBrokerContainer(brokerId);
+    if (!container) return;
+    var errorBlock = container.querySelector('.broker-error-msg');
+    if (errorBlock) errorBlock.classList.add('hidden');
+    var notConfiguredMsg = container.querySelector('.broker-not-configured-msg');
+    if (notConfiguredMsg) notConfiguredMsg.classList.add('hidden');
+  }
+
+  // ---------- connect action ----------
+
+  function connectBroker(brokerId) {
+    hideError(brokerId);
+    setLoading(brokerId, true);
+
+    var endpoint = '/api/brokers/' + brokerId + '/connect';
+
+    fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          return { ok: res.ok, status: res.status, body: body };
+        });
+      })
+      .then(function (result) {
+        setLoading(brokerId, false);
+
+        if (result.status === 503 && result.body.error === 'broker_not_configured') {
+          // Render disabled button + explanatory env-var message
+          showNotConfigured(
+            brokerId,
+            'Upstox integration is not configured on this server — the administrator must set UPSTOX_CLIENT_ID / UPSTOX_CLIENT_SECRET / UPSTOX_REDIRECT_URI'
+          );
+          return;
+        }
+
+        if (!result.ok) {
+          showError(
+            brokerId,
+            result.body.error || ('Request failed (' + result.status + ')')
+          );
+          return;
+        }
+
+        // Success: full-page navigate to authorize_url
+        window.location.href = result.body.authorize_url;
+      })
+      .catch(function (err) {
+        setLoading(brokerId, false);
+        showError(brokerId, 'Network error — please try again.');
+      });
+  }
+
+  // ---------- event listeners ----------
+
+  document.querySelectorAll('.broker-connect-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var brokerId = btn.getAttribute('data-broker-id');
+      connectBroker(brokerId);
+    });
+  });
+
+  document.querySelectorAll('.broker-retry-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var brokerId = btn.getAttribute('data-broker-id');
+      connectBroker(brokerId);
+    });
+  });
+})();
+</script>
+{% endblock %}
