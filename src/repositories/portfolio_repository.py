@@ -118,6 +118,21 @@ class PortfolioRepository(BaseRepository):
         portfolios.sort(key=lambda p: p.id)
         return portfolios
 
+    def get_broker_connection(self, portfolio_id: str) -> dict | None:
+        """Read the raw broker_connection dict stored on a portfolio.
+
+        Returns the ``broker_connection`` sub-dict stored at
+        ``connect_portfolio`` time, or ``None`` when the portfolio
+        has no stored ``broker_connection`` (no broker connected).
+        The caller is responsible for stripping the provenance key
+        (``_provenance``) from the returned dict before using it as
+        ``BrokerCredentials``.
+        """
+        row = self._infrastructure.retrieve(self._table, portfolio_id)
+        if row is None:
+            return None
+        return row.get("broker_connection")
+
     # ---- Row mapping -----------------------------------------------------
 
     def _to_row(self, portfolio: Portfolio) -> dict[str, Any]:

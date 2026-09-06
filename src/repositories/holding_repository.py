@@ -132,6 +132,18 @@ class HoldingRepository(BaseRepository):
             "symbol_suffix": holding.symbol_suffix,
         }
 
+    def list_for_portfolio(self, portfolio_id: str) -> list[Holding]:
+        """List all holdings belonging to a portfolio.
+
+        Returns a list (never None) sorted deterministically by
+        security_id when the Protocol's query offers no ordering.
+        """
+        rows = self._infrastructure.query(self._table, {"portfolio_id": portfolio_id})
+        holdings = [self._from_row(row) for row in rows]
+        # Sort by security_id for deterministic ordering (Protocol query has no ordering)
+        holdings.sort(key=lambda h: h.security_id)
+        return holdings
+
     def _from_row(self, row: Mapping[str, Any]) -> Holding:
         """Build a :class:`Holding` from a stored row, ignoring unknown
         keys (so DB-managed ``created_at`` / ``updated_at`` never

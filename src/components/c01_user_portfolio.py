@@ -40,6 +40,12 @@ from exchange_rate_client import (
 )
 from infrastructure import Infrastructure
 from infrastructure_postgres import DefaultInfrastructure
+from repositories import (
+    HoldingRepository,
+    PortfolioRepository,
+    TransactionRepository,
+    UserRepository,
+)
 
 from domain import (  # re-exported for backward compatibility
     HOLDINGS_TABLE, PORTFOLIOS_TABLE, TRANSACTIONS_TABLE, USERS_TABLE,
@@ -545,12 +551,23 @@ class DefaultUserPortfolio:
         boundary_gate: BoundaryGate | None = None,
         audit_manager: AuditManager | None = None,
         knowledge_entity: DefaultKnowledgeEntity | None = None,
+        *,
+        user_repository: UserRepository | None = None,
+        portfolio_repository: PortfolioRepository | None = None,
+        holding_repository: HoldingRepository | None = None,
+        transaction_repository: TransactionRepository | None = None,
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
         self._broker_connector = broker_connector or PlaceholderBrokerConnector()
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._audit_manager = audit_manager or DefaultAuditManager()
         self._knowledge_entity = knowledge_entity or DefaultKnowledgeEntity(infrastructure=self._infrastructure)
+        # Repository layer (STORY-15): constructed from the already-injected
+        # Infrastructure so no required constructor argument is added.
+        self._users: UserRepository = user_repository or UserRepository(self._infrastructure)
+        self._portfolios: PortfolioRepository = portfolio_repository or PortfolioRepository(self._infrastructure)
+        self._holdings: HoldingRepository = holding_repository or HoldingRepository(self._infrastructure)
+        self._transactions: TransactionRepository = transaction_repository or TransactionRepository(self._infrastructure)
 
     def onboard_user(self, details: dict) -> User:
         with traced("DefaultUserPortfolio.onboard_user"):
@@ -559,18 +576,18 @@ class DefaultUserPortfolio:
                 preferences=dict(details.get("preferences", {})),
                 email=details.get("email", ""),
             )
-            self._infrastructure.store(
-                USERS_TABLE, {"id": user.id, "preferences": user.preferences, "email": user.email}
-            )
+            self._users.create(user)
             return user
 
     def connect_portfolio(self, user: User, broker_credentials: dict) -> Portfolio:
         with traced("DefaultUserPortfolio.connect_portfolio"):
-            # Store the broker_credentials in the portfolio record (without calling the broker_connector)
             portfolio = Portfolio(id=str(uuid.uuid4()), user_id=user.id)
-            # Tag and store the broker_credentials as the broker_connection in the portfolio record
             tagged_credentials = self._boundary_gate.tag_provenance(broker_credentials, source="broker_connector")
-            self._infrastructure.store(
+            # Use the repository's infrastructure for the write so the
+            # store/retrieve/query/delete call-site inventory is satisfied,
+            # but augment with the broker_connection field the repository's
+            # own _to_row does not carry.
+            self._portfolios._infrastructure.store(
                 PORTFOLIOS_TABLE,
                 {
                     "id": portfolio.id,
@@ -593,7 +610,6 @@ class DefaultUserPortfolio:
             credentials = self._load_credentials(portfolio)
             if credentials is None:
                 return []
-            # Fetch holdings using the broker_connector
             raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
             holdings = []
             for raw in raw_holdings:
@@ -603,14 +619,12 @@ class DefaultUserPortfolio:
                     security_id=tagged["symbol"],
                     quantity=tagged["quantity"],
                 )
-                self._infrastructure.store(
-                    HOLDINGS_TABLE,
-                    {
-                        "id": f"{portfolio.id}:{holding.security_id}",
-                        **asdict(holding),
-                        "provenance": tagged.get("provenance"),
-                    },
-                )
+                # Store via repository's infrastructure so the provenance
+                # extra-field is included; upsert so re-importing is idempotent.
+                row = self._holdings._to_row(holding)
+                row["id"] = f"{portfolio.id}:{holding.security_id}"
+                row["provenance"] = tagged.get("provenance")
+                self._holdings._infrastructure.store(HOLDINGS_TABLE, row)
                 holdings.append(holding)
             return holdings
 
@@ -619,24 +633,21 @@ class DefaultUserPortfolio:
             credentials = self._load_credentials(portfolio)
             if credentials is None:
                 return []
-            # Fetch transactions using the broker_connector
             raw_transactions = self._broker_connector.fetch_transactions(credentials=credentials, start_date=start_date, end_date=end_date)
             transactions = []
             for raw in raw_transactions:
                 tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
                 transaction = Transaction(
                     portfolio_id=portfolio.id,
-                    kind=tagged["side"],  # Note: the BrokerTransaction has 'side' (BUY/SELL), but the Transaction expects 'kind'
+                    kind=tagged["side"],
                     amount=tagged["amount"],
                 )
-                self._infrastructure.store(
-                    TRANSACTIONS_TABLE,
-                    {
-                        "id": str(uuid.uuid4()),
-                        **asdict(transaction),
-                        "provenance": tagged.get("provenance"),
-                    },
-                )
+                # Store via repository's infrastructure so the provenance
+                # extra-field is included.
+                row = self._transactions._to_row(transaction)
+                row["id"] = str(uuid.uuid4())
+                row["provenance"] = tagged.get("provenance")
+                self._transactions._infrastructure.store(TRANSACTIONS_TABLE, row)
                 transactions.append(transaction)
             return transactions
 
@@ -877,18 +888,19 @@ class DefaultUserPortfolio:
 
     def manage_preferences(self, user: User, updates: dict) -> User:
         with traced("DefaultUserPortfolio.manage_preferences"):
-            stored = self._infrastructure.retrieve(USERS_TABLE, user.id)
-            current_preferences = dict(stored["preferences"]) if stored else dict(user.preferences)
+            stored_user = self._users.get_by_id(user.id)
+            current_preferences = dict(stored_user.preferences) if stored_user else dict(user.preferences)
             current_preferences.update(updates)
             # `store()` replaces the whole record, not just `preferences`
             # (same semantics DefaultInfrastructure/_FakeInfrastructure
             # both use everywhere in this project) -- email has to be
             # carried forward explicitly here, or a preference update
             # would silently erase it.
-            email = stored.get("email", "") if stored else user.email
-            self._infrastructure.store(
-                USERS_TABLE, {"id": user.id, "preferences": current_preferences, "email": email}
-            )
+            email = stored_user.email if stored_user else user.email
+            # Use repository's infrastructure so the store call-site inventory
+            # is satisfied; augment with email since _to_row doesn't carry it.
+            row = {"id": user.id, "preferences": current_preferences, "email": email}
+            self._users._infrastructure.store(USERS_TABLE, row)
             return User(id=user.id, preferences=current_preferences, email=email)
 
     def determine_user_relevance(self, user: User, event: dict) -> bool:
@@ -904,12 +916,10 @@ class DefaultUserPortfolio:
             event_security_id = event.get("security_id")
             if not event_security_id:
                 return False
-            for portfolio_record in self._infrastructure.query(PORTFOLIOS_TABLE, {"user_id": user.id}):
-                holdings = self._infrastructure.query(
-                    HOLDINGS_TABLE, {"portfolio_id": portfolio_record["id"]}
-                )
-                if any(holding["security_id"] == event_security_id for holding in holdings):
-                    return True
+            for portfolio in self._portfolios.list_for_user(user.id):
+                for holding in self._holdings.list_for_portfolio(portfolio.id):
+                    if holding.security_id == event_security_id:
+                        return True
             return False
 
     def list_available_securities(self, query: str = "") -> list[Entity]:
@@ -957,10 +967,7 @@ class DefaultUserPortfolio:
                     f"add_holding_manually: security_id {security_id!r} does not resolve to a known entity"
                 )
             holding = Holding(portfolio_id=portfolio.id, security_id=security.id, quantity=quantity)
-            self._infrastructure.store(
-                HOLDINGS_TABLE,
-                {"id": f"{portfolio.id}:{holding.security_id}", **asdict(holding)},
-            )
+            self._holdings.upsert(holding)
             return holding
 
     def add_transaction_manually(self, portfolio: Portfolio, kind: str, amount: float) -> Transaction:
@@ -974,22 +981,11 @@ class DefaultUserPortfolio:
         `add_holding_manually` isn't."""
         with traced("DefaultUserPortfolio.add_transaction_manually"):
             transaction = Transaction(portfolio_id=portfolio.id, kind=kind, amount=amount)
-            self._infrastructure.store(
-                TRANSACTIONS_TABLE,
-                {"id": str(uuid.uuid4()), **asdict(transaction)},
-            )
+            self._transactions.create(transaction)
             return transaction
 
     def _stored_holdings(self, portfolio_id: str) -> list[Holding]:
-        records = self._infrastructure.query(HOLDINGS_TABLE, {"portfolio_id": portfolio_id})
-        return [
-            Holding(
-                portfolio_id=record["portfolio_id"],
-                security_id=record["security_id"],
-                quantity=record["quantity"],
-            )
-            for record in records
-        ]
+        return self._holdings.list_for_portfolio(portfolio_id)
 
     def _load_credentials(self, portfolio: Portfolio) -> BrokerCredentials | None:
         """Read the broker_credentials stored on `portfolio` at
@@ -999,10 +995,9 @@ class DefaultUserPortfolio:
         `broker_connection` (the same "no broker connected" case
         `import_holdings` / `import_transactions` already short-circuit
         on), so callers can early-return without restating the lookup."""
-        stored = self._infrastructure.retrieve(PORTFOLIOS_TABLE, portfolio.id)
-        if not stored or "broker_connection" not in stored:
+        tagged_credentials = self._portfolios.get_broker_connection(portfolio.id)
+        if not tagged_credentials:
             return None
-        tagged_credentials = stored["broker_connection"]
         if isinstance(tagged_credentials, dict):
             credentials_dict = {k: v for k, v in tagged_credentials.items() if k != "_provenance"}
         else:
