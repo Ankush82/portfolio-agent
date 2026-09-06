@@ -17,5 +17,6 @@ no module-level caches, no connection handling, no use of
 """
 
 from repositories.user_repository import UserRepository
+from repositories.portfolio_repository import PortfolioRepository
 
-__all__ = ["UserRepository"]
+__all__ = ["UserRepository", "PortfolioRepository"]

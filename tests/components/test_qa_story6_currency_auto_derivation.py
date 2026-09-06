@@ -33,10 +33,8 @@ from decimal import Decimal
 
 import pytest
 
-from components.c01_user_portfolio import (
-    Holding,
-    _coerce_quantity_to_decimal,
-)
+from components.c01_user_portfolio import Holding
+from domain import _coerce_quantity_to_decimal
 
 
 # ---------- AC1: NSE/BSE exchange -> currency='INR' auto-assigned ----------
