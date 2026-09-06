@@ -30,10 +30,18 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
 from components.c01_user_portfolio import (
+    BrokerAuthError,
     BrokerConfigError,
+    DefaultUserPortfolio,
     get_broker_connector,
 )
-from oauth_state import issue_state
+from oauth_state import (
+    InvalidOAuthStateError,
+    OAuthStateExpiredError,
+    OAuthStateReplayError,
+    consume_state,
+    issue_state,
+)
 from exchange_rate_client import (
     ExchangeRateFetchError,
     MissingExchangeRateAPIKeyError,
@@ -604,6 +612,94 @@ def create_app() -> Flask:
             }), 503
 
         return jsonify({"authorize_url": authorize_url, "state": state}), 200
+
+    # -------------------------------------------------------------------------
+    # STORY-17: Upstox OAuth callback — code exchange + persist + redirect
+    # -------------------------------------------------------------------------
+
+    @app.get("/api/brokers/upstox/callback")
+    def api_brokers_upstox_callback():
+        """GET /api/brokers/upstox/callback — Upstox OAuth redirect URI.
+
+        No session cookie is required; identity comes solely from the
+        single-use ``state`` parameter. ``user_id`` in the query string
+        is IGNORED (never trusted). On success the user is redirected
+        (302) to the frontend's settings page with a success marker. On
+        failure a failure marker and a machine-readable ``reason`` slug are
+        included in the redirect query string.
+
+        All error paths log the failure reason server-side with the state
+        value redacted so sensitive data never appears in logs.
+        """
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+
+        _FRONTEND_SUCCESS = "/settings/brokers?connect=success&broker=upstox"
+        _FRONTEND_ERROR_BASE = "/settings/brokers?connect=error&broker=upstox"
+
+        def _error_redirect(slug: str) -> tuple:
+            _logger.warning(
+                "[UPSTOX_CALLBACK_ERROR] redirect reason=%s",
+                slug,
+                extra={"callback_reason": slug},
+            )
+            return redirect(f"{_FRONTEND_ERROR_BASE}&reason={slug}", code=302)
+
+        # ── 1. Parse query params ─────────────────────────────────────────────
+        state = request.args.get("state", "")
+        code = request.args.get("code")
+
+        # Upstox may include an `error` param instead of `code` when the
+        # user denies the request or Upstox returns an OAuth error.
+        upstox_error = request.args.get("error")
+
+        # Ignore any user_id in the query string — identity comes from state.
+        _ = request.args.get("user_id")
+
+        # ── 2. Consume single-use state ──────────────────────────────────────
+        if not state:
+            return _error_redirect("invalid_state")
+
+        try:
+            user_id, broker_id = consume_state(state)
+        except InvalidOAuthStateError:
+            return _error_redirect("invalid_state")
+        except OAuthStateExpiredError:
+            return _error_redirect("state_expired")
+        except OAuthStateReplayError:
+            return _error_redirect("state_replayed")
+
+        # ── 3. Validate code presence / detect Upstox denial ─────────────────
+        if upstox_error:
+            # Upstox explicitly returned an error (e.g. user denied access).
+            return _error_redirect("access_denied")
+
+        if not code:
+            return _error_redirect("missing_code")
+
+        # ── 4. Exchange code for credentials via connector ─────────────────────
+        try:
+            portfolio = DefaultUserPortfolio()
+            portfolio.connect_portfolio(
+                user_id=user_id,
+                broker_id=broker_id,
+                payload={"code": code},
+            )
+        except BrokerAuthError:
+            return _error_redirect("token_exchange_failed")
+        except BrokerConfigError:
+            return _error_redirect("broker_not_configured")
+        except Exception:
+            _logger.exception("[UPSTOX_CALLBACK_ERROR] unexpected error during connect")
+            return _error_redirect("unexpected")
+
+        # ── 5. Success ────────────────────────────────────────────────────────
+        _logger.info(
+            "[UPSTOX_CALLBACK_SUCCESS] user_id=%s broker_id=%s",
+            user_id,
+            broker_id,
+        )
+        return redirect(_FRONTEND_SUCCESS, code=302)
 
     return app
 
