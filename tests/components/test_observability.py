@@ -46,3 +46,59 @@ def test_normalize_audit_event_empty_detail():
     assert result['component'] == 'module'
     assert result['resource'] is None
     assert result['metadata'] == {}
+
+
+import pytest
+from src.cross_cutting.observability import AuditWriteError, DefaultAuditManager
+from infrastructure_postgres import DefaultInfrastructure
+
+
+def test_default_audit_manager_records_to_postgres():
+    infrastructure = DefaultInfrastructure()
+    audit_manager = DefaultAuditManager(infrastructure)
+
+    event_type = 'test_event_for_story4'
+    detail = {'user': 'alice', 'test_id': 'some_unique_id'}
+
+    audit_manager.record(event_type, detail)
+
+    with infrastructure._connection().cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT event_type, timestamp, actor, component, resource, action, outcome, metadata, raw_detail
+            FROM audit_events
+            WHERE event_type = %s
+            """,
+            (event_type,)
+        )
+        rows = cursor.fetchall()
+        assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+        row = rows[0]
+
+        assert row[0] == event_type
+        assert row[1] is not None
+        assert row[2] == {'user': 'alice'}
+        assert isinstance(row[3], str)
+        assert len(row[3]) > 0
+        assert row[4] is None
+        assert row[5] == event_type
+        assert row[6] == 'success'
+        assert row[7] == {'test_id': 'some_unique_id'}
+        assert row[8] == {'user': 'alice', 'test_id': 'some_unique_id'}
+
+    # Clean up
+    with infrastructure._connection().cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM audit_events WHERE event_type = %s",
+            (event_type,)
+        )
+
+
+def test_default_audit_manager_raises_on_db_unavailable():
+    infrastructure_bad = DefaultInfrastructure(
+        postgres_dsn="postgresql://wrong:wrong@localhost:5432/wrong"
+    )
+    audit_manager_bad = DefaultAuditManager(infrastructure_bad)
+
+    with pytest.raises(AuditWriteError):
+        audit_manager_bad.record('test', {})
