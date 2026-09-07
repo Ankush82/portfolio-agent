@@ -135,6 +135,11 @@ class UnsupportedBrokerError(BrokerError):
     pass
 
 
+class BrokerNotConnectedError(BrokerError):
+    """Raised when no stored broker connection exists for (user_id, broker_id) (STORY-14)."""
+    pass
+
+
 # Data Transfer Objects (DTOs) for BrokerConnector (ADR-0022)
 @dataclass(frozen=True)
 class BrokerCredentials:
@@ -181,6 +186,17 @@ class ImportResult:
     transactions_inserted: int
     transactions_skipped_existing: int
     rows_skipped_invalid: int = 0
+
+
+@dataclass(frozen=True)
+class HoldingsImportResult:
+    """Result of an import_holdings call (STORY-14). Named distinctly
+    from ImportResult (STORY-15's transactions result) since the two
+    carry different fields -- holdings are a replace-in-transaction
+    snapshot, not an idempotent upsert, so there's no "skipped existing"
+    concept, only rows the connector returned that failed validation."""
+    holdings_written: int
+    skipped: int = 0
 
 
 # BrokerConnector Protocol (ADR-0022)
@@ -1266,7 +1282,7 @@ class UserPortfolio(Protocol):
     ) -> BrokerConnectionRecord:
         ...
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
         ...
 
     def import_transactions(
@@ -1329,9 +1345,9 @@ class StubUserPortfolio:
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
         with traced("StubUserPortfolio.import_holdings"):
-            return []
+            return HoldingsImportResult(holdings_written=0, skipped=0)
 
     def import_transactions(
         self,
@@ -1491,31 +1507,105 @@ class DefaultUserPortfolio:
             )
             return record
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
+        """Import broker holdings for ``user_id`` / ``broker_id`` (STORY-14).
+
+        **Snapshot semantics**: holdings are a point-in-time snapshot, not
+        an append/upsert log like transactions -- each real import
+        replaces the ENTIRE stored set for (user_id, broker_id) inside a
+        single transaction (delete existing rows, insert the freshly
+        fetched set). A row-by-row upsert would leave sold-out positions
+        behind with no signal they were ever sold; replace makes a
+        holding's disappearance from the broker mean its disappearance
+        from our table too.
+
+        **Error handling**:
+          * No stored connection for (user_id, broker_id) raises
+            ``BrokerNotConnectedError`` before any connector call.
+          * ``BrokerAuthError`` marks the connection status ERROR with a
+            reconnect-oriented message (generated generically from the
+            connector's ``display_name``, no broker-specific text) and
+            re-raises.
+          * A connector exception happens before any write -- the
+            pre-existing holdings rows are always left untouched.
+          * ``last_import_at`` is updated on the connection row only on
+            success.
+
+        Zero holdings is a valid result (the existing set is still
+        replaced -- with nothing -- and ``holdings_written`` is 0), not
+        an error.
+        """
         with traced("DefaultUserPortfolio.import_holdings"):
-            credentials = self._load_credentials(portfolio)
-            if credentials is None:
-                return []
-            # Fetch holdings using the broker_connector
-            raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
-            holdings = []
+            connection = self._infrastructure.get_broker_connection(user_id, broker_id)
+            if connection is None:
+                raise BrokerNotConnectedError(
+                    f"no broker connection stored for user_id={user_id} broker_id={broker_id}"
+                )
+
+            try:
+                credentials = BrokerCredentials(
+                    access_token=connection.access_token,
+                    token_type=connection.token_type,
+                    expires_at=connection.access_token_expires_at,
+                    refresh_token=None,
+                    broker_user_id=connection.broker_user_id,
+                    raw={},
+                )
+            except BrokerConfigError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "access token could not be decrypted for import_holdings"
+                )
+                raise BrokerAuthError(
+                    f"access token for user_id={user_id} broker_id={broker_id} "
+                    f"could not be decrypted"
+                )
+
+            try:
+                raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
+            except BrokerAuthError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    f"{self._broker_connector.display_name} access expired, please reconnect"
+                )
+                raise
+            except BrokerApiError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerApiError during import_holdings"
+                )
+                raise
+
+            rows = []
+            skipped = 0
             for raw in raw_holdings:
-                tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                holding = Holding(
-                    portfolio_id=portfolio.id,
-                    security_id=tagged["symbol"],
-                    quantity=tagged["quantity"],
-                )
-                self._infrastructure.store(
-                    HOLDINGS_TABLE,
-                    {
-                        "id": f"{portfolio.id}:{holding.security_id}",
-                        **asdict(holding),
-                        "provenance": tagged.get("provenance"),
-                    },
-                )
-                holdings.append(holding)
-            return holdings
+                try:
+                    tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
+                    _validate_holding_row(tagged)
+                except Exception:
+                    skipped += 1
+                    continue
+                rows.append({
+                    "symbol": tagged["symbol"],
+                    "isin": tagged["isin"],
+                    "quantity": tagged.get("quantity"),
+                    "average_price": tagged.get("average_price"),
+                    "last_price": tagged.get("last_price"),
+                    "exchange": tagged.get("exchange"),
+                    "instrument_id": tagged.get("instrument_id"),
+                    "raw": tagged.get("raw", {}),
+                })
+
+            # Real, atomic replace: existing rows for (user_id, broker_id)
+            # are deleted and the freshly fetched set inserted inside one
+            # transaction (adr/0019's real Postgres, not a best-effort
+            # loop) -- a mid-write failure here leaves the PRE-existing
+            # rows exactly as they were, never a half-updated mix.
+            self._infrastructure.replace_broker_holdings(user_id, broker_id, rows)
+
+            self._infrastructure.touch_last_import(user_id, broker_id)
+
+            return HoldingsImportResult(holdings_written=len(rows), skipped=skipped)
 
     def import_transactions(
         self,
@@ -1706,6 +1796,19 @@ def _validate_transaction_row(row: dict) -> None:
         value = row.get(field)
         if value is None or (isinstance(value, str) and not value.strip()):
             raise ValueError(f"import_transactions: missing or empty required field {field!r}")
+
+
+def _validate_holding_row(row: dict) -> None:
+    """Raise ValueError if a holding row dict is missing its required
+    identity fields (STORY-14). Only symbol/isin are required -- unlike
+    transactions, quantity/average_price/last_price are legitimately
+    ``None`` on BrokerHolding, so requiring them here would reject real,
+    valid holdings."""
+    required = ("symbol", "isin")
+    for field in required:
+        value = row.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"import_holdings: missing or empty required field {field!r}")
 
 
 # Module-level logger for the import_transactions warning
