@@ -236,6 +236,33 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            # broker_holdings (STORY-14): one row per (user_id, broker_id,
+            # isin) -- the whole point-in-time snapshot for a connection,
+            # replaced atomically on every real import (see
+            # replace_broker_holdings below), never upserted row-by-row.
+            # Self-healing here (unlike broker_transactions' standalone-
+            # migration-only table) after a real, demonstrated fragility
+            # bug elsewhere in this file: a table that depends on someone
+            # having run a separate migration script silently breaks the
+            # first time anything drops/recreates it.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broker_holdings (
+                    user_id        TEXT NOT NULL,
+                    broker_id      TEXT NOT NULL,
+                    isin           TEXT NOT NULL,
+                    symbol         TEXT NOT NULL,
+                    quantity       NUMERIC,
+                    average_price  NUMERIC,
+                    last_price     NUMERIC,
+                    exchange       TEXT,
+                    instrument_id  TEXT,
+                    raw            JSONB NOT NULL DEFAULT '{}',
+                    imported_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (user_id, broker_id, isin)
+                )
+                """
+            )
 
     def _redis(self) -> redis.Redis:
         if self._redis_client is None:
@@ -668,3 +695,38 @@ class DefaultInfrastructure:
                         broker_id,
                     ),
                 )
+
+    def replace_broker_holdings(self, user_id: str, broker_id: str, holdings: list[dict]) -> None:
+        """Atomically replace the entire broker_holdings snapshot for
+        (user_id, broker_id) (STORY-14): delete every existing row for
+        this connection, then insert the freshly fetched set -- both
+        inside one real transaction, so a failure partway through
+        leaves the PRE-existing rows completely unchanged rather than a
+        half-deleted, half-inserted mix. `holdings` is a list of dicts
+        with keys symbol/isin/quantity/average_price/last_price/
+        exchange/instrument_id/raw (isin required -- it's part of this
+        table's primary key). An empty list is a valid, real "holdings
+        went to zero" snapshot, not a no-op."""
+        with traced("DefaultInfrastructure.replace_broker_holdings"):
+            with self._connection().transaction():
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM broker_holdings WHERE user_id = %s AND broker_id = %s",
+                        (user_id, broker_id),
+                    )
+                    for holding in holdings:
+                        cursor.execute(
+                            """
+                            INSERT INTO broker_holdings
+                                (user_id, broker_id, isin, symbol, quantity,
+                                 average_price, last_price, exchange, instrument_id, raw)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                user_id, broker_id,
+                                holding["isin"], holding["symbol"],
+                                holding.get("quantity"), holding.get("average_price"),
+                                holding.get("last_price"), holding.get("exchange"),
+                                holding.get("instrument_id"), Jsonb(holding.get("raw", {})),
+                            ),
+                        )
