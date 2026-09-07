@@ -223,6 +223,22 @@ def _calculate_totals(holdings: list[dict]) -> tuple[Decimal | None, Decimal | N
     return (inr_total if has_inr else None), (usd_total if has_usd else None)
 
 
+def _iso(value):
+    """Real ISO8601 string for a datetime value, or None through
+    unchanged. Real bug, found live on STORY-19's own QA test: Flask's
+    default JSON encoder serializes a bare `datetime` using HTTP-date
+    format ('Mon, 07 Sep 2026 08:43:24 GMT'), not ISO8601 -- every
+    broker-connection timestamp field (STORY-18's connected_at/
+    last_import_at, STORY-19's last_import_at) was silently shipping in
+    the wrong format despite every story explicitly specifying
+    iso8601."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 def _broker_is_configured(broker_id: str) -> bool:
     """Whether `broker_id`'s own real credentials are present in the
     environment (STORY-18). The BrokerConnector Protocol has no
@@ -631,8 +647,8 @@ def create_app() -> Flask:
                 "display_name": broker["display_name"],
                 "status": record.status,
                 "broker_user_id": record.broker_user_id,
-                "connected_at": record.connected_at,
-                "last_import_at": record.last_import_at,
+                "connected_at": _iso(record.connected_at),
+                "last_import_at": _iso(record.last_import_at),
                 "last_error": record.last_error,
             })
 
@@ -731,7 +747,7 @@ def create_app() -> Flask:
             "transactions_inserted": transactions_result.transactions_inserted,
             "transactions_skipped_existing": transactions_result.transactions_skipped_existing,
             "rows_skipped_invalid": transactions_result.rows_skipped_invalid,
-            "last_import_at": connection.last_import_at if connection else None,
+            "last_import_at": _iso(connection.last_import_at) if connection else None,
         })
 
     # -------------------------------------------------------------------------
