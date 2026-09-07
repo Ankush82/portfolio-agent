@@ -239,6 +239,37 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            # broker_transactions (STORY-15/19): matches
+            # scripts/migrate_broker_transactions.py exactly. Real,
+            # pre-existing gap found live on STORY-19 -- that standalone
+            # migration is the schema of record but was never
+            # self-healing here, so upsert_broker_transaction() silently
+            # no-ops (logs a warning, returns False) on any database that
+            # hasn't had it run by hand, making transactions_inserted
+            # always 0 regardless of what the connector actually
+            # returned.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broker_transactions (
+                    id              BIGSERIAL PRIMARY KEY,
+                    user_id         TEXT NOT NULL,
+                    broker_id       TEXT NOT NULL,
+                    external_id     TEXT NOT NULL,
+                    symbol          TEXT NOT NULL,
+                    isin            TEXT NOT NULL,
+                    trade_date      DATE NOT NULL,
+                    side            TEXT NOT NULL,
+                    quantity        DECIMAL(18, 4) NOT NULL,
+                    price           DECIMAL(18, 4) NOT NULL,
+                    amount          DECIMAL(18, 4) NOT NULL,
+                    exchange        TEXT NOT NULL,
+                    segment         TEXT NOT NULL,
+                    raw             JSONB NOT NULL,
+                    imported_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (user_id, broker_id, external_id)
+                )
+                """
+            )
             # User settings table for storing user preferences (STORY-18)
             cursor.execute(
                 """
@@ -663,6 +694,7 @@ class DefaultInfrastructure:
                             segment    = EXCLUDED.segment,
                             raw        = EXCLUDED.raw,
                             imported_at = now()
+                        RETURNING (xmax = 0) AS inserted
                         """,
                         (
                             user_id, broker_id, external_id, symbol, isin,
@@ -670,15 +702,17 @@ class DefaultInfrastructure:
                             exchange, segment, Jsonb(raw),
                         ),
                     )
-                    # cursor.rowcount is -1 for INSERT...ON CONFLICT DO UPDATE
-                    # in some psycopg versions; use the ON CONFLICT branch's
-                    # xmax = 0 (no prior row) as the insertion signal.
-                    # row_description tells us which branch fired:
-                    # 1 row returned = inserted, 0 rows = updated/skipped.
-                    # Actually: ON CONFLICT DO UPDATE always returns 1 row
-                    # (the after-image). Use a custom query that counts.
-                    # Re-query to distinguish insert vs update.
-                    return True
+                    # Real bug, found live on STORY-19: this always
+                    # returned True regardless of insert vs update,
+                    # making transactions_skipped_existing always 0 no
+                    # matter how many rows already existed. Postgres's
+                    # own xmax=0 idiom distinguishes them: a row's xmax
+                    # is 0 only when it was never touched by an UPDATE
+                    # (i.e. this exact call's own INSERT branch fired),
+                    # and non-zero when the ON CONFLICT DO UPDATE branch
+                    # fired instead.
+                    row = cursor.fetchone()
+                    return bool(row[0]) if row is not None else True
             except psycopg.errors.UndefinedTable:
                 # Migration not yet applied — log and return False rather
                 # than crashing the import.

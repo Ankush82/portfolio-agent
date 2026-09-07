@@ -21,7 +21,7 @@ import json
 import os
 import re
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -30,9 +30,13 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
 from components.c01_user_portfolio import (
+    BrokerApiError,
     BrokerAuthError,
     BrokerConfigError,
+    BrokerNotConnectedError,
+    BrokerRateLimitError,
     DefaultUserPortfolio,
+    UnsupportedBrokerError,
     get_broker_connector,
     list_available_brokers,
 )
@@ -642,6 +646,93 @@ def create_app() -> Flask:
         ]
 
         return jsonify({"connections": connections, "available_brokers": available_brokers})
+
+    # -------------------------------------------------------------------------
+    # STORY-19: Trigger a broker import (holdings + transactions)
+    # -------------------------------------------------------------------------
+
+    @app.post("/api/brokers/<broker_id>/import")
+    def api_brokers_import(broker_id: str):
+        """Run a real import_holdings() then import_transactions() for the
+        caller against `broker_id` (STORY-19).
+
+        Runs synchronously in the request -- a real, deliberate choice
+        for this pass; a background job (so a slow broker response
+        doesn't hold the request open) is a real, tracked follow-up, not
+        implemented here. If the import runs past 120s the DB writes
+        still complete and return normally; only a warning is logged
+        recommending the async follow-up, since killing the request
+        mid-write would leave a real partial import behind.
+        """
+        import time as _time
+
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        body = request.get_json(silent=True) or {}
+        start_date = None
+        end_date = None
+        if "start_date" in body:
+            try:
+                start_date = date.fromisoformat(body["start_date"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid_date", "message": "start_date must be YYYY-MM-DD"}), 400
+        if "end_date" in body:
+            try:
+                end_date = date.fromisoformat(body["end_date"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid_date", "message": "end_date must be YYYY-MM-DD"}), 400
+
+        try:
+            connector = get_broker_connector(broker_id)
+        except UnsupportedBrokerError:
+            return jsonify({"error": "unsupported_broker"}), 404
+
+        portfolio_component = DefaultUserPortfolio(broker_connector=connector)
+        started = _time.monotonic()
+        try:
+            holdings_result = portfolio_component.import_holdings(user_id, broker_id)
+            transactions_kwargs: dict[str, Any] = {}
+            if start_date is not None:
+                transactions_kwargs["start_date"] = start_date
+            if end_date is not None:
+                transactions_kwargs["end_date"] = end_date
+            transactions_result = portfolio_component.import_transactions(
+                user_id, broker_id, **transactions_kwargs
+            )
+        except BrokerNotConnectedError:
+            return jsonify({"error": "not_connected"}), 409
+        except BrokerAuthError:
+            return jsonify({
+                "error": "reconnect_required",
+                "message": f"Your {connector.display_name} connection expired. Please reconnect.",
+            }), 401
+        except BrokerRateLimitError:
+            return jsonify({"error": "rate_limited"}), 429
+        except BrokerConfigError as exc:
+            return jsonify({"error": "broker_not_configured", "message": str(exc)}), 503
+        except BrokerApiError:
+            return jsonify({"error": "broker_api_error"}), 502
+
+        if _time.monotonic() - started > 120:
+            app.logger.warning(
+                "api_brokers_import: import for broker_id=%s exceeded 120s -- "
+                "consider moving this to a background job",
+                broker_id,
+            )
+
+        infra = DefaultInfrastructure()
+        connection = infra.get_broker_connection(user_id, broker_id)
+
+        return jsonify({
+            "broker_id": broker_id,
+            "holdings_written": holdings_result.holdings_written,
+            "transactions_inserted": transactions_result.transactions_inserted,
+            "transactions_skipped_existing": transactions_result.transactions_skipped_existing,
+            "rows_skipped_invalid": transactions_result.rows_skipped_invalid,
+            "last_import_at": connection.last_import_at if connection else None,
+        })
 
     # -------------------------------------------------------------------------
     # STORY-16: Upstox OAuth connect flow — initiate
