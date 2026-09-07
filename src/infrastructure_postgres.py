@@ -18,7 +18,7 @@ hides a down Postgres or a down Redis behind a fake success.
 import json
 import os
 import uuid
-import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
@@ -193,6 +193,17 @@ class DefaultInfrastructure:
                     id BIGSERIAL PRIMARY KEY,
                     migration_name VARCHAR NOT NULL UNIQUE,
                     applied_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            # Minimal users table: broker_connections.user_id references
+            # this. No user-management story has defined a real `users`
+            # schema yet, so this is intentionally the smallest table
+            # that satisfies the FK below -- not a full user model.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY
                 )
                 """
             )
@@ -398,6 +409,35 @@ class DefaultInfrastructure:
                     )
                 row = cursor.fetchone()
             return row[0] if row is not None else 0
+
+    def record_audit_event(self, event: dict, raw_detail: dict) -> None:
+        """Insert one row into `audit_events` (STORY-4). `event` is the
+        normalized dict produced by
+        cross_cutting.observability.normalize_audit_event(); `raw_detail`
+        is the original (already-redacted) `detail` dict a caller passed
+        to `AuditManager.record()`, kept for investigative queries
+        alongside the normalized fields."""
+        with traced("DefaultInfrastructure.record_audit_event"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO audit_events
+                        (event_type, timestamp, actor, component, resource,
+                         action, outcome, metadata, raw_detail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        event["event_type"],
+                        event["timestamp"],
+                        Jsonb(event["actor"]),
+                        event["component"],
+                        Jsonb(event["resource"]) if event["resource"] is not None else None,
+                        event["action"],
+                        event["outcome"],
+                        Jsonb(event["metadata"]),
+                        Jsonb(raw_detail),
+                    ),
+                )
 
     def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
         """Fetch a broker connection row by user_id and broker_id, or None if not found."""
