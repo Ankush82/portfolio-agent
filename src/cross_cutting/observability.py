@@ -21,6 +21,7 @@ the architecture actually execute before any component has real
 behavior. Everything downstream of this file stays a traced no-op.
 """
 
+import inspect
 import json
 import time
 import uuid
@@ -117,20 +118,37 @@ class StubAuditReader(AuditReader):
     pass
 
 
+class AuditWriteError(RuntimeError):
+    """Raised by DefaultAuditManager.record() when the audit event
+    cannot be persisted (STORY-4) -- e.g. the database is unavailable."""
+
+
 class DefaultAuditManager(AuditManager):
-    """Real implementation of AuditManager: appends each event as one JSON line to AUDIT_LOG_PATH."""
+    """Real implementation of AuditManager: persists each event as one
+    row in the `audit_events` Postgres table via Infrastructure
+    (STORY-4). Defaults to a real `DefaultInfrastructure()` when none is
+    injected, so every existing zero-arg `DefaultAuditManager()` call
+    site keeps working unchanged."""
+
+    def __init__(self, infrastructure=None) -> None:
+        if infrastructure is None:
+            from infrastructure_postgres import DefaultInfrastructure
+            infrastructure = DefaultInfrastructure()
+        self._infrastructure = infrastructure
 
     def record(self, event_type: str, detail: dict) -> None:
+        caller_frame = inspect.stack()[1]
+        caller_module = inspect.getmodule(caller_frame.frame)
+        calling_module = caller_module.__name__ if caller_module is not None else caller_frame.filename
+
         with traced(f"DefaultAuditManager.record[{event_type}]"):
-            line = json.dumps(
-                {
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "event_type": event_type,
-                    "detail": detail,
-                }
-            )
-            with AUDIT_LOG_PATH.open("a") as f:
-                f.write(line + "\n")
+            event = normalize_audit_event(event_type, detail, calling_module)
+            try:
+                self._infrastructure.record_audit_event(event, redact_secrets(detail))
+            except Exception as exc:
+                raise AuditWriteError(
+                    f"failed to persist audit event {event_type!r}: {exc}"
+                ) from exc
 
 
 class DefaultAuditReader(AuditReader):

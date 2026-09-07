@@ -60,10 +60,10 @@ if TYPE_CHECKING:
 # broker_id. Real connectors are registered at startup; tests register
 # StubBrokerConnector or other test doubles. No Upstox-specific values
 # appear here — only the Protocol shape and broker_id strings.
-_broker_connector_registry: dict[str, BrokerConnector] = {}
+_broker_connector_registry: "dict[str, BrokerConnector]" = {}
 
 
-def get_broker_connector(broker_id: str) -> BrokerConnector:
+def get_broker_connector(broker_id: str) -> "BrokerConnector":
     """Look up a registered BrokerConnector by broker_id (STORY-9).
 
     Raises ``UnsupportedBrokerError`` if no connector is registered
@@ -78,7 +78,7 @@ def get_broker_connector(broker_id: str) -> BrokerConnector:
     return connector
 
 
-def register_broker_connector(connector: BrokerConnector) -> None:
+def register_broker_connector(connector: "BrokerConnector") -> None:
     """Register a BrokerConnector instance (used by tests / startup)."""
     _broker_connector_registry[connector.broker_id] = connector
 
