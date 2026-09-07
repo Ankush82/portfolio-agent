@@ -33,7 +33,11 @@ What ADR-0023 does *not* cover, and what remains a real decision this pass has t
 
 ## Related
 
-- Depends on: [ADR-0023](0023-user-portfolio-broker-api-choice-interim.md) (which real broker/aggregator API eventually backs this interface — not decided here).
+- Depends on: [ADR-0023](0023-user-portfolio-broker-api-choice-interim.md) (which real broker/aggregator API eventually backs this interface — resolved at ADR-0023 acceptance: `DefaultUpstoxBrokerConnector` is the first real implementation of the Protocol defined here).
+
+## Note (added at ADR-0023 acceptance)
+
+`DefaultUpstoxBrokerConnector` (`src/components/c01_user_portfolio.py`) is the first real implementation of the `BrokerConnector` Protocol this ADR defined. The Protocol's three-method shape — `connect()` / `fetch_holdings()` / `fetch_transactions()` returning broker-agnostic DTOs (`BrokerConnection`, `BrokerHolding`, `BrokerTransaction`) — was finalised **with broker-agnostic types only**: no Upstox-specific field name, no Upstox-specific response envelope shape, and no Upstox-specific pagination token leaked into the Protocol surface. All Upstox-specific knowledge — endpoint paths, the `response_type=code` OAuth parameter set, the `data` envelope unwrap, the per-element skip on missing `trading_symbol`, the `total_records` paging cursor — lives inside `DefaultUpstoxBrokerConnector` and its private `_UpstoxHttp` helper (`src/upstox_http.py`), not in this ADR's Protocol signature. A future `DefaultZerodhaBrokerConnector` / `DefaultGrowwBrokerConnector` lands against this same Protocol as an additive change with no Protocol modification.
 - Extends the same "tag untrusted at the boundary" pattern as: [ADR-0003](0003-agent-runtime-in-runtime-adversarial-input-defense.md), [ADR-0018](0018-security-peer-agent-untrusted-by-default.md).
 - Follows the same "injectable placeholder behind a real interface, defer the provider choice" pattern as: [ADR-0020](0020-security-authorize-interim-default.md), [ADR-0021](0021-agent-runtime-llm-provider-interim.md).
 - Implemented by: `../src/components/c01_user_portfolio.py` — `BrokerConnector`, `PlaceholderBrokerConnector`, `DefaultUserPortfolio.connect_portfolio`/`import_holdings`/`import_transactions`.
