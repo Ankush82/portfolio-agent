@@ -37,6 +37,71 @@ DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
 
+class DefaultAuditReader:
+    """Postgres-backed AuditReader (STORY-7).
+
+    Constructed with the DefaultInfrastructure that owns the
+    connection — reuses its `_connection()` so the `queue_events`
+    schema is guaranteed to exist by the time the first read happens
+    (the `_ensure_schema` call inside `_connection()` is idempotent).
+    Stateless beyond the bound infrastructure reference; safe for
+    repeated read-only queries."""
+
+    def __init__(self, infrastructure: "DefaultInfrastructure") -> None:
+        self._infrastructure = infrastructure
+
+    def query(
+        self,
+        topic: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Read the `queue_events` audit trail newest-first (STORY-7).
+
+        Each returned dict has keys: id (int), topic (str),
+        event (dict, the original payload published), published_at
+        (ISO-8601 string with microseconds + UTC offset), and
+        consumed (bool). Filters compose with AND; limit is capped at
+        10000 so a single call cannot accidentally pull a giant
+        window."""
+        with traced("DefaultAuditReader.query"):
+            capped_limit = max(1, min(int(limit), 10000))
+            sql = (
+                "SELECT id, topic, event, "
+                "to_char(published_at AT TIME ZONE 'UTC', "
+                "        'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS published_at, "
+                "consumed "
+                "FROM queue_events "
+                "WHERE 1=1"
+            )
+            params: list = []
+            if topic is not None:
+                sql += " AND topic = %s"
+                params.append(topic)
+            if since is not None:
+                sql += " AND published_at >= %s"
+                params.append(since)
+            if until is not None:
+                sql += " AND published_at <= %s"
+                params.append(until)
+            sql += " ORDER BY id DESC LIMIT %s"
+            params.append(capped_limit)
+            with self._infrastructure._connection().cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "topic": row[1],
+                    "event": row[2],
+                    "published_at": row[3],
+                    "consumed": row[4],
+                }
+                for row in rows
+            ]
+
+
 class BrokerConnectionRecord:
     """Record representing a broker connection.
 
@@ -423,6 +488,13 @@ class DefaultInfrastructure:
         Raises KeyError if `name` isn't set, same as `os.environ[name]`."""
         with traced("DefaultInfrastructure.get_secret"):
             return os.environ[name]
+
+    def get_audit_reader(self) -> "DefaultAuditReader":
+        """Return a DefaultAuditReader bound to this infrastructure's
+        Postgres connection (STORY-7). The reader reuses
+        `_connection()` so the `queue_events` schema is guaranteed to
+        exist by the time the first query runs."""
+        return DefaultAuditReader(self)
 
     def load_us_tickers(self, csv_path: str = '/app/data/us_tickers.csv') -> None:
         """Loads the US ticker universe into a session-scoped TEMP
