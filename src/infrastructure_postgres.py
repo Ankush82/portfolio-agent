@@ -207,6 +207,47 @@ class DefaultInfrastructure:
                 )
                 """
             )
+            # audit_events (STORY-4): matches scripts/migrate_audit_events.sql
+            # exactly. That standalone migration is the schema of record and
+            # still exists for its own deliberate drop/recreate migration
+            # tests -- this IF NOT EXISTS copy exists so DefaultAuditManager
+            # self-heals via the same lazy-schema mechanism every other
+            # DefaultInfrastructure table already uses, instead of hard-
+            # failing with "relation audit_events does not exist" whenever
+            # a fresh database (or a test run that drops this table, e.g.
+            # tests/test_migrate_audit_events.py's own fixture) hasn't had
+            # the standalone migration run against it.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type    VARCHAR(255) NOT NULL,
+                    timestamp     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    actor         JSONB NOT NULL DEFAULT '{}',
+                    component     VARCHAR(255),
+                    resource      JSONB,
+                    action        VARCHAR(255),
+                    outcome       VARCHAR(50) DEFAULT 'success',
+                    metadata      JSONB NOT NULL DEFAULT '{}',
+                    raw_detail    JSONB
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events (timestamp DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_event_type ON audit_events (event_type)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events USING GIN (actor)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_component ON audit_events (component)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_resource ON audit_events USING GIN (resource)"
+            )
             # Broker connections table for storing encrypted broker credentials
             cursor.execute(
                 """
