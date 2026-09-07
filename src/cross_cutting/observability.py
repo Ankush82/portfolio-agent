@@ -23,9 +23,10 @@ behavior. Everything downstream of this file stays a traced no-op.
 
 import json
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -216,3 +217,87 @@ def redact_secrets(data: Any) -> Any:
 def _is_secret_key(key: str) -> bool:
     key_lower = key.lower()
     return any(substr in key_lower for substr in _SECRET_KEY_SUBSTRINGS)
+
+
+# Every detail key any of actor/component/resource/action/outcome can be
+# sourced from (STORY-2) -- all removed from metadata together, regardless
+# of which single one actually matched, since they're all "known fields"
+# conceptually, not just the winning candidate.
+_KNOWN_DETAIL_KEYS = frozenset({
+    "actor", "user", "entity",
+    "component",
+    "resource", "portfolio_id", "agent_id",
+    "action",
+    "outcome", "status",
+})
+
+
+def normalize_audit_event(event_type: str, detail: dict, calling_module: str) -> dict:
+    """Produce a structured audit event dict from a raw ``record(event_type,
+    detail)`` call (STORY-2) -- the shape ``DefaultAuditManager.record()``
+    persists, and the shape ``DefaultAuditReader.query()`` reads back.
+
+    Extraction rules, each checked in the order given (first match wins),
+    with a default when none match:
+      - ``actor``: ``detail['actor']`` used AS-IS if present (it's already
+        real actor data); else ``{'user': detail['user']}`` if present;
+        else ``{'entity': detail['entity']}`` if present; else the string
+        ``'system'``. The key name is preserved in the wrapped dict so a
+        caller populating "identity" can tell whether it was passed as
+        `user` or `entity` without needing a second field.
+      - ``component``: ``detail['component']`` if present, else the real
+        ``calling_module`` the caller identified via `inspect.stack()`.
+      - ``resource``: ``detail['resource']`` used AS-IS if present; else
+        ``{'portfolio_id': ...}``; else ``{'agent_id': ...}``; else
+        ``None`` (many events genuinely have no single resource).
+      - ``action``: ``detail['action']`` if present, else the raw
+        ``event_type`` string itself.
+      - ``outcome``: ``detail['outcome']`` if present, else
+        ``detail['status']``; else ``'success'`` (most calls into
+        ``record()`` today are logging a thing that already happened
+        successfully, not a failure being reported).
+      - ``metadata``: every OTHER detail key (i.e. not one of
+        ``_KNOWN_DETAIL_KEYS`` above), with ``redact_secrets`` applied so
+        a caller that put a real credential in `detail` never has it
+        persisted in plain text.
+
+    ``event_id`` is a fresh real UUID4 string; ``timestamp`` is a real,
+    timezone-aware UTC ``datetime`` (not a string -- callers that persist
+    this to a `TIMESTAMPTZ` column want a real datetime object, not a
+    pre-formatted string they'd have to re-parse)."""
+    if "actor" in detail:
+        actor = detail["actor"]
+    elif "user" in detail:
+        actor = {"user": detail["user"]}
+    elif "entity" in detail:
+        actor = {"entity": detail["entity"]}
+    else:
+        actor = "system"
+
+    component = detail.get("component", calling_module)
+
+    if "resource" in detail:
+        resource = detail["resource"]
+    elif "portfolio_id" in detail:
+        resource = {"portfolio_id": detail["portfolio_id"]}
+    elif "agent_id" in detail:
+        resource = {"agent_id": detail["agent_id"]}
+    else:
+        resource = None
+
+    action = detail.get("action", event_type)
+    outcome = detail.get("outcome", detail.get("status", "success"))
+
+    metadata = redact_secrets({k: v for k, v in detail.items() if k not in _KNOWN_DETAIL_KEYS})
+
+    return {
+        "event_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc),
+        "event_type": event_type,
+        "actor": actor,
+        "component": component,
+        "resource": resource,
+        "action": action,
+        "outcome": outcome,
+        "metadata": metadata,
+    }
