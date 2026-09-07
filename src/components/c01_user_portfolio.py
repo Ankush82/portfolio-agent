@@ -1506,6 +1506,101 @@ def reconcile_transactions(
     return ops
 
 
+@dataclass(frozen=True)
+class HoldingReconciliationOp:
+    """The result of a single holding reconciliation decision (STORY-SYNC-03).
+
+    ``holding`` is the broker holding being reconciled.
+
+    ``status`` is one of:
+      * ``'added'``     — the holding's broker id (its ``isin`` — see
+                          ``find_holdings_to_remove``'s own documented
+                          convention for this) does not match any stored
+                          record; should be inserted as a new record.
+      * ``'updated'``   — the broker id matches a stored record that is
+                          either inactive (reactivate it) or active but
+                          whose comparable fields differ from the broker's
+                          current data; should update the record.
+      * ``'unchanged'`` — the broker id matches a stored, active record
+                          whose comparable fields are identical; no
+                          action needed."""
+    holding: BrokerHolding
+    status: Literal['added', 'updated', 'unchanged']
+
+
+def reconcile_holdings(
+    broker_holdings: list[BrokerHolding],
+    repository: HoldingRepository,
+) -> list[HoldingReconciliationOp]:
+    """Idempotent holding reconciliation (STORY-SYNC-03).
+
+    Pure function: given a list of broker holdings and a repository that
+    can look them up by broker id, produces a list of
+    ``HoldingReconciliationOp`` describing the action to take for each
+    holding. No persistence is performed — callers decide whether and how
+    to apply the operations.
+
+    ``BrokerHolding`` has no field literally named ``broker_holding_id``
+    (unlike ``BrokerTransaction.broker_transaction_id``) — its real,
+    already-established idempotent key is ``isin``, per
+    ``find_holdings_to_remove``'s own documented convention just below
+    ("the set of broker holding IDs ... e.g. the ISINs from the latest
+    ``BrokerConnector.fetch_holdings`` call"). This function uses the
+    same convention so a holding inserted here and a holding later
+    detected as removed by ``find_holdings_to_remove`` agree on what
+    "the broker id" means.
+
+    Field comparison for an existing ACTIVE record is scoped to what
+    ``Holding`` actually stores today: ``quantity`` and ``security_id``
+    (the broker's ``symbol``). ``cost_basis`` is deliberately NOT
+    compared — ``Holding`` has no ``cost_basis`` field yet
+    (``calculate_gains_losses`` already raises a real, deliberate
+    ``NotImplementedError`` naming this exact gap, with its own test
+    asserting that behavior); adding the field here to satisfy a
+    comparison would contradict that already-made decision and break
+    that test. A holding whose only real-world change is its cost basis
+    will not be flagged 'updated' by this function until that field
+    exists — a real, current limitation, not a silent one.
+
+    Decision rules (checked in order):
+
+      1. If no stored record has a matching ``isin``, the operation is
+         ``'added'``.
+      2. If a stored record matches but is inactive, the operation is
+         ``'updated'`` (reactivation).
+      3. If a stored record matches, is active, and ``quantity`` or
+         ``symbol`` differs from the stored holding's ``security_id``,
+         the operation is ``'updated'``.
+      4. Otherwise (active, matching record, no comparable field
+         differs), the operation is ``'unchanged'``.
+
+    Args:
+        broker_holdings: list of holdings as returned by
+            ``BrokerConnector.fetch_holdings``.
+        repository: an implementation of ``HoldingRepository``; used only
+            for read operations (``find_by_broker_holding_id``).
+
+    Returns:
+        A ``HoldingReconciliationOp`` for every input broker holding, in
+        the same order as ``broker_holdings`` was passed. The returned
+        list length always equals the input list length."""
+    ops: list[HoldingReconciliationOp] = []
+    for broker_holding in broker_holdings:
+        existing = repository.find_by_broker_holding_id(broker_holding.isin)
+        if existing is None:
+            ops.append(HoldingReconciliationOp(holding=broker_holding, status='added'))
+        elif not existing.is_active:
+            ops.append(HoldingReconciliationOp(holding=broker_holding, status='updated'))
+        elif (
+            broker_holding.quantity != existing.holding.quantity
+            or broker_holding.symbol != existing.holding.security_id
+        ):
+            ops.append(HoldingReconciliationOp(holding=broker_holding, status='updated'))
+        else:
+            ops.append(HoldingReconciliationOp(holding=broker_holding, status='unchanged'))
+    return ops
+
+
 def find_holdings_to_remove(
     current_broker_holding_ids: set[str],
     repository: HoldingRepository,
