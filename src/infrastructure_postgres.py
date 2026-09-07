@@ -21,7 +21,7 @@ import json
 import logging
 import os
 import uuid
-import datetime
+from datetime import datetime, timezone
 from datetime import date as _date
 from decimal import Decimal as _Decimal
 from typing import Any
@@ -199,6 +199,22 @@ class DefaultInfrastructure:
                     id BIGSERIAL PRIMARY KEY,
                     migration_name VARCHAR NOT NULL UNIQUE,
                     applied_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            # Minimal users table: broker_connections.user_id references
+            # this. Real, pre-existing gap found live on STORY-18 (this
+            # story) -- STORY-11's own broker_connections migration
+            # (#166) declared the FK but never created the table it
+            # points at, so any genuinely fresh database fails on the
+            # very first broker_connections write with a real
+            # ForeignKeyViolation. No user-management story has defined
+            # a real `users` schema yet, so this is intentionally the
+            # smallest table that satisfies the FK below.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY
                 )
                 """
             )

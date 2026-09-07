@@ -219,6 +219,27 @@ def _calculate_totals(holdings: list[dict]) -> tuple[Decimal | None, Decimal | N
     return (inr_total if has_inr else None), (usd_total if has_usd else None)
 
 
+def _broker_is_configured(broker_id: str) -> bool:
+    """Whether `broker_id`'s own real credentials are present in the
+    environment (STORY-18). The BrokerConnector Protocol has no
+    is_configured() method (adding one to check ONE broker's env vars
+    would ripple through every implementer for no real payoff yet), so
+    this is a small, explicit per-broker_id dispatch -- co-located with
+    api_brokers_upstox_connect's identical UpstoxConfig.from_env() check,
+    the one real precedent for this. A broker_id with no real
+    configuration requirement (e.g. a test's fake registered broker)
+    defaults to True: "configured" only means "known to be missing its
+    required credentials", not "verified reachable"."""
+    if broker_id == "upstox":
+        try:
+            from upstox_config import UpstoxConfig
+            UpstoxConfig.from_env()
+            return True
+        except Exception:
+            return False
+    return True
+
+
 def create_app() -> Flask:
     """App-factory pattern (the real, standard Flask idiom) so tests
     can create isolated app instances rather than importing a single
@@ -574,11 +595,53 @@ def create_app() -> Flask:
 
     @app.get("/api/brokers/connections")
     def api_brokers_connections():
-        """Return the list of available broker connections.
+        """Return the caller's real broker connections plus the registry
+        of available brokers (STORY-18).
 
-        Returns ``{"available_brokers": [{"broker_id": "...", "display_name": "..."}, ...]}``.
+        ``connections``: one entry per broker this user has ever
+        connected (from a real ``broker_connections`` row), with status,
+        ``broker_user_id``, ``connected_at``, ``last_import_at``, and
+        ``last_error`` -- never an access token.
+
+        ``available_brokers``: every broker in the connector registry
+        (so a newly-registered broker appears automatically, never a
+        hardcoded list), each tagged ``configured`` -- false when that
+        broker's own required credentials are missing, so the UI can
+        show a disabled "Connect" button with an explanatory tooltip
+        instead of a real OAuth attempt doomed to fail.
         """
-        return jsonify({"available_brokers": list_available_brokers()})
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        registered = list_available_brokers()
+        infra = DefaultInfrastructure()
+
+        connections = []
+        for broker in registered:
+            record = infra.get_broker_connection(user_id, broker["broker_id"])
+            if record is None:
+                continue
+            connections.append({
+                "broker_id": record.broker_id,
+                "display_name": broker["display_name"],
+                "status": record.status,
+                "broker_user_id": record.broker_user_id,
+                "connected_at": record.connected_at,
+                "last_import_at": record.last_import_at,
+                "last_error": record.last_error,
+            })
+
+        available_brokers = [
+            {
+                "broker_id": broker["broker_id"],
+                "display_name": broker["display_name"],
+                "configured": _broker_is_configured(broker["broker_id"]),
+            }
+            for broker in registered
+        ]
+
+        return jsonify({"connections": connections, "available_brokers": available_brokers})
 
     # -------------------------------------------------------------------------
     # STORY-16: Upstox OAuth connect flow — initiate
