@@ -3,6 +3,25 @@
 {% block title %}Broker Connections - Portfolio Agent{% endblock %}
 
 {% block content %}
+<div
+  id="broker-callback-banner"
+  class="alert mb-4 hidden"
+  role="alert"
+>
+  <span id="broker-callback-banner-text"></span>
+  <div id="broker-callback-banner-import-now" class="hidden">
+    <a href="#" id="broker-callback-import-now-link" class="link link-primary ml-2">Import now</a>
+  </div>
+  <button
+    type="button"
+    id="broker-callback-banner-dismiss"
+    class="btn btn-sm btn-ghost ml-auto"
+    aria-label="Dismiss"
+  >
+    &times;
+  </button>
+</div>
+
 <div class="card bg-base-100 shadow-md">
   <div class="card-body">
     <h2 class="card-title text-2xl mb-2">Broker Connections</h2>
@@ -197,6 +216,82 @@
       connectBroker(brokerId);
     });
   });
+
+  // ---------- STORY-21: post-callback success/failure banner ----------
+
+  var REASON_MESSAGES = {
+    invalid_state: 'That connection link was invalid or already used. Please try connecting again.',
+    state_replayed: 'That connection link was invalid or already used. Please try connecting again.',
+    state_expired: 'The connection request expired. Please try again.',
+    missing_code: 'Upstox did not grant access. You can try again.',
+    access_denied: 'Upstox did not grant access. You can try again.',
+    token_exchange_failed: 'We could not complete the connection with Upstox. Please try again.',
+    broker_not_configured: 'This broker is not configured by the administrator. Please contact support.',
+  };
+  var GENERIC_FAILURE_MESSAGE = 'Something went wrong connecting your broker. Please try again.';
+
+  function refetchConnections() {
+    fetch('/api/brokers/connections', { headers: { Accept: 'application/json' } }).catch(function () {
+      // A failed refetch just leaves the existing card state on screen —
+      // not a reason to also fail the banner render.
+    });
+  }
+
+  function showCallbackBanner(kind, message) {
+    var banner = document.getElementById('broker-callback-banner');
+    var text = document.getElementById('broker-callback-banner-text');
+    var importNow = document.getElementById('broker-callback-banner-import-now');
+    if (!banner || !text) return;
+
+    banner.classList.remove('hidden', 'alert-success', 'alert-error');
+    banner.classList.add(kind === 'success' ? 'alert-success' : 'alert-error');
+    // The message itself is never a raw slug or state/code value — always
+    // one of the fixed, human-written strings above.
+    text.textContent = message;
+
+    if (importNow) {
+      importNow.classList.toggle('hidden', kind !== 'success');
+    }
+
+    var dismissBtn = document.getElementById('broker-callback-banner-dismiss');
+    if (dismissBtn) {
+      dismissBtn.focus();
+    }
+  }
+
+  function dismissCallbackBanner() {
+    var banner = document.getElementById('broker-callback-banner');
+    if (banner) banner.classList.add('hidden');
+  }
+
+  (function handlePostCallbackBanner() {
+    var params = new URLSearchParams(window.location.search);
+    var connect = params.get('connect');
+    if (!connect) return;
+
+    if (connect === 'success') {
+      showCallbackBanner('success', 'Upstox connected successfully.');
+      refetchConnections();
+    } else if (connect === 'error') {
+      var reason = params.get('reason');
+      var message = (reason && REASON_MESSAGES[reason]) || GENERIC_FAILURE_MESSAGE;
+      showCallbackBanner('error', message);
+    }
+
+    // Strip connect/broker/reason from the address bar so a refresh
+    // never re-shows the banner for a callback that already happened.
+    params.delete('connect');
+    params.delete('broker');
+    params.delete('reason');
+    var newSearch = params.toString();
+    var newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '') + window.location.hash;
+    window.history.replaceState(null, '', newUrl);
+  })();
+
+  var dismissBtn = document.getElementById('broker-callback-banner-dismiss');
+  if (dismissBtn) {
+    dismissBtn.addEventListener('click', dismissCallbackBanner);
+  }
 })();
 </script>
 {% endblock %}
