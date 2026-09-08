@@ -2341,8 +2341,8 @@ class DefaultUserPortfolio:
         # Infrastructure so no required constructor argument is added.
         self._users: UserRepository = user_repository or UserRepository(self._infrastructure)
         self._portfolios: PortfolioRepository = portfolio_repository or PortfolioRepository(self._infrastructure)
-        self._holdings: HoldingRepository = holding_repository or HoldingRepository(self._infrastructure)
-        self._transactions: TransactionRepository = transaction_repository or TransactionRepository(self._infrastructure)
+        self._holdings: HoldingRepository = holding_repository or DefaultHoldingRepository(self._infrastructure)
+        self._transactions: TransactionRepository = transaction_repository or DefaultTransactionRepository(self._infrastructure)
 
     def _resolve_broker_connector(self, broker_id: str) -> "BrokerConnector":
         """The constructor-injected connector (if any) always wins --

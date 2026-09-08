@@ -168,6 +168,7 @@ class Holding:
     currency: str = "USD"
     exchange: str | None = None
     symbol_suffix: str | None = None
+    broker_holding_id: str | None = None  # Idempotent-match key from the broker
 
     def __post_init__(self) -> None:
         # Currency: ENUM-like, restricted to {USD, INR}. Anything else
