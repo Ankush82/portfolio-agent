@@ -96,10 +96,14 @@ class TestConsumeState:
             consume_state(fake_state)
 
     def test_expired_state_raises_expired_error(self, _oauth_dsn):
-        """Patch _utc_now to return a time past the TTL window."""
+        """Patch _utc_now to simulate consuming the token 20 minutes after
+        it was issued -- past the 10-minute TTL. created_at is recorded
+        at real, unpatched current time by issue_state() above; consume_state's
+        own `now` must be LATER than that (+20min), not earlier, for
+        `created_at < cutoff` to actually trigger."""
         state = issue_state("u1", "broker_a")
 
-        expired_time = datetime.now(timezone.utc) - timedelta(minutes=20)
+        expired_time = datetime.now(timezone.utc) + timedelta(minutes=20)
 
         with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
             with pytest.raises(OAuthStateExpiredError):
@@ -112,10 +116,13 @@ class TestConsumeState:
 
 class TestPurgeExpiredStates:
     def test_deletes_row_created_more_than_10_minutes_ago(self, _oauth_dsn):
-        """A never-consumed row past its TTL window is deleted."""
+        """A never-consumed row past its TTL window is deleted. created_at
+        is recorded at real, unpatched current time by issue_state();
+        purge's own `now` must be LATER than that (+15min, simulating 15
+        real minutes elapsing since issuance), not earlier."""
         state = issue_state("u1", "broker_a")
 
-        expired_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+        expired_time = datetime.now(timezone.utc) + timedelta(minutes=15)
 
         with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
             deleted = purge_expired_states()
@@ -131,7 +138,7 @@ class TestPurgeExpiredStates:
         state = issue_state("u1", "broker_a")
         consume_state(state)
 
-        expired_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+        expired_time = datetime.now(timezone.utc) + timedelta(minutes=15)
 
         with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
             deleted = purge_expired_states()
@@ -171,7 +178,7 @@ class TestPurgeExpiredStates:
         issue_state("u1", "broker_a")
         issue_state("u2", "broker_b")
 
-        expired_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+        expired_time = datetime.now(timezone.utc) + timedelta(minutes=15)
 
         with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
             deleted = purge_expired_states()
@@ -179,17 +186,25 @@ class TestPurgeExpiredStates:
         assert deleted == 2
 
     def test_purge_only_deletes_expired_rows(self, _oauth_dsn):
-        """Mix of expired and fresh rows: only the expired ones go."""
+        """Mix of expired and fresh rows: only the expired ones go.
+
+        u3 is backdated (created_at set 15 minutes in the past via a
+        patched issue_state call); the purge call itself must run at a
+        LATER `now` than that backdated created_at for the elapsed gap to
+        actually exceed the TTL -- reusing the same frozen past timestamp
+        for both would mean zero time ever "passes" between creation and
+        purge, so nothing could ever look expired relative to itself.
+        Real, unpatched current time is later than the backdated
+        created_at by construction, so purge runs unpatched here."""
         # Fresh rows
         issue_state("u1", "broker_a")
         issue_state("u2", "broker_b")
         # Expired row
-        expired_time = datetime.now(timezone.utc) - timedelta(minutes=15)
-        with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
+        backdated_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+        with mock.patch("src.oauth_state._utc_now", return_value=backdated_time):
             issue_state("u3", "broker_c")
 
-        with mock.patch("src.oauth_state._utc_now", return_value=expired_time):
-            deleted = purge_expired_states()
+        deleted = purge_expired_states()
 
         assert deleted == 1  # only the one expired row
 

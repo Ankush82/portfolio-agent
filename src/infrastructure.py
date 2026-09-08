@@ -13,6 +13,7 @@ ADR-0010, is also unresolved and may bypass parts of this for component
 06 specifically — see that component's file).
 """
 
+from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
 from cross_cutting.observability import traced
@@ -58,6 +59,18 @@ class Infrastructure(Protocol):
         """Reads from the cloud provider's secret manager. Never read
         an environment variable or config file directly for anything
         credential-shaped (ADR-0019)."""
+        ...
+
+    def transaction(self) -> "AbstractContextManager[None]":
+        """Real, atomic transaction boundary (STORY-SYNC-06). Any
+        store/retrieve/query/delete or broker-specific write call made
+        against THIS SAME Infrastructure instance while inside the
+        `with` block commits together on clean exit, or rolls back
+        together if the block raises -- callers that need "all these
+        writes succeed or none do" (e.g. a portfolio sync touching many
+        holdings/transactions) wrap them in one `with
+        infrastructure.transaction():` block rather than trusting each
+        individual write's own default auto-commit behavior."""
         ...
 
     def upsert_broker_transaction(
@@ -187,6 +200,16 @@ class StubInfrastructure:
     def get_secret(self, name: str) -> str:
         with traced("StubInfrastructure.get_secret"):
             return ""
+
+    def transaction(self) -> AbstractContextManager[None]:
+        # A real, structural no-op -- the stub has nothing to commit or
+        # roll back (every write above is itself a no-op), but must
+        # still support `with infrastructure.transaction():` the same
+        # way DefaultInfrastructure's real one does, so test code
+        # written against the Protocol works against either.
+        from contextlib import nullcontext
+
+        return nullcontext()
 
     def get_audit_reader(self) -> AuditReader:
         with traced("StubInfrastructure.get_audit_reader"):

@@ -6,7 +6,7 @@ Flask test client + real Postgres only; no network calls.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -34,7 +34,7 @@ def _recent_transactions(n: int = 4) -> list[BrokerTransaction]:
     today = date.today()
     return [
         BrokerTransaction(
-            external_id=f"story19-tx-{i:03d}",
+            broker_transaction_id=f"story19-tx-{i:03d}",
             symbol="AAPL",
             isin="US0378331005",
             trade_date=today - timedelta(days=i),
@@ -44,6 +44,7 @@ def _recent_transactions(n: int = 4) -> list[BrokerTransaction]:
             amount=Decimal("150.00"),
             exchange="NASDAQ",
             segment="EQ",
+            broker_modified_at=datetime.now(timezone.utc),
             raw={"story19": True},
         )
         for i in range(n)

@@ -163,6 +163,25 @@ class BrokerConnectionRecord:
         )
 
 
+def _broker_connection_from_row(row: tuple) -> BrokerConnectionRecord:
+    """Build a BrokerConnectionRecord from a 13-column broker_connections row."""
+    return BrokerConnectionRecord(
+        id=row[0],
+        user_id=row[1],
+        broker_id=row[2],
+        broker_user_id=row[3],
+        access_token_encrypted=row[4],
+        token_type=row[5],
+        access_token_expires_at=row[6],
+        status=row[7],
+        last_error=row[8],
+        connected_at=row[9],
+        last_import_at=row[10],
+        created_at=str(row[11]),
+        updated_at=str(row[12]),
+    )
+
+
 class DefaultInfrastructure:
     """Real implementation of Infrastructure (ADR-0019).
 
@@ -488,6 +507,21 @@ class DefaultInfrastructure:
         Raises KeyError if `name` isn't set, same as `os.environ[name]`."""
         with traced("DefaultInfrastructure.get_secret"):
             return os.environ[name]
+
+    def transaction(self):
+        """Real atomic transaction boundary (STORY-SYNC-06), backed by
+        psycopg3's own `Connection.transaction()` context manager.
+        Works correctly even though this connection runs with
+        autocommit=True (psycopg3 documents `Connection.transaction()`
+        as safe under either mode: it suspends autocommit for the
+        block's real duration, issues a real BEGIN, then a real COMMIT
+        on clean exit or a real ROLLBACK if the block raises -- the
+        same connection every store/retrieve/query/delete call already
+        shares via `_connection()`, so any of those calls made inside
+        this block genuinely participate in the same transaction, not
+        a separate one)."""
+        with traced("DefaultInfrastructure.transaction"):
+            return self._connection().transaction()
 
     def get_audit_reader(self) -> "DefaultAuditReader":
         """Return a DefaultAuditReader bound to this infrastructure's
