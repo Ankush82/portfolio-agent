@@ -18,6 +18,7 @@ hides a down Postgres or a down Redis behind a fake success.
 import json
 import os
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
@@ -31,12 +32,52 @@ from domain import HOLDINGS_TABLE, PORTFOLIOS_TABLE, TRANSACTIONS_TABLE, USERS_T
 DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
+
+@dataclass(frozen=True)
+class TableSpec:
+    """A declared, reviewable description of one real, typed table's
+    shape (STORY-10) -- pk, the closed column list, and which of those
+    columns are JSONB. Deliberately a plain, hand-written registry, not
+    information_schema introspection: which columns store/retrieve/
+    query touch must depend on code a reviewer can read, not on
+    whatever the live DB schema happens to be at runtime."""
+
+    pk: str
+    columns: tuple[str, ...]
+    jsonb: tuple[str, ...] = field(default_factory=tuple)
+
+
 # The four core domain tables whose schema is owned by the migration
-# scripts/migrate_core_domain_entities.sql (STORY-11).  DefaultInfrastructure
-# must NEVER issue a CREATE TABLE for any of these — a real migration owns
-# their DDL now.  Ops against a missing migrated table raise
+# scripts/migrate_core_domain_entities.sql (STORY-11) -- verified against
+# scripts/verify_migration_core_domain.sql's own expected column lists.
+# DefaultInfrastructure must NEVER issue a CREATE TABLE for any of
+# these — a real migration owns their DDL now. `store`/`retrieve`/
+# `query`/`delete` read and write these tables' REAL, typed columns
+# (STORY-10) rather than the generic `records` table's opaque JSONB
+# payload every other table still uses; an operation against one of
+# these four whose real table doesn't exist yet raises
 # MigrationRequiredError rather than silently creating an untyped blob.
-MIGRATED_TABLES = frozenset({USERS_TABLE, PORTFOLIOS_TABLE, HOLDINGS_TABLE, TRANSACTIONS_TABLE})
+# A dict (not a plain set) so `table in MIGRATED_TABLES` still works
+# everywhere it already did (STORY-14), while also giving store/
+# retrieve/query/delete the real column spec they need.
+MIGRATED_TABLES: dict[str, TableSpec] = {
+    USERS_TABLE: TableSpec(pk="id", columns=("id", "email", "preferences"), jsonb=("preferences",)),
+    PORTFOLIOS_TABLE: TableSpec(pk="id", columns=("id", "user_id"), jsonb=()),
+    HOLDINGS_TABLE: TableSpec(
+        pk="id",
+        columns=(
+            "id",
+            "portfolio_id",
+            "security_id",
+            "quantity",
+            "currency",
+            "exchange",
+            "symbol_suffix",
+        ),
+        jsonb=(),
+    ),
+    TRANSACTIONS_TABLE: TableSpec(pk="id", columns=("id", "portfolio_id", "kind", "amount"), jsonb=()),
+}
 
 # The script that creates the four migrated tables.  Used verbatim in the
 # MigrationRequiredError remediation message so developers get an exact
@@ -188,23 +229,57 @@ class DefaultInfrastructure:
         return self._redis_client
 
     def store(self, table: str, record: dict) -> str:
-        """Writes `record` as JSONB. Uses `record["id"]` as the row id
+        """For a table in MIGRATED_TABLES (STORY-10): writes real, typed
+        columns via `INSERT ... ON CONFLICT (<pk>) DO UPDATE`, over
+        exactly the declared column list -- preserving the pre-existing
+        `records`-table upsert-by-id semantics (docs/repo-layer-recon.md
+        V3), just against real columns instead of an opaque JSONB
+        payload. Table and column names come only from the registry
+        (never caller input); every real value is still a bound
+        parameter. An `UndefinedTable` here (the real migration hasn't
+        been applied yet) is wrapped as `MigrationRequiredError`, same
+        as every other operation on a migrated table.
+
+        For any other table: unchanged -- writes `record` as JSONB into
+        the generic `records` table. Uses `record["id"]` as the row id
         when present (so callers can control identity), otherwise
         generates a uuid4 — the Infrastructure protocol requires this
         to return an id but doesn't say where it comes from, and
         record dicts aren't guaranteed to carry one."""
         with traced("DefaultInfrastructure.store"):
             record_id = str(record["id"]) if "id" in record else str(uuid.uuid4())
+            spec = MIGRATED_TABLES.get(table)
             try:
-                with self._connection().cursor() as cursor:
-                    cursor.execute(
-                        """
-                        INSERT INTO records (table_name, id, data)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
-                        """,
-                        (table, record_id, Jsonb(record)),
+                if spec is not None:
+                    row = dict(record)
+                    row["id"] = record_id
+                    values = [
+                        Jsonb(row.get(column)) if column in spec.jsonb else row.get(column)
+                        for column in spec.columns
+                    ]
+                    column_list = ", ".join(spec.columns)
+                    placeholders = ", ".join(["%s"] * len(spec.columns))
+                    update_clause = ", ".join(
+                        f"{column} = EXCLUDED.{column}"
+                        for column in spec.columns
+                        if column != spec.pk
                     )
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(
+                            f"INSERT INTO {table} ({column_list}) VALUES ({placeholders}) "
+                            f"ON CONFLICT ({spec.pk}) DO UPDATE SET {update_clause}",
+                            values,
+                        )
+                else:
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(
+                            """
+                            INSERT INTO records (table_name, id, data)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (table_name, id) DO UPDATE SET data = EXCLUDED.data
+                            """,
+                            (table, record_id, Jsonb(record)),
+                        )
             except psycopg.errors.UndefinedTable as exc:
                 if table in MIGRATED_TABLES:
                     self._wrap_migrated_table_error(table, exc)
@@ -212,8 +287,21 @@ class DefaultInfrastructure:
             return record_id
 
     def retrieve(self, table: str, id_: str) -> dict | None:
+        """Column-aware for a table in MIGRATED_TABLES (real SELECT over
+        the declared columns, returned as a plain dict); unchanged
+        `records`-table JSONB lookup for any other table."""
         with traced("DefaultInfrastructure.retrieve"):
+            spec = MIGRATED_TABLES.get(table)
             try:
+                if spec is not None:
+                    column_list = ", ".join(spec.columns)
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(
+                            f"SELECT {column_list} FROM {table} WHERE {spec.pk} = %s",
+                            (id_,),
+                        )
+                        row = cursor.fetchone()
+                    return dict(zip(spec.columns, row)) if row is not None else None
                 with self._connection().cursor() as cursor:
                     cursor.execute(
                         "SELECT data FROM records WHERE table_name = %s AND id = %s",
@@ -227,11 +315,34 @@ class DefaultInfrastructure:
             return row[0] if row is not None else None
 
     def query(self, table: str, filters: dict) -> list[dict]:
-        """JSONB containment match only (`data @> filters`) — not a
-        general query DSL, deliberately kept simple for this first
-        version."""
+        """Column-aware for a table in MIGRATED_TABLES: real equality
+        match on the declared columns (a filter key that isn't a real
+        column raises ValueError rather than silently matching nothing
+        the caller intended). Unchanged JSONB containment match
+        (`data @> filters`) for any other table — not a general query
+        DSL, deliberately kept simple for that path."""
         with traced("DefaultInfrastructure.query"):
+            spec = MIGRATED_TABLES.get(table)
             try:
+                if spec is not None:
+                    unknown = set(filters) - set(spec.columns)
+                    if unknown:
+                        raise ValueError(
+                            f"query filter key(s) {sorted(unknown)} are not real columns "
+                            f"of migrated table {table!r}"
+                        )
+                    column_list = ", ".join(spec.columns)
+                    sql = f"SELECT {column_list} FROM {table}"
+                    values = [
+                        Jsonb(value) if key in spec.jsonb else value
+                        for key, value in filters.items()
+                    ]
+                    if filters:
+                        sql += " WHERE " + " AND ".join(f"{key} = %s" for key in filters)
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(sql, values)
+                        rows = cursor.fetchall()
+                    return [dict(zip(spec.columns, row)) for row in rows]
                 with self._connection().cursor() as cursor:
                     cursor.execute(
                         "SELECT data FROM records WHERE table_name = %s AND data @> %s",
@@ -245,17 +356,30 @@ class DefaultInfrastructure:
             return [row[0] for row in rows]
 
     def delete(self, table: str, id: str) -> bool:
-        """Removes the row with `(table_name, id)` from the `records`
-        table. Returns True if a row was removed, False if no matching
-        row existed — idempotent for nonexistent ids (never raises)."""
+        """Column-aware for a table in MIGRATED_TABLES: deletes the real
+        row by its declared pk column (necessary for correctness, not
+        just an incidental extension: HoldingRepository/
+        TransactionRepository's own delete/delete_by_security route
+        through this same Infrastructure.delete, and would silently
+        no-op forever against a migrated table if this stayed pinned to
+        the old `records` table alone). Unchanged `(table_name, id)`
+        delete from `records` for any other table. Returns True if a
+        row was removed, False if no matching row existed — idempotent
+        for nonexistent ids (never raises), same contract either way."""
         with traced("DefaultInfrastructure.delete"):
+            spec = MIGRATED_TABLES.get(table)
             try:
-                with self._connection().cursor() as cursor:
-                    cursor.execute(
-                        "DELETE FROM records WHERE table_name = %s AND id = %s",
-                        (table, id),
-                    )
-                    rowcount = cursor.rowcount
+                if spec is not None:
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(f"DELETE FROM {table} WHERE {spec.pk} = %s", (id,))
+                        rowcount = cursor.rowcount
+                else:
+                    with self._connection().cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM records WHERE table_name = %s AND id = %s",
+                            (table, id),
+                        )
+                        rowcount = cursor.rowcount
             except psycopg.errors.UndefinedTable as exc:
                 if table in MIGRATED_TABLES:
                     self._wrap_migrated_table_error(table, exc)
@@ -368,29 +492,35 @@ class DefaultInfrastructure:
                     return
 
     def count_us_stocks(self, portfolio_id: str | None = None) -> int:
-        """Counts `holdings` records whose `security_id` is present in
+        """Counts `holdings` rows whose `security_id` is present in
         the just-loaded `tmp_us_tickers` set — i.e. the number of US-
         listed stocks currently held. When `portfolio_id` is given,
         the count is restricted to that portfolio; otherwise it's the
-        total across every portfolio."""
+        total across every portfolio.
+
+        STORY-10: queries the real, typed `holdings` table directly
+        (real `security_id`/`portfolio_id` columns) now that `store`/
+        `retrieve`/`query` route holdings there instead of into the
+        generic `records` table's JSONB payload -- the old
+        `data->>'security_id'` extraction would silently count zero
+        rows forever once holdings stopped being written to `records`
+        at all."""
         with traced("DefaultInfrastructure.count_us_stocks"):
             try:
                 with self._connection().cursor() as cursor:
                     if portfolio_id is None:
                         cursor.execute(
                             """
-                            SELECT COUNT(*) FROM records
-                            WHERE table_name = 'holdings'
-                              AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
+                            SELECT COUNT(*) FROM holdings
+                            WHERE security_id IN (SELECT ticker FROM tmp_us_tickers)
                             """
                         )
                     else:
                         cursor.execute(
                             """
-                            SELECT COUNT(*) FROM records
-                            WHERE table_name = 'holdings'
-                              AND data->>'security_id' IN (SELECT ticker FROM tmp_us_tickers)
-                              AND data->>'portfolio_id' = %s
+                            SELECT COUNT(*) FROM holdings
+                            WHERE security_id IN (SELECT ticker FROM tmp_us_tickers)
+                              AND portfolio_id = %s
                             """,
                             (portfolio_id,),
                         )
