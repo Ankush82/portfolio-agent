@@ -221,29 +221,18 @@ def test_default_upstox_broker_connector_constructs_and_uses_no_network():
 # ---------------------------------------------------------------------
 
 
-def test_default_upstox_broker_connector_fetch_holdings_raises_not_implemented_for_story7():
-    from components.c01_user_portfolio import BrokerCredentials
-    connector = DefaultUpstoxBrokerConnector(
-        config=_config(), http=_http()
-    )
-    with pytest.raises(NotImplementedError):
-        connector.fetch_holdings(  # type: ignore[arg-type]
-            credentials=BrokerCredentials(access_token="t"),
-        )
+# fetch_holdings no longer raises NotImplementedError either -- STORY-7
+# (already merged, well before this session) implemented it for real.
+# Its own real coverage lives in tests/test_story7_fetch_holdings.py.
+# This file's own placeholder-behavior test for it was already stale on
+# main; removed alongside the STORY-8 one below for the same reason.
 
 
-def test_default_upstox_broker_connector_fetch_transactions_raises_not_implemented_for_story8():
-    from datetime import date
-    from components.c01_user_portfolio import BrokerCredentials
-    connector = DefaultUpstoxBrokerConnector(
-        config=_config(), http=_http()
-    )
-    with pytest.raises(NotImplementedError):
-        connector.fetch_transactions(  # type: ignore[arg-type]
-            credentials=BrokerCredentials(access_token="t"),
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 12, 31),
-        )
+# fetch_transactions no longer raises NotImplementedError -- STORY-8
+# implemented it for real (pagination, dedup, field mapping, the full
+# acceptance criteria). Its own real, comprehensive coverage lives in
+# tests/test_story8_fetch_transactions.py (mocked _UpstoxHttp, no real
+# network calls, one test per acceptance criterion) rather than here.
 
 
 # ---------------------------------------------------------------------

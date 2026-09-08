@@ -28,8 +28,9 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, runtime_checkable
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
 from components.c04_knowledge_entity import DefaultKnowledgeEntity, Entity
@@ -51,6 +52,94 @@ if TYPE_CHECKING:
     # ``BrokerAuthError`` / ``BrokerRateLimitError`` classes from this module
     # at module load time, so the reverse module-level import would deadlock).
     from upstox_http import _UpstoxHttp
+
+
+# ---------------------------------------------------------------------------
+# Broker connector registry (STORY-9 / STORY-13)
+# ---------------------------------------------------------------------------
+# In-memory registry of available BrokerConnector instances, keyed by
+# broker_id. Real connectors are registered at startup; tests register
+# StubBrokerConnector or other test doubles. No Upstox-specific values
+# appear here — only the Protocol shape and broker_id strings.
+# Defined after BrokerConnector Protocol (below) to avoid forward-reference
+# NameError at module load.
+_broker_connector_registry: dict[str, "BrokerConnector"] = {}
+
+
+def _default_upstox_connector() -> "BrokerConnector":
+    # DefaultUpstoxBrokerConnector is defined further down in this same
+    # module -- referenced here only inside a function body (never
+    # evaluated at import time), so this has nothing to do with why
+    # BROKER_CONNECTORS' factories are lazy (see BROKER_CONNECTORS'
+    # own docstring below for that real reason).
+    return DefaultUpstoxBrokerConnector(UpstoxConfig.from_env())
+
+
+# STORY-9: the real extension point for adding a new broker. To add
+# one: write a real Default<Broker>BrokerConnector class conforming to
+# the BrokerConnector Protocol, then add ONE line here mapping its
+# broker_id to a zero-arg factory that builds it -- nothing else in
+# this project needs to change (DefaultUserPortfolio, connect_portfolio,
+# import_holdings/import_transactions all resolve purely through
+# get_broker_connector(broker_id), never a hardcoded class name).
+#
+# Values are LAZY factories (Callable[[], BrokerConnector]), not
+# already-built instances: UpstoxConfig.from_env() raises
+# BrokerConfigError when UPSTOX_CLIENT_ID/SECRET/REDIRECT_URI aren't
+# set, and that must happen when get_broker_connector('upstox') is
+# actually CALLED, not merely because this module got imported in an
+# environment that doesn't have Upstox configured (which would break
+# every test/tool that imports this module at all, whether or not it
+# ever touches a broker).
+BROKER_CONNECTORS: dict[str, Callable[[], "BrokerConnector"]] = {
+    "upstox": _default_upstox_connector,
+}
+
+
+def get_broker_connector(broker_id: str) -> "BrokerConnector":
+    """Look up a BrokerConnector by broker_id (STORY-9).
+
+    Checks the dynamic registry first (``register_broker_connector`` --
+    what tests, and any future runtime override, use) so an explicitly
+    registered connector always wins; falls back to lazily building one
+    from ``BROKER_CONNECTORS`` (the real, shipped connectors) when
+    nothing was explicitly registered for this broker_id. Raises
+    ``UnsupportedBrokerError`` if neither has one. The registry
+    contains only broker_id strings (no URLs, no field names) --
+    everything broker-specific lives behind the Protocol."""
+    connector = _broker_connector_registry.get(broker_id)
+    if connector is not None:
+        return connector
+    factory = BROKER_CONNECTORS.get(broker_id)
+    if factory is not None:
+        return factory()
+    raise UnsupportedBrokerError(
+        f"no connector registered for broker_id {broker_id!r}; "
+        f"supported ids: {sorted(set(_broker_connector_registry) | set(BROKER_CONNECTORS))}"
+    )
+
+
+def register_broker_connector(connector: "BrokerConnector") -> None:
+    """Register a BrokerConnector instance (used by tests / startup)."""
+    _broker_connector_registry[connector.broker_id] = connector
+
+
+def unregister_broker_connector(broker_id: str) -> None:
+    """Remove a BrokerConnector from the registry (used by tests to clean up)."""
+    _broker_connector_registry.pop(broker_id, None)
+
+
+def list_available_brokers() -> list[dict]:
+    """Return display metadata for every registered BrokerConnector.
+
+    Each dict contains the fields required by STORY-20's settings/brokers
+    UI: ``broker_id`` and ``display_name``. The registry is the single
+    source of truth; nothing is hard-coded here.
+    """
+    return [
+        {"broker_id": connector.broker_id, "display_name": connector.display_name}
+        for connector in _broker_connector_registry.values()
+    ]
 
 
 # Exception hierarchy for BrokerConnector (ADR-0022)
@@ -81,6 +170,11 @@ class BrokerRateLimitError(BrokerError):
 
 class UnsupportedBrokerError(BrokerError):
     """Raised when the broker is not supported."""
+    pass
+
+
+class BrokerNotConnectedError(BrokerError):
+    """Raised when no stored broker connection exists for (user_id, broker_id) (STORY-14)."""
     pass
 
 
@@ -132,6 +226,25 @@ class BrokerTransaction:
         return self.broker_transaction_id
 
 
+@dataclass(frozen=True)
+class ImportResult:
+    """Result of an import_transactions call (STORY-15)."""
+    transactions_inserted: int
+    transactions_skipped_existing: int
+    rows_skipped_invalid: int = 0
+
+
+@dataclass(frozen=True)
+class HoldingsImportResult:
+    """Result of an import_holdings call (STORY-14). Named distinctly
+    from ImportResult (STORY-15's transactions result) since the two
+    carry different fields -- holdings are a replace-in-transaction
+    snapshot, not an idempotent upsert, so there's no "skipped existing"
+    concept, only rows the connector returned that failed validation."""
+    holdings_written: int
+    skipped: int = 0
+
+
 # BrokerConnector Protocol (ADR-0022)
 @runtime_checkable
 class BrokerConnector(Protocol):
@@ -153,53 +266,6 @@ class BrokerConnector(Protocol):
     def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
         """Fetch transactions for the given credentials and date range."""
         ...
-
-
-# ---------------------------------------------------------------------------
-# Broker connector registry (STORY-9 / STORY-13)
-# ---------------------------------------------------------------------------
-_broker_connector_registry: dict[str, BrokerConnector] = {}
-
-
-def get_broker_connector(broker_id: str) -> BrokerConnector:
-    connector = _broker_connector_registry.get(broker_id)
-    if connector is None:
-        raise UnsupportedBrokerError(
-            f"No broker connector registered for broker_id {broker_id!r}"
-        )
-    return connector
-
-
-def register_broker_connector(connector: BrokerConnector) -> None:
-    _broker_connector_registry[connector.broker_id] = connector
-
-
-class PlaceholderBrokerConnector:
-    """Placeholder implementation of BrokerConnector for testing and development.
-    All methods return synthetic, obviously-fake data that cannot be mistaken
-    for real broker data."""
-
-    broker_id: str = "placeholder"
-    display_name: str = "Placeholder Broker"
-
-    def build_authorize_url(self, *, state: str) -> str:
-        return f"https://placeholder.broker/auth?state={state}"
-
-    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
-        return BrokerCredentials(
-            access_token=f"placeholder-token-{code}",
-            token_type="Bearer",
-            expires_at=None,
-            refresh_token=None,
-            broker_user_id=None,
-            raw={"code": code},
-        )
-
-    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
-        return []
-
-    def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
-        return []
 
 
 class StubBrokerConnector:
@@ -383,6 +449,23 @@ class DefaultUpstoxBrokerConnector:
     # no version bump, no trailing slash.
     _UPSTOX_LONG_TERM_HOLDINGS_PATH = "/v2/portfolio/long-term-holdings"
 
+    # STORY-8: the historical-trades endpoint. Same "pin as a class
+    # constant" convention as the holdings path above -- the AC's
+    # "Request URL is exactly https://api.upstox.com/v2/charges/
+    # historical-trades" rule is a single grep. Page size is pinned at
+    # the AC's own required value (1000, the max Upstox allows per
+    # page) rather than left as a caller-tunable parameter -- the AC
+    # doesn't ask for one, and a smaller caller-chosen size would only
+    # mean more real HTTP round trips for the same data.
+    _UPSTOX_HISTORICAL_TRADES_PATH = "/v2/charges/historical-trades"
+    _UPSTOX_HISTORICAL_TRADES_PAGE_SIZE = 1000
+    # Real safety valve, not a value Upstox's docs specify: a broker
+    # that never reports a real total_pages (or reports one that keeps
+    # growing) must not spin this loop forever. 200 pages at 1000 rows
+    # each is 200,000 transactions in one call -- comfortably beyond
+    # any real account's history, so a legitimate call never hits this.
+    _UPSTOX_HISTORICAL_TRADES_MAX_PAGES = 200
+
     # Logger for ``fetch_holdings`` — a module-level ``logging.getLogger``
     # on ``__name__`` so a real operator can route per-module log
     # records (e.g. ``logging.getLogger("components.c01_user_portfolio")``)
@@ -395,7 +478,7 @@ class DefaultUpstoxBrokerConnector:
     def __init__(
         self,
         config: UpstoxConfig,
-        http: "_UpstoxHttp",
+        http: "_UpstoxHttp | None" = None,
     ) -> None:
         # Deferred import — ``src/upstox_http`` already imports the
         # STORY-2 exception classes from this module at load time, so
@@ -406,6 +489,28 @@ class DefaultUpstoxBrokerConnector:
         # story (STORY-6 onwards).
         from upstox_http import _UpstoxHttp as _UpstoxHttpRuntime
         self._config = config
+        if http is None:
+            # STORY-9's registry factory (BROKER_CONNECTORS['upstox'])
+            # constructs this with only a config, matching the AC's own
+            # `lambda: DefaultUpstoxBrokerConnector(UpstoxConfig.from_env())`
+            # -- no real access token exists yet at registry-resolution
+            # time (tokens are per-connection, bound only once a user has
+            # actually connected). Real callers that DO have a bound
+            # token (every real test, and any real per-connection flow)
+            # pass their own real http explicitly, so this default is
+            # only ever exercised by an unconnected registry entry --
+            # failing with a clear, honest BrokerAuthError the moment a
+            # real call is attempted is correct there, not a crash or a
+            # silently wrong token.
+            def _no_token_bound() -> str:
+                raise BrokerAuthError(
+                    "DefaultUpstoxBrokerConnector has no real access "
+                    "token bound yet -- connect this broker via "
+                    "connect_portfolio before fetching holdings or "
+                    "transactions"
+                )
+
+            http = _UpstoxHttpRuntime(token_provider=_no_token_bound)
         self._http: _UpstoxHttpRuntime = http
 
     def build_authorize_url(self, *, state: str) -> str:
@@ -893,10 +998,213 @@ class DefaultUpstoxBrokerConnector:
         start_date: date,
         end_date: date,
     ) -> list[BrokerTransaction]:
-        raise NotImplementedError(
-            "DefaultUpstoxBrokerConnector.fetch_transactions is "
-            "implemented in STORY-8"
-        )
+        """Fetch historical trades from Upstox (STORY-8), paging through
+        every page rather than just the first.
+
+        Performs authenticated GETs against
+        ``https://api.upstox.com/v2/charges/historical-trades`` via
+        ``_UpstoxHttp.get`` -- the query string carries ``start_date``/
+        ``end_date`` (``YYYY-mm-dd``), ``page_number`` (starting at 1),
+        and ``page_size=1000``; ``segment`` is deliberately never
+        included so every segment is returned. ``_UpstoxHttp.get``
+        takes only a ``path``, so the query string is built here (via
+        ``urlencode``, same percent-encoding convention as
+        ``build_authorize_url`` above) and appended to the path rather
+        than changing the helper's signature -- ``fetch_holdings``'s
+        existing, unparameterised call is unaffected.
+
+        Real response shape (verbatim from the story's own docs)::
+
+            {
+              "status": "success",
+              "data": [
+                {"exchange", "segment", "trade_id", "trade_date",
+                 "scrip_name", "symbol", "transaction_type",
+                 "quantity", "price", "amount", "isin"},
+                ...
+              ],
+              "meta_data": {"page": {"page_number", "page_size",
+                                      "total_records", "total_pages"}}
+            }
+
+        Pages until ``page_number >= total_pages`` OR a page's own
+        ``data`` comes back empty (whichever happens first -- a
+        broker that ever reports a ``total_pages`` inconsistent with
+        its real data must not be trusted over the data itself), and
+        hard-caps at ``_UPSTOX_HISTORICAL_TRADES_MAX_PAGES`` real pages
+        fetched, raising ``BrokerApiError`` rather than looping forever
+        if that cap is reached without the loop ending on its own.
+
+        Mapping to ``BrokerTransaction`` (the STORY-8 table):
+
+          * ``external_id  <- trade_id``
+          * ``symbol       <- symbol``
+          * ``isin         <- isin``
+          * ``trade_date   <- date.fromisoformat(trade_date)``
+          * ``side         <- transaction_type.upper()`` -- only
+            ``BUY``/``SELL`` are accepted; any other value (Upstox
+            also reports non-trade ledger entries like dividends
+            through this same endpoint) is skipped with a warning
+            log, not a failure of the whole call.
+          * ``quantity``/``price``/``amount`` ``<- Decimal(str(...))``
+            -- same float-rounding-avoidance rule ``fetch_holdings``
+            already follows above.
+          * ``exchange``/``segment`` <- verbatim.
+          * ``raw`` <- the whole element, so an undocumented key is
+            never silently dropped.
+
+        De-duplicates by ``trade_id`` across pages, keeping the FIRST
+        occurrence seen (a real broker page can legitimately overlap
+        at its boundary if a trade lands exactly on the page-size
+        cutoff between two requests).
+
+        Raises:
+            ValueError: ``start_date > end_date``, checked before any
+                HTTP call is made.
+            BrokerApiError: a non-``'success'`` status, a malformed
+                response shape, an unparseable numeric/date field, or
+                the ``_UPSTOX_HISTORICAL_TRADES_MAX_PAGES`` cap being
+                reached.
+            BrokerAuthError / BrokerRateLimitError: propagated
+                unchanged from ``_UpstoxHttp.get`` -- same auth/rate-
+                limit contract ``fetch_holdings`` already relies on.
+        """
+        if start_date > end_date:
+            raise ValueError(
+                "DefaultUpstoxBrokerConnector.fetch_transactions: "
+                "start_date must be <= end_date"
+            )
+
+        transactions: list[BrokerTransaction] = []
+        seen_trade_ids: set = set()
+        page_number = 1
+
+        while True:
+            if page_number > self._UPSTOX_HISTORICAL_TRADES_MAX_PAGES:
+                raise BrokerApiError(
+                    "Upstox historical-trades pagination exceeded "
+                    f"{self._UPSTOX_HISTORICAL_TRADES_MAX_PAGES} real "
+                    "pages without the broker's own total_pages ending "
+                    "the loop"
+                )
+
+            query = urlencode(
+                [
+                    ("start_date", start_date.isoformat()),
+                    ("end_date", end_date.isoformat()),
+                    ("page_number", str(page_number)),
+                    ("page_size", str(self._UPSTOX_HISTORICAL_TRADES_PAGE_SIZE)),
+                ]
+            )
+            response_body = self._http.get(
+                path=f"{self._UPSTOX_HISTORICAL_TRADES_PATH}?{query}"
+            )
+
+            # Belt-and-braces status check -- same reasoning as
+            # fetch_holdings' own identical check above: the real
+            # helper already enforces this on a 2xx, but a test that
+            # mocks ``_UpstoxHttp.get`` directly (bypassing the
+            # helper's own mapping) still gets the documented
+            # behaviour for free.
+            if response_body.get("status") != "success":
+                raise BrokerApiError(
+                    "Upstox historical-trades response status is "
+                    f"{response_body.get('status')!r}, not 'success'"
+                )
+
+            data = response_body.get("data")
+
+            # An empty page ends pagination immediately, regardless of
+            # what total_pages claims -- the AC's explicit "stopping
+            # also if data comes back empty" rule. This is also what
+            # makes the empty-fixture case make exactly one request.
+            if not data:
+                break
+
+            if not isinstance(data, list):
+                raise BrokerApiError(
+                    "Upstox historical-trades response 'data' field is "
+                    f"not a list; got {type(data).__name__}"
+                )
+
+            for element in data:
+                if not isinstance(element, dict):
+                    raise BrokerApiError(
+                        "Upstox historical-trades 'data' element is not "
+                        f"a dict; got {type(element).__name__}"
+                    )
+
+                # Dedup by trade_id BEFORE any other processing --
+                # "keeping the first occurrence" means identity alone
+                # decides it, independent of whether that occurrence
+                # is later skipped for an unrecognized transaction_type.
+                trade_id = element.get("trade_id")
+                if trade_id is not None:
+                    if trade_id in seen_trade_ids:
+                        continue
+                    seen_trade_ids.add(trade_id)
+
+                transaction_type_raw = element.get("transaction_type")
+                side = (
+                    transaction_type_raw.upper()
+                    if isinstance(transaction_type_raw, str)
+                    else ""
+                )
+                if side not in ("BUY", "SELL"):
+                    self._logger.warning(
+                        "DefaultUpstoxBrokerConnector.fetch_transactions: "
+                        "[UPSTOX_TRANSACTION_ROW_SKIPPED] skipping row "
+                        "with an unrecognized transaction_type",
+                        extra={
+                            "error_code": "UPSTOX_TRANSACTION_ROW_SKIPPED",
+                            "trade_id": trade_id,
+                            "transaction_type": transaction_type_raw,
+                        },
+                    )
+                    continue
+
+                trade_date_raw = element.get("trade_date")
+                try:
+                    trade_date_value = date.fromisoformat(trade_date_raw)
+                except (TypeError, ValueError) as exc:
+                    raise BrokerApiError(
+                        "Upstox historical-trades element has an "
+                        f"invalid trade_date: {trade_date_raw!r}"
+                    ) from exc
+
+                try:
+                    quantity = Decimal(str(element.get("quantity")))
+                    price = Decimal(str(element.get("price")))
+                    amount = Decimal(str(element.get("amount")))
+                except (InvalidOperation, ValueError) as exc:
+                    raise BrokerApiError(
+                        "Upstox historical-trades element has a "
+                        "non-numeric value where a number was expected"
+                    ) from exc
+
+                transactions.append(
+                    BrokerTransaction(
+                        external_id=str(trade_id) if trade_id is not None else "",
+                        symbol=element.get("symbol") or "",
+                        isin=element.get("isin") or "",
+                        trade_date=trade_date_value,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        amount=amount,
+                        exchange=element.get("exchange") or "",
+                        segment=element.get("segment") or "",
+                        raw=element,
+                    )
+                )
+
+            page_info = (response_body.get("meta_data") or {}).get("page") or {}
+            total_pages = page_info.get("total_pages")
+            if not isinstance(total_pages, int) or page_number >= total_pages:
+                break
+            page_number += 1
+
+        return transactions
 
 
 # Canned default data for StubBrokerConnector — defined at module
@@ -1804,10 +2112,16 @@ class UserPortfolio(Protocol):
     ) -> BrokerConnectionRecord:
         ...
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
         ...
 
-    def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
         ...
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
@@ -1861,13 +2175,19 @@ class StubUserPortfolio:
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
 
-    def import_holdings(self, portfolio: Portfolio) -> list[Holding]:
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
         with traced("StubUserPortfolio.import_holdings"):
-            return []
+            return HoldingsImportResult(holdings_written=0, skipped=0)
 
-    def import_transactions(self, portfolio: Portfolio) -> list[Transaction]:
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
         with traced("StubUserPortfolio.import_transactions"):
-            return []
+            return ImportResult(transactions_inserted=0, transactions_skipped_existing=0, rows_skipped_invalid=0)
 
     def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
         with traced("StubUserPortfolio.synchronize_portfolio"):
@@ -2094,10 +2414,32 @@ class DefaultUserPortfolio:
         knowledge_entity: DefaultKnowledgeEntity | None = None,
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
-        self._broker_connector = broker_connector or PlaceholderBrokerConnector()
+        # None (the real default) means "resolve fresh via the broker
+        # registry, per broker_id, on every call" (STORY-9) -- an
+        # explicitly injected connector always wins when given (every
+        # existing test's own real seam, unchanged), but the real,
+        # un-injected production path must never pin a single broker
+        # instance for the whole component's lifetime: import_holdings/
+        # import_transactions are called with a real, specific broker_id
+        # each time, and a second broker must become usable with zero
+        # changes here. See _resolve_broker_connector below.
+        self._broker_connector = broker_connector
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._audit_manager = audit_manager or DefaultAuditManager()
         self._knowledge_entity = knowledge_entity or DefaultKnowledgeEntity(infrastructure=self._infrastructure)
+
+    def _resolve_broker_connector(self, broker_id: str) -> "BrokerConnector":
+        """The constructor-injected connector (if any) always wins --
+        this is what every existing test that passes broker_connector=
+        to the constructor already relies on, and it's a legitimate,
+        real override (e.g. a caller that only ever talks to one
+        broker and wants to skip the registry entirely). Otherwise
+        resolves fresh via get_broker_connector(broker_id) -- the real
+        registry (STORY-9), so a second real broker becomes usable
+        here with zero changes to this method or its callers."""
+        if self._broker_connector is not None:
+            return self._broker_connector
+        return get_broker_connector(broker_id)
 
     def onboard_user(self, details: dict) -> User:
         with traced("DefaultUserPortfolio.onboard_user"):
@@ -2161,211 +2503,106 @@ class DefaultUserPortfolio:
             )
             return record
 
-    def import_holdings(
-        self,
-        portfolio: Portfolio,
-        failed_records: list[FailedRecord] | None = None,
-        holdings_failed: int | None = None,
-    ) -> list[Holding]:
-        """Import holdings from the broker connector (STORY-SYNC-08).
+    def import_holdings(self, user_id: str, broker_id: str) -> HoldingsImportResult:
+        """Import broker holdings for ``user_id`` / ``broker_id`` (STORY-14).
 
-        Each record upsert is wrapped in try/except. On error: logs the
-        full context (broker_id, reason, raw_data), appends a FailedRecord
-        to ``failed_records``, increments ``holdings_failed`` by 1, and
-        continues processing the remaining records. One bad record never
-        aborts the entire sync.
+        **Snapshot semantics**: holdings are a point-in-time snapshot, not
+        an append/upsert log like transactions -- each real import
+        replaces the ENTIRE stored set for (user_id, broker_id) inside a
+        single transaction (delete existing rows, insert the freshly
+        fetched set). A row-by-row upsert would leave sold-out positions
+        behind with no signal they were ever sold; replace makes a
+        holding's disappearance from the broker mean its disappearance
+        from our table too.
 
-        Args:
-            portfolio: the portfolio to import into.
-            failed_records: in-out list appended to in place; caller
-                passes the list the sync result will ultimately carry.
-            holdings_failed: in-out int incremented in place for each
-                failed record; caller passes the counter the sync result
-                will ultimately carry.
+        **Error handling**:
+          * No stored connection for (user_id, broker_id) raises
+            ``BrokerNotConnectedError`` before any connector call.
+          * ``BrokerAuthError`` marks the connection status ERROR with a
+            reconnect-oriented message (generated generically from the
+            connector's ``display_name``, no broker-specific text) and
+            re-raises.
+          * A connector exception happens before any write -- the
+            pre-existing holdings rows are always left untouched.
+          * ``last_import_at`` is updated on the connection row only on
+            success.
 
-        Returns:
-            List of successfully imported holdings (failed ones omitted).
+        Zero holdings is a valid result (the existing set is still
+        replaced -- with nothing -- and ``holdings_written`` is 0), not
+        an error.
         """
-        _logger = logging.getLogger(__name__)
         with traced("DefaultUserPortfolio.import_holdings"):
-            credentials = self._load_credentials(portfolio)
-            if credentials is None:
-                return []
-            # Fetch holdings using the broker_connector
-            raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
-            holdings = []
+            connection = self._infrastructure.get_broker_connection(user_id, broker_id)
+            if connection is None:
+                raise BrokerNotConnectedError(
+                    f"no broker connection stored for user_id={user_id} broker_id={broker_id}"
+                )
+
+            try:
+                credentials = BrokerCredentials(
+                    access_token=connection.access_token,
+                    token_type=connection.token_type,
+                    expires_at=connection.access_token_expires_at,
+                    refresh_token=None,
+                    broker_user_id=connection.broker_user_id,
+                    raw={},
+                )
+            except BrokerConfigError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "access token could not be decrypted for import_holdings"
+                )
+                raise BrokerAuthError(
+                    f"access token for user_id={user_id} broker_id={broker_id} "
+                    f"could not be decrypted"
+                )
+
+            connector = self._resolve_broker_connector(broker_id)
+            try:
+                raw_holdings = connector.fetch_holdings(credentials=credentials)
+            except BrokerAuthError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    f"{connector.display_name} access expired, please reconnect"
+                )
+                raise
+            except BrokerApiError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerApiError during import_holdings"
+                )
+                raise
+
+            rows = []
+            skipped = 0
             for raw in raw_holdings:
                 try:
                     tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                    holding = Holding(
-                        portfolio_id=portfolio.id,
-                        security_id=tagged["symbol"],
-                        quantity=tagged["quantity"],
-                        broker_holding_id=tagged.get("isin"),
-                    )
-                    self._infrastructure.store(
-                        HOLDINGS_TABLE,
-                        {
-                            "id": f"{portfolio.id}:{holding.security_id}",
-                            **asdict(holding),
-                            "provenance": tagged.get("provenance"),
-                        },
-                    )
-                    holdings.append(holding)
-                except Exception as exc:  # noqa: BLE001
-                    broker_id = getattr(self._broker_connector, "broker_id", None)
-                    _logger.exception(
-                        "[HOLDING_UPSERT_FAILED] broker_id=%s reason=%s raw_data=%s",
-                        broker_id,
-                        exc,
-                        raw,
-                    )
-                    if failed_records is not None:
-                        failed_records.append(
-                            FailedRecord(
-                                record_type="holding",
-                                broker_id=broker_id,
-                                reason=str(exc),
-                                raw_data=raw,
-                            )
-                        )
-                    if holdings_failed is not None:
-                        holdings_failed[0] += 1
-            return holdings
+                    _validate_holding_row(tagged)
+                except Exception:
+                    skipped += 1
+                    continue
+                rows.append({
+                    "symbol": tagged["symbol"],
+                    "isin": tagged["isin"],
+                    "quantity": tagged.get("quantity"),
+                    "average_price": tagged.get("average_price"),
+                    "last_price": tagged.get("last_price"),
+                    "exchange": tagged.get("exchange"),
+                    "instrument_id": tagged.get("instrument_id"),
+                    "raw": tagged.get("raw", {}),
+                })
 
-    def import_transactions(
-        self,
-        portfolio: Portfolio,
-        start_date: date = date.min,
-        end_date: date = date.max,
-        failed_records: list[FailedRecord] | None = None,
-        transactions_failed: int | None = None,
-    ) -> list[Transaction]:
-        """Import transactions from the broker connector (STORY-SYNC-08).
+            # Real, atomic replace: existing rows for (user_id, broker_id)
+            # are deleted and the freshly fetched set inserted inside one
+            # transaction (adr/0019's real Postgres, not a best-effort
+            # loop) -- a mid-write failure here leaves the PRE-existing
+            # rows exactly as they were, never a half-updated mix.
+            self._infrastructure.replace_broker_holdings(user_id, broker_id, rows)
 
-        Each record upsert is wrapped in try/except. On error: logs the
-        full context (broker_id, reason, raw_data), appends a FailedRecord
-        to ``failed_records``, increments ``transactions_failed`` by 1, and
-        continues processing the remaining records. One bad record never
-        aborts the entire sync.
+            self._infrastructure.touch_last_import(user_id, broker_id)
 
-        Args:
-            portfolio: the portfolio to import into.
-            start_date: start of the transaction fetch window.
-            end_date: end of the transaction fetch window.
-            failed_records: in-out list appended to in place; caller
-                passes the list the sync result will ultimately carry.
-            transactions_failed: in-out int incremented in place for each
-                failed record; caller passes the counter the sync result
-                will ultimately carry.
-
-        Returns:
-            List of successfully imported transactions (failed ones omitted).
-        """
-        _logger = logging.getLogger(__name__)
-        with traced("DefaultUserPortfolio.import_transactions"):
-            credentials = self._load_credentials(portfolio)
-            if credentials is None:
-                return []
-            # Fetch transactions using the broker_connector
-            raw_transactions = self._broker_connector.fetch_transactions(
-                credentials=credentials, start_date=start_date, end_date=end_date
-            )
-            transactions = []
-            for raw in raw_transactions:
-                try:
-                    tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
-                    transaction = Transaction(
-                        portfolio_id=portfolio.id,
-                        kind=tagged["side"],
-                        amount=tagged["amount"],
-                        broker_transaction_id=tagged.get("external_id"),
-                    )
-                    self._infrastructure.store(
-                        TRANSACTIONS_TABLE,
-                        {
-                            "id": str(uuid.uuid4()),
-                            **asdict(transaction),
-                            "provenance": tagged.get("provenance"),
-                        },
-                    )
-                    transactions.append(transaction)
-                except Exception as exc:  # noqa: BLE001
-                    broker_id = getattr(self._broker_connector, "broker_id", None)
-                    _logger.exception(
-                        "[TRANSACTION_UPSERT_FAILED] broker_id=%s reason=%s raw_data=%s",
-                        broker_id,
-                        exc,
-                        raw,
-                    )
-                    if failed_records is not None:
-                        failed_records.append(
-                            FailedRecord(
-                                record_type="transaction",
-                                broker_id=broker_id,
-                                reason=str(exc),
-                                raw_data=raw,
-                            )
-                        )
-                    if transactions_failed is not None:
-                        transactions_failed[0] += 1
-            return transactions
-
-    def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
-        """Synchronize the portfolio with the latest broker data (STORY-SYNC-08).
-
-        Fetches holdings and transactions from the broker connector and upserts
-        each one individually. Per-record try/except wrapping ensures one bad
-        record cannot abort the entire sync: on exception the error is logged
-        with full context (broker_id, reason, raw_data), a FailedRecord is
-        appended, the appropriate *_failed counter is incremented, and
-        processing continues with the next record.
-
-        Returns a SyncResult where ``success`` is ``False`` when any records
-        failed to process, and ``has_changes`` reflects any adds/updates/removes
-        (not failures alone).
-        """
-        with traced("DefaultUserPortfolio.synchronize_portfolio"):
-            sync_started_at = datetime.now(timezone.utc)
-
-            # Shared mutable containers passed into the per-record handlers so
-            # each upsert can append to failed_records and increment the
-            # appropriate *_failed counter in place.
-            failed_records: list[FailedRecord] = []
-            holdings_failed = [0]
-            transactions_failed = [0]
-
-            # Import holdings — bad records are handled inside the loop.
-            holdings = self.import_holdings(
-                portfolio,
-                failed_records=failed_records,
-                holdings_failed=holdings_failed,
-            )
-            # Import transactions — bad records are handled inside the loop.
-            transactions = self.import_transactions(
-                portfolio,
-                failed_records=failed_records,
-                transactions_failed=transactions_failed,
-            )
-
-            sync_completed_at = datetime.now(timezone.utc)
-            return SyncResult(
-                portfolio_id=portfolio.id,
-                # Holdings: added = holdings with no prior broker_holding_id match;
-                # updated = holdings where a match existed and quantity changed.
-                # For now, all successful imports are treated as adds (the
-                # reconciliation logic that drives added/updated/unchanged lives
-                # in STORY-SYNC-04/06, not here — this method holds the
-                # per-record error-handling concern only).
-                holdings_added=len(holdings),
-                holdings_failed=holdings_failed[0],
-                # Transactions: same reasoning as holdings.
-                transactions_added=len(transactions),
-                transactions_failed=transactions_failed[0],
-                failed_records=failed_records,
-                sync_started_at=sync_started_at,
-                sync_completed_at=sync_completed_at,
-            )
+            return HoldingsImportResult(holdings_written=len(rows), skipped=skipped)
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
         """Reads holdings already stored — via import_holdings above, or
@@ -2520,186 +2757,251 @@ class DefaultUserPortfolio:
             }
 
             try:
-                rate = fetch_exchange_rate(infrastructure=infrastructure)
-            except (MissingExchangeRateAPIKeyError, ExchangeRateFetchError) as exc:
-                # Real failure -- never fabricate a rate or a
-                # consolidated total. The subtotals are still real
-                # and still returned; only the consolidated answer is
-                # honestly unavailable. The error message names what
-                # was attempted so a caller / debugging session can
-                # see why no consolidated answer exists.
-                result["error"] = (
-                    f"consolidated total in {base_currency} is unavailable: "
-                    f"{type(exc).__name__}: {exc}"
+                credentials = BrokerCredentials(
+                    access_token=connection.access_token,
+                    token_type=connection.token_type,
+                    expires_at=connection.access_token_expires_at,
+                    refresh_token=None,
+                    broker_user_id=connection.broker_user_id,
+                    raw={},
                 )
-                return result
-
-            rate_quantized = rate.quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
-            result["rate"] = rate_quantized
-
-            if base_currency == "USD":
-                # Consolidated USD = usd_total + (inr_total / rate).
-                # Decimal division preserves precision at the quantum
-                # used here (rate is already 4dp; inr_total is already
-                # 4dp), then a final quantize re-fixes the rounding
-                # mode at the result's own precision.
-                if rate_quantized == 0:
-                    # A real rate of 0 is implausible (it would mean
-                    # 1 USD = 0 INR), but if `fetch_exchange_rate`
-                    # somehow returned one, divide-by-zero would
-                    # raise; treat it honestly as "consolidated total
-                    # unavailable" rather than fabricating.
-                    result["error"] = (
-                        f"consolidated total in {base_currency} is unavailable: "
-                        f"fetched INR/USD rate is zero"
-                    )
-                    return result
-                consolidated = (usd_total + (inr_total / rate_quantized)).quantize(
-                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
+            except BrokerConfigError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "access token could not be decrypted for import_holdings"
                 )
-            else:  # base_currency == "INR" (the only other valid value)
-                # Consolidated INR = (usd_total * rate) + inr_total.
-                consolidated = (usd_total * rate_quantized + inr_total).quantize(
-                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
+                raise BrokerAuthError(
+                    f"access token for user_id={user_id} broker_id={broker_id} "
+                    f"could not be decrypted"
                 )
 
-            result["consolidated_total"] = consolidated
-            return result
-
-    def calculate_gains_losses(self, snapshot: PortfolioSnapshot) -> dict:
-        """Gains/losses and percentage returns (STORY-8 acceptance
-        criterion). NOT IMPLEMENTED — and intentionally so.
-
-        Neither `Holding` nor `Position` tracks a cost basis or
-        purchase price anywhere in this codebase. There is no field
-        on either dataclass that records what the user paid per
-        share when they acquired the position, and inventing a
-        fabricated "purchase price" field — or a fabricated
-        gains/losses number from one — would be the precise failure
-        mode the story explicitly calls out: "don't invent a
-        fabricated gain/loss number".
-
-        The honest, real answer matches this project's own ADR
-        convention (e.g. ADR-0046's partial-resolution posture,
-        `c04_knowledge_entity` / `c07_event_observation`'s
-        `NotImplementedError`-on-real-gap pattern): raise a named
-        exception whose message explicitly documents the missing
-        `Holding.cost_basis` field and points at STORY-8. A caller
-        can catch this and either (a) extend the data model with a
-        real `cost_basis` field, or (b) decide that gains/losses
-        really aren't computable right now and surface that to the
-        user honestly. There is no silent fallback to a fabricated
-        number anywhere in this code path."""
-        raise NotImplementedError(
-            "calculate_gains_losses: Holding.cost_basis field is not implemented; "
-            "gains/losses and percentage returns cannot be computed for real -- "
-            "see STORY-8 acceptance criteria"
-        )
-
-    def manage_preferences(self, user: User, updates: dict) -> User:
-        with traced("DefaultUserPortfolio.manage_preferences"):
-            stored = self._infrastructure.retrieve(USERS_TABLE, user.id)
-            current_preferences = dict(stored["preferences"]) if stored else dict(user.preferences)
-            current_preferences.update(updates)
-            # `store()` replaces the whole record, not just `preferences`
-            # (same semantics DefaultInfrastructure/_FakeInfrastructure
-            # both use everywhere in this project) -- email has to be
-            # carried forward explicitly here, or a preference update
-            # would silently erase it.
-            email = stored.get("email", "") if stored else user.email
-            self._infrastructure.store(
-                USERS_TABLE, {"id": user.id, "preferences": current_preferences, "email": email}
-            )
-            return User(id=user.id, preferences=current_preferences, email=email)
-
-    def determine_user_relevance(self, user: User, event: dict) -> bool:
-        """Structural lookup, not cognition: does event["security_id"]
-        appear among this user's current holdings, across every
-        portfolio stored for them. `event["security_id"]` is the
-        load-bearing assumption here — Event & Observation (component
-        07) hasn't defined a real event schema yet, so this matches the
-        one field name Holding itself already uses, rather than
-        inventing a richer event contract nothing else in this project
-        has settled on."""
-        with traced("DefaultUserPortfolio.determine_user_relevance"):
-            event_security_id = event.get("security_id")
-            if not event_security_id:
-                return False
-            for portfolio_record in self._infrastructure.query(PORTFOLIOS_TABLE, {"user_id": user.id}):
-                holdings = self._infrastructure.query(
-                    HOLDINGS_TABLE, {"portfolio_id": portfolio_record["id"]}
+            connector = self._resolve_broker_connector(broker_id)
+            try:
+                raw_holdings = connector.fetch_holdings(credentials=credentials)
+            except BrokerAuthError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    f"{connector.display_name} access expired, please reconnect"
                 )
-                if any(holding["security_id"] == event_security_id for holding in holdings):
-                    return True
-            return False
+                raise
+            except BrokerApiError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerApiError during import_holdings"
+                )
+                raise
 
-    def list_available_securities(self, query: str = "") -> list[Entity]:
-        """The manual-entry path's answer to "what can a user pick
-        from" (ADR-0044) — every live entity Knowledge & Entity Model
-        (04) already knows about whose `kind` marks it as a tradeable
-        security or the company behind one, optionally narrowed by
-        `query` (substring match against name/aliases, same
-        normalization `DefaultKnowledgeEntity.search_entities` uses)
-        so a dropdown can filter as the user types. Merges results
-        across both tradeable kinds and dedups by entity id. A
-        registry with nothing registered yet — the honest state of a
-        fresh system before anything has seeded it — returns an empty
-        list; that is a correct answer, not a bug to paper over with
-        fake data."""
-        with traced("DefaultUserPortfolio.list_available_securities"):
-            securities_by_id: dict[str, Entity] = {}
-            for kind in _TRADEABLE_SECURITY_ENTITY_KINDS:
-                for entity in self._knowledge_entity.search_entities(kind=kind, query=query):
-                    securities_by_id[entity.id] = entity
-            return list(securities_by_id.values())
+            rows = []
+            skipped = 0
+            for raw in raw_holdings:
+                try:
+                    tagged = self._boundary_gate.tag_provenance(asdict(raw), source="broker_connector")
+                    _validate_holding_row(tagged)
+                except Exception:
+                    skipped += 1
+                    continue
+                rows.append({
+                    "symbol": tagged["symbol"],
+                    "isin": tagged["isin"],
+                    "quantity": tagged.get("quantity"),
+                    "average_price": tagged.get("average_price"),
+                    "last_price": tagged.get("last_price"),
+                    "exchange": tagged.get("exchange"),
+                    "instrument_id": tagged.get("instrument_id"),
+                    "raw": tagged.get("raw", {}),
+                })
 
-    def add_holding_manually(self, portfolio: Portfolio, security_id: str, quantity: float) -> Holding:
-        """The manual-entry counterpart to `import_holdings` (ADR-0044):
-        adds one `Holding` by direct selection rather than a broker
-        round-trip, entirely bypassing `BrokerConnector`. `security_id`
-        must resolve to a real, live entity via
-        `DefaultKnowledgeEntity.get_entity` — a direct id lookup, not
-        `resolve_entity`'s mention/name fuzzy match, since `security_id`
-        is expected to be an id a caller already got from
-        `list_available_securities`, not free text — before any
-        `Holding` is built; an id that doesn't resolve fails loudly
-        (`ValueError`) rather than silently creating a holding for a
-        security nobody registered. Unlike broker-sourced holdings,
-        this is never tagged `Provenance.UNTRUSTED`: the data crossing
-        into this component is a direct user selection over an
-        already-validated internal registry entry, not an external
-        system's payload — the same reasoning `onboard_user`/
-        `manage_preferences` already apply to direct user input (ADR-0044
-        documents this contrast with ADR-0022's broker-data tagging)."""
-        with traced("DefaultUserPortfolio.add_holding_manually"):
-            security = self._knowledge_entity.get_entity(security_id)
-            if security is None:
+            # Real, atomic replace: existing rows for (user_id, broker_id)
+            # are deleted and the freshly fetched set inserted inside one
+            # transaction (adr/0019's real Postgres, not a best-effort
+            # loop) -- a mid-write failure here leaves the PRE-existing
+            # rows exactly as they were, never a half-updated mix.
+            self._infrastructure.replace_broker_holdings(user_id, broker_id, rows)
+
+            self._infrastructure.touch_last_import(user_id, broker_id)
+
+            return HoldingsImportResult(holdings_written=len(rows), skipped=skipped)
+
+    def import_transactions(
+        self,
+        user_id: str,
+        broker_id: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ImportResult:
+        """Import broker transactions for ``user_id`` / ``broker_id`` (STORY-15).
+
+        Known limitation: history older than 3 financial years cannot be
+        imported from this source — Upstox does not serve older data.
+
+        **Default date window** (when neither argument is supplied):
+
+          * ``end_date`` = today in Asia/Kolkata (IST).
+          * ``start_date`` = 1 April of the Indian FY two years before the
+            current Indian FY. Indian FYs start 1 April; the "FY two years
+            before the current" is the widest window Upstox permits, matching
+            their documented "within the last 3 financial years" constraint.
+
+        **Date clamping**: a caller-supplied ``start_date`` earlier than the
+        computed minimum is clamped forward to that boundary and a warning
+        is logged. A ``start_date`` / ``end_date`` pair that is a valid,
+        narrower window is passed through unchanged.
+
+        **Validation**: ``start_date > end_date`` raises ``ValueError``
+        before any connector call.
+
+        **Idempotent upsert**: each transaction is inserted (or updated) in
+        the ``broker_transactions`` table keyed on
+        UNIQUE(user_id, broker_id, external_id). Re-running the import
+        skips existing rows, leaving them untouched.
+
+        **Transaction semantics**: all inserts run inside a single
+        transaction. A connector failure mid-import rolls back the entire
+        batch — the ``broker_transactions`` table is unchanged.
+
+        **Error handling**:
+          * ``BrokerAuthError`` marks the connection status ERROR and
+            re-raises.
+          * ``last_import_at`` is updated on the connection row only on
+            success.
+        """
+        with traced("DefaultUserPortfolio.import_transactions"):
+            # ── Resolve broker connection ──────────────────────────────────────
+            connection = self._infrastructure.get_broker_connection(user_id, broker_id)
+            if connection is None:
+                return ImportResult(transactions_inserted=0, transactions_skipped_existing=0, rows_skipped_invalid=0)
+
+            # ── Compute default date window ──────────────────────────────────
+            kolkata_tz = ZoneInfo("Asia/Kolkata")
+            today = datetime.now(kolkata_tz).date()
+            current_fy_year = today.year if today.month >= 4 else today.year - 1
+            # Indian FY two years before the current FY starts 1 April
+            min_start = date(current_fy_year - 2, 4, 1)
+
+            if end_date is None:
+                end_date = today
+            if start_date is None:
+                start_date = min_start
+
+            # ── Validation ────────────────────────────────────────────────────
+            if start_date > end_date:
                 raise ValueError(
-                    f"add_holding_manually: security_id {security_id!r} does not resolve to a known entity"
+                    f"import_transactions: start_date ({start_date}) cannot be after end_date ({end_date})"
                 )
-            holding = Holding(portfolio_id=portfolio.id, security_id=security.id, quantity=quantity)
-            self._infrastructure.store(
-                HOLDINGS_TABLE,
-                {"id": f"{portfolio.id}:{holding.security_id}", **asdict(holding)},
-            )
-            return holding
 
-    def add_transaction_manually(self, portfolio: Portfolio, kind: str, amount: float) -> Transaction:
-        """The manual-entry counterpart to `import_transactions`
-        (ADR-0044), mirroring its shape (`kind`/`amount`) for
-        consistency. `Transaction` carries no `security_id` field, so
-        there is nothing here to validate against Knowledge & Entity
-        Model — unlike `add_holding_manually`, this is a plain,
-        directly-trusted record of a user-entered transaction, not
-        tagged `Provenance.UNTRUSTED` for the same reason
-        `add_holding_manually` isn't."""
-        with traced("DefaultUserPortfolio.add_transaction_manually"):
-            transaction = Transaction(portfolio_id=portfolio.id, kind=kind, amount=amount)
-            self._infrastructure.store(
-                TRANSACTIONS_TABLE,
-                {"id": str(uuid.uuid4()), **asdict(transaction)},
+            # ── Clamp caller-supplied start_date backward to minimum ─────────
+            effective_start = max(start_date, min_start)
+            if start_date < min_start:
+                _logger.warning(
+                    "DefaultUserPortfolio.import_transactions: "
+                    "[IMPORT_START_DATE_CLAMPED] "
+                    "caller-supplied start_date %s is before the 3-FY boundary %s; "
+                    "clamped to %s",
+                    start_date,
+                    min_start,
+                    effective_start,
+                    extra={
+                        "event_code": "IMPORT_START_DATE_CLAMPED",
+                        "original_start_date": str(start_date),
+                        "min_start_date": str(min_start),
+                        "effective_start_date": str(effective_start),
+                        "end_date": str(end_date),
+                        "user_id": user_id,
+                        "broker_id": broker_id,
+                    },
+                )
+
+            # ── Fetch transactions ─────────────────────────────────────────────
+            try:
+                credentials = BrokerCredentials(
+                    access_token=connection.access_token,
+                    token_type=connection.token_type,
+                    expires_at=connection.access_token_expires_at,
+                    refresh_token=None,
+                    broker_user_id=connection.broker_user_id,
+                    raw={},
+                )
+            except BrokerConfigError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "access token could not be decrypted for import_transactions"
+                )
+                raise BrokerAuthError(
+                    f"access token for user_id={user_id} broker_id={broker_id} "
+                    f"could not be decrypted"
+                )
+
+            connector = self._resolve_broker_connector(broker_id)
+            try:
+                raw_transactions = connector.fetch_transactions(
+                    credentials=credentials,
+                    start_date=effective_start,
+                    end_date=end_date,
+                )
+            except BrokerAuthError:
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerAuthError during import_transactions"
+                )
+                raise
+            except BrokerApiError:
+                # Mark non-auth broker errors as ERROR too so the user knows
+                # the connection is in a bad state and needs attention.
+                self._infrastructure.mark_broker_connection_error(
+                    user_id, broker_id,
+                    "BrokerApiError during import_transactions"
+                )
+                raise
+
+            # ── Batch upsert ──────────────────────────────────────────────────
+            inserted = 0
+            skipped_existing = 0
+            skipped_invalid = 0
+            for raw in raw_transactions:
+                try:
+                    tagged = self._boundary_gate.tag_provenance(
+                        asdict(raw), source="broker_connector"
+                    )
+                except Exception:
+                    skipped_invalid += 1
+                    continue
+
+                # Validate required fields are present and non-empty
+                try:
+                    _validate_transaction_row(tagged)
+                except ValueError:
+                    skipped_invalid += 1
+                    continue
+
+                # Upsert keyed on (user_id, broker_id, external_id)
+                success = self._infrastructure.upsert_broker_transaction(
+                    user_id=user_id,
+                    broker_id=broker_id,
+                    external_id=tagged["broker_transaction_id"],
+                    symbol=tagged["symbol"],
+                    isin=tagged["isin"],
+                    trade_date=tagged["trade_date"],
+                    side=tagged["side"],
+                    quantity=tagged["quantity"],
+                    price=tagged["price"],
+                    amount=tagged["amount"],
+                    exchange=tagged["exchange"],
+                    segment=tagged["segment"],
+                    raw=tagged.get("raw", {}),
+                )
+                if success:
+                    inserted += 1
+                else:
+                    skipped_existing += 1
+
+            # ── Update last_import_at on success ─────────────────────────────
+            self._infrastructure.touch_last_import(user_id, broker_id)
+
+            return ImportResult(
+                transactions_inserted=inserted,
+                transactions_skipped_existing=skipped_existing,
+                rows_skipped_invalid=skipped_invalid,
             )
-            return transaction
 
     def _stored_holdings(self, portfolio_id: str) -> list[Holding]:
         records = self._infrastructure.query(HOLDINGS_TABLE, {"portfolio_id": portfolio_id})
@@ -2713,27 +3015,37 @@ class DefaultUserPortfolio:
             for record in records
         ]
 
-    def _load_credentials(self, portfolio: Portfolio) -> BrokerCredentials | None:
-        """Read the broker_credentials stored on `portfolio` at
-        `connect_portfolio` time, strip the provenance key added by
-        `BoundaryGate.tag_provenance`, and rebuild a `BrokerCredentials`
-        instance. Returns `None` when the portfolio has no stored
-        `broker_connection` (the same "no broker connected" case
-        `import_holdings` / `import_transactions` already short-circuit
-        on), so callers can early-return without restating the lookup."""
-        stored = self._infrastructure.retrieve(PORTFOLIOS_TABLE, portfolio.id)
-        if not stored or "broker_connection" not in stored:
-            return None
-        tagged_credentials = stored["broker_connection"]
-        if isinstance(tagged_credentials, dict):
-            credentials_dict = {k: v for k, v in tagged_credentials.items() if k != "_provenance"}
-        else:
-            credentials_dict = {}
-        return BrokerCredentials(
-            access_token=credentials_dict.get("access_token"),
-            token_type=credentials_dict.get("token_type", "Bearer"),
-            expires_at=credentials_dict.get("expires_at"),
-            refresh_token=credentials_dict.get("refresh_token"),
-            broker_user_id=credentials_dict.get("broker_user_id"),
-            raw=credentials_dict.get("raw", {}),
-        )
+
+def _validate_transaction_row(row: dict) -> None:
+    """Raise ValueError if a transaction row dict is missing required fields.
+
+    Checks ``broker_transaction_id`` (BrokerTransaction's real dataclass
+    field) rather than ``external_id`` -- the latter is only a read-only
+    ``@property`` alias for backwards-compat callers, and
+    ``dataclasses.asdict()`` (what builds this ``row`` dict) never
+    includes computed properties, only real fields. Checking the alias
+    here would make every real row look invalid."""
+    required = ("broker_transaction_id", "symbol", "isin", "trade_date", "side",
+                "quantity", "price", "amount", "exchange", "segment")
+    for field in required:
+        value = row.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"import_transactions: missing or empty required field {field!r}")
+
+
+def _validate_holding_row(row: dict) -> None:
+    """Raise ValueError if a holding row dict is missing its required
+    identity fields (STORY-14). Only symbol/isin are required -- unlike
+    transactions, quantity/average_price/last_price are legitimately
+    ``None`` on BrokerHolding, so requiring them here would reject real,
+    valid holdings."""
+    required = ("symbol", "isin")
+    for field in required:
+        value = row.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"import_holdings: missing or empty required field {field!r}")
+
+
+# Module-level logger for the import_transactions warning
+_logger = logging.getLogger(__name__)
+
