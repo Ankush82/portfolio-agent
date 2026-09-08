@@ -91,16 +91,25 @@ class TestBrokerConnectionsEndpoint:
         assert any(b["broker_id"] == "stub" for b in brokers)
         assert any(b["display_name"] == "Stub Broker" for b in brokers)
 
-    def test_returns_empty_list_when_no_brokers_registered(self):
+    def test_returns_only_the_real_shipped_brokers_when_no_test_broker_registered(self):
+        """Upstox is a real, shipped broker (BROKER_CONNECTORS), not a
+        test double -- it must always appear here regardless of what a
+        test dynamically registers/unregisters, matching the real
+        production behavior of a server where nothing ever calls
+        register_broker_connector(). Previously list_available_brokers()
+        only read the dynamic registry, so a real, unconfigured
+        production server always returned []  and the Connect button
+        never rendered for anyone; this asserts the fix instead of the
+        original bug."""
         app = create_app()
-        # Ensure no connectors are registered
+        # Ensure no test-only connector is registered
         unregister_broker_connector("stub")
         client = _make_authenticated_client(app)
 
         brokers = client.get("/api/brokers/connections").get_json()["available_brokers"]
 
         assert isinstance(brokers, list)
-        assert len(brokers) == 0
+        assert [b["broker_id"] for b in brokers] == ["upstox"]
 
 
 # ---------------------------------------------------------------------------
@@ -131,15 +140,24 @@ class TestSettingsBrokersPage:
         assert 'data-broker-id="stub"' in html
 
     def test_no_hardcoded_upstox_reference(self):
-        """Template renders from the registry, not hard-coded Upstox entry."""
-        app = create_app()
-        # Only StubBrokerConnector is registered — no Upstox connector
-        register_broker_connector(StubBrokerConnector())
-        client = _make_authenticated_client(app)
+        """Template renders every 'Connect <broker>' button from the
+        `available_brokers` loop variable, never a literal, hardcoded
+        broker name in the markup itself -- source-inspected directly
+        on the .html file, since Upstox is now a real, always-present
+        shipped broker (BROKER_CONNECTORS) and so always legitimately
+        appears in a live-rendered page regardless of what's registered
+        for this test."""
+        from pathlib import Path
 
-        html = client.get("/settings/brokers").get_data(as_text=True)
+        template_path = (
+            Path(__file__).resolve().parent.parent
+            / "templates"
+            / "settings_brokers.html"
+        )
+        source = template_path.read_text()
 
-        assert "Connect Upstox" not in html
+        assert "Connect Upstox" not in source
+        assert "Connect {{ broker.display_name }}" in source
 
     def test_button_is_not_disabled_on_page_load(self):
         """AC: Button is disabled and shows a loading state while the request

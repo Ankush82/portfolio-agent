@@ -90,21 +90,27 @@ def _default_upstox_connector() -> "BrokerConnector":
 # STORY-9: the real extension point for adding a new broker. To add
 # one: write a real Default<Broker>BrokerConnector class conforming to
 # the BrokerConnector Protocol, then add ONE line here mapping its
-# broker_id to a zero-arg factory that builds it -- nothing else in
-# this project needs to change (DefaultUserPortfolio, connect_portfolio,
-# import_holdings/import_transactions all resolve purely through
-# get_broker_connector(broker_id), never a hardcoded class name).
+# broker_id to (display_name, a zero-arg factory that builds it) --
+# nothing else in this project needs to change (DefaultUserPortfolio,
+# connect_portfolio, import_holdings/import_transactions all resolve
+# purely through get_broker_connector(broker_id), never a hardcoded
+# class name).
 #
-# Values are LAZY factories (Callable[[], BrokerConnector]), not
-# already-built instances: UpstoxConfig.from_env() raises
+# The factory is LAZY (Callable[[], BrokerConnector]), not an
+# already-built instance: UpstoxConfig.from_env() raises
 # BrokerConfigError when UPSTOX_CLIENT_ID/SECRET/REDIRECT_URI aren't
 # set, and that must happen when get_broker_connector('upstox') is
 # actually CALLED, not merely because this module got imported in an
 # environment that doesn't have Upstox configured (which would break
 # every test/tool that imports this module at all, whether or not it
-# ever touches a broker).
-BROKER_CONNECTORS: dict[str, Callable[[], "BrokerConnector"]] = {
-    "upstox": _default_upstox_connector,
+# ever touches a broker). display_name is stored alongside it, not
+# read off a built instance, for the same reason: list_available_brokers()
+# (STORY-20's settings/brokers UI, and STORY-18's connections API) must
+# show every real, shipped broker -- including one that isn't configured
+# yet, so its "Connect" button/not-configured message can render at all --
+# without ever invoking the factory and risking BrokerConfigError.
+BROKER_CONNECTORS: dict[str, tuple[str, Callable[[], "BrokerConnector"]]] = {
+    "upstox": ("Upstox", _default_upstox_connector),
 }
 
 
@@ -122,8 +128,9 @@ def get_broker_connector(broker_id: str) -> "BrokerConnector":
     connector = _broker_connector_registry.get(broker_id)
     if connector is not None:
         return connector
-    factory = BROKER_CONNECTORS.get(broker_id)
-    if factory is not None:
+    entry = BROKER_CONNECTORS.get(broker_id)
+    if entry is not None:
+        _display_name, factory = entry
         return factory()
     raise UnsupportedBrokerError(
         f"no connector registered for broker_id {broker_id!r}; "
@@ -142,16 +149,39 @@ def unregister_broker_connector(broker_id: str) -> None:
 
 
 def list_available_brokers() -> list[dict]:
-    """Return display metadata for every registered BrokerConnector.
+    """Return display metadata for every available BrokerConnector --
+    every explicitly registered instance (``register_broker_connector``,
+    what tests use) PLUS every real, shipped broker in ``BROKER_CONNECTORS``
+    that wasn't already covered by an explicit registration.
 
     Each dict contains the fields required by STORY-20's settings/brokers
     UI: ``broker_id`` and ``display_name``. The registry is the single
     source of truth; nothing is hard-coded here.
+
+    ``BROKER_CONNECTORS`` entries are read from the stored (display_name,
+    factory) pair, never by calling the factory: a real production run
+    with no explicit registration (nothing calls
+    ``register_broker_connector`` outside tests) previously made this
+    function return an empty list, so the "Connect <broker>" button
+    never rendered for any real user, for any broker, ever -- even
+    though ``get_broker_connector(broker_id)`` (the actual connect/
+    import code path) worked correctly the whole time via its own
+    ``BROKER_CONNECTORS`` fallback. Calling the factory here to recover
+    would reintroduce the same bug for an unconfigured broker (its
+    factory raises ``BrokerConfigError`` before returning), and the
+    button must still render, disabled with an explanatory message
+    (STORY-20), even then.
     """
-    return [
-        {"broker_id": connector.broker_id, "display_name": connector.display_name}
+    listed = {
+        connector.broker_id: {
+            "broker_id": connector.broker_id,
+            "display_name": connector.display_name,
+        }
         for connector in _broker_connector_registry.values()
-    ]
+    }
+    for broker_id, (display_name, _factory) in BROKER_CONNECTORS.items():
+        listed.setdefault(broker_id, {"broker_id": broker_id, "display_name": display_name})
+    return list(listed.values())
 
 
 # Exception hierarchy for BrokerConnector (ADR-0022)
