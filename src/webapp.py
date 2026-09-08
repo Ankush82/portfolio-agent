@@ -40,6 +40,7 @@ from components.c01_user_portfolio import (
     get_broker_connector,
     list_available_brokers,
 )
+import oauth_state
 from oauth_state import (
     InvalidOAuthStateError,
     OAuthStateExpiredError,
@@ -53,7 +54,7 @@ from exchange_rate_client import (
     fetch_exchange_rate,
 )
 from market_hours import market_status, UnknownMarketError, MarketHoursConfigError
-from infrastructure_postgres import DefaultInfrastructure
+from infrastructure_postgres import DefaultInfrastructure, DEFAULT_POSTGRES_DSN
 
 # Currency symbol constants for Unicode with ASCII fallback
 _CURRENCY_SYMBOLS = {
@@ -270,6 +271,14 @@ def create_app() -> Flask:
         static_folder=str(_STATIC_DIR),
     )
     app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
+
+    # oauth_state's module-level functions (issue_state/consume_state, used
+    # by the Upstox connect/callback routes below) refuse to run until
+    # configured with a DSN -- real, deliberate fail-fast rather than a
+    # silent default. DefaultInfrastructure() elsewhere in this file falls
+    # back to the same DEFAULT_POSTGRES_DSN when no DSN is passed, so this
+    # matches the DB every other route in this app already talks to.
+    oauth_state.configure(DEFAULT_POSTGRES_DSN)
 
     @app.get("/")
     def index():
