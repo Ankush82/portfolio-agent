@@ -9,22 +9,22 @@
     "BrokerApiError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "BrokerAuthError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "BrokerConfigError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "BrokerConnector": {
@@ -43,8 +43,8 @@
     "BrokerError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "BrokerHolding": {
@@ -54,8 +54,8 @@
     "BrokerRateLimitError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "BrokerTransaction": {
@@ -128,8 +128,8 @@
     "UnsupportedBrokerError": {
       "kind": "type",
       "public_callables": {
-        "add_note": "() -> ",
-        "with_traceback": "() -> "
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
       }
     },
     "UserPortfolio": {
