@@ -162,40 +162,53 @@ def consume_state(state: str) -> tuple[str, str]:
     cutoff = now - _STATE_TTL_DELTA
 
     with _connection().cursor() as cursor:
-        # Atomic consume: UPDATE … WHERE consumed_at IS NULL, return the row.
+        # Atomic consume: only actually flips consumed_at when it was still
+        # NULL. RETURNING always reflects the POST-update row -- if the
+        # WHERE clause didn't also require consumed_at IS NULL, a replay
+        # would match, get its consumed_at overwritten to `now`, and
+        # RETURNING would show that fresh, non-NULL value, making a replay
+        # indistinguishable from a genuine first consume. Requiring
+        # consumed_at IS NULL here means a real replay attempt matches
+        # zero rows (never touches the row a second time), not one that
+        # merely looks unconsumed on the way out.
         cursor.execute(
             """
             UPDATE oauth_states
             SET consumed_at = %s
-            WHERE state = %s
-            RETURNING user_id, broker_id, consumed_at, created_at
+            WHERE state = %s AND consumed_at IS NULL
+            RETURNING user_id, broker_id, created_at
             """,
             (now, state),
         )
         row = cursor.fetchone()
 
-    if row is None:
-        # No row matched at all → invalid token (never issued or already
-        # purged after expiry).
+        if row is not None:
+            user_id, broker_id, created_at = row
+            if created_at < cutoff:
+                raise OAuthStateExpiredError(
+                    f"State token has expired: {state!r} "
+                    f"(created {created_at}, cutoff {cutoff})"
+                )
+            return user_id, broker_id
+
+        # The UPDATE matched no row -- either the token never existed, or
+        # it did but was already consumed. A read-only lookup (no WHERE
+        # consumed_at IS NULL this time) distinguishes the two so the
+        # right exception is raised.
+        cursor.execute(
+            "SELECT consumed_at FROM oauth_states WHERE state = %s",
+            (state,),
+        )
+        existing = cursor.fetchone()
+
+    if existing is None:
         raise InvalidOAuthStateError(
             f"State token not found: {state!r}"
         )
 
-    user_id, broker_id, consumed_at, created_at = row
-
-    if consumed_at is not None:
-        # Row was matched but consumed_at was already set → replay.
-        raise OAuthStateReplayError(
-            f"State token has already been consumed: {state!r}"
-        )
-
-    if created_at < cutoff:
-        raise OAuthStateExpiredError(
-            f"State token has expired: {state!r} "
-            f"(created {created_at}, cutoff {cutoff})"
-        )
-
-    return user_id, broker_id
+    raise OAuthStateReplayError(
+        f"State token has already been consumed: {state!r}"
+    )
 
 
 def purge_expired_states() -> int:

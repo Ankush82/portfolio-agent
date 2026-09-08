@@ -18,22 +18,42 @@ pytest, simply:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, session, redirect, url_for
 from yahoo_finance_client import fetch_yahoo_finance_quote, YahooFinanceError
 
+from components.c01_user_portfolio import (
+    BrokerApiError,
+    BrokerAuthError,
+    BrokerConfigError,
+    BrokerNotConnectedError,
+    BrokerRateLimitError,
+    DefaultUserPortfolio,
+    UnsupportedBrokerError,
+    get_broker_connector,
+    list_available_brokers,
+)
+from oauth_state import (
+    InvalidOAuthStateError,
+    OAuthStateExpiredError,
+    OAuthStateReplayError,
+    consume_state,
+    issue_state,
+)
 from exchange_rate_client import (
     ExchangeRateFetchError,
     MissingExchangeRateAPIKeyError,
     fetch_exchange_rate,
 )
 from market_hours import market_status, UnknownMarketError, MarketHoursConfigError
+from infrastructure_postgres import DefaultInfrastructure
 
 # Currency symbol constants for Unicode with ASCII fallback
 _CURRENCY_SYMBOLS = {
@@ -53,7 +73,7 @@ _STATIC_DIR = _REPO_ROOT / "static"
 _PRICE_QUANTUM = Decimal("0.01")
 
 # Default base currency (can be overridden by user preference)
-_DEFAULT_BASE_CURRENCY = "INR"
+_DEFAULT_BASE_CURRENCY = "USD"
 
 
 def get_currency_symbol(currency: str) -> str:
@@ -108,16 +128,33 @@ def format_price_with_thousand_separators(value: Any) -> str:
         return str(value)
 
 
-def get_user_base_currency() -> str:
+def get_user_base_currency(user_id: str | None = None) -> str:
     """Get the user's base currency preference.
     
-    In a real implementation, this would read from the user's profile
-    in the database. For now, returns the default base currency.
+    Reads from the database if user_id is provided, otherwise
+    falls back to the default.
     
+    Args:
+        user_id: Optional user ID to look up the preference for.
+                 If None, returns the default base currency.
+        
     Returns:
         Base currency code (INR or USD)
     """
-    # TODO: Read from user preferences in database
+    # Use default for anonymous/unauthenticated users
+    if user_id is None:
+        return _DEFAULT_BASE_CURRENCY
+    
+    # Try to read from database
+    try:
+        infra = DefaultInfrastructure()
+        setting = infra.get_user_setting(user_id, "base_currency")
+        if setting in ("INR", "USD"):
+            return setting
+    except Exception:
+        # If database is unavailable, fall back to default
+        pass
+    
     return _DEFAULT_BASE_CURRENCY
 
 
@@ -186,6 +223,43 @@ def _calculate_totals(holdings: list[dict]) -> tuple[Decimal | None, Decimal | N
     return (inr_total if has_inr else None), (usd_total if has_usd else None)
 
 
+def _iso(value):
+    """Real ISO8601 string for a datetime value, or None through
+    unchanged. Real bug, found live on STORY-19's own QA test: Flask's
+    default JSON encoder serializes a bare `datetime` using HTTP-date
+    format ('Mon, 07 Sep 2026 08:43:24 GMT'), not ISO8601 -- every
+    broker-connection timestamp field (STORY-18's connected_at/
+    last_import_at, STORY-19's last_import_at) was silently shipping in
+    the wrong format despite every story explicitly specifying
+    iso8601."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _broker_is_configured(broker_id: str) -> bool:
+    """Whether `broker_id`'s own real credentials are present in the
+    environment (STORY-18). The BrokerConnector Protocol has no
+    is_configured() method (adding one to check ONE broker's env vars
+    would ripple through every implementer for no real payoff yet), so
+    this is a small, explicit per-broker_id dispatch -- co-located with
+    api_brokers_upstox_connect's identical UpstoxConfig.from_env() check,
+    the one real precedent for this. A broker_id with no real
+    configuration requirement (e.g. a test's fake registered broker)
+    defaults to True: "configured" only means "known to be missing its
+    required credentials", not "verified reachable"."""
+    if broker_id == "upstox":
+        try:
+            from upstox_config import UpstoxConfig
+            UpstoxConfig.from_env()
+            return True
+        except Exception:
+            return False
+    return True
+
+
 def create_app() -> Flask:
     """App-factory pattern (the real, standard Flask idiom) so tests
     can create isolated app instances rather than importing a single
@@ -195,6 +269,7 @@ def create_app() -> Flask:
         template_folder=str(_TEMPLATES_DIR),
         static_folder=str(_STATIC_DIR),
     )
+    app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
 
     @app.get("/")
     def index():
@@ -308,7 +383,8 @@ def create_app() -> Flask:
         usd_total_str = format_price_with_thousand_separators(usd_total) if usd_total else None
 
         # STORY-17: Calculate consolidated total in user's base currency
-        base_currency = get_user_base_currency()
+        user_id = session.get("user_id", "default-user")
+        base_currency = get_user_base_currency(user_id)
         consolidated_total = None
         exchange_rate_info = None
         exchange_rate_unavailable = False
@@ -474,6 +550,356 @@ def create_app() -> Flask:
             }
         
         return jsonify(result)
+
+    # STORY-18: User settings routes
+    @app.get("/settings")
+    def settings():
+        """Display user settings page with base currency preference."""
+        # For demo purposes, use a default user ID
+        # In production, this would come from authentication
+        user_id = session.get("user_id", "default-user")
+        
+        # Get current base currency setting
+        current_base_currency = get_user_base_currency(user_id)
+        
+        return render_template(
+            "settings.html",
+            current_base_currency=current_base_currency,
+            base_currency_options=["USD", "INR"],
+        )
+
+    @app.post("/settings/base-currency")
+    def update_base_currency():
+        """Update the user's base currency preference."""
+        data = request.get_json() if request.is_json else request.form.to_dict()
+        
+        base_currency = data.get("base_currency")
+        if base_currency not in ("USD", "INR"):
+            return jsonify({"error": "Invalid currency. Must be USD or INR."}), 400
+        
+        # For demo purposes, use a default user ID
+        # In production, this would come from authentication
+        user_id = session.get("user_id", "default-user")
+        
+        try:
+            infra = DefaultInfrastructure()
+            infra.set_user_setting(user_id, "base_currency", base_currency)
+            return jsonify({"success": True, "base_currency": base_currency})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/api/user/base-currency")
+    def api_get_base_currency():
+        """Get the user's current base currency preference (API endpoint)."""
+        user_id = session.get("user_id", "default-user")
+        base_currency = get_user_base_currency(user_id)
+        return jsonify({"base_currency": base_currency})
+
+    # -------------------------------------------------------------------------
+    # STORY-20: Broker connections settings
+    # -------------------------------------------------------------------------
+
+    @app.get("/settings/brokers")
+    def settings_brokers():
+        """Render the broker connections settings page.
+
+        Loads the list of available brokers (display_name + broker_id)
+        from the connector registry and passes them to the template so
+        one Connect <display_name> button is rendered per entry.
+        """
+        available_brokers = list_available_brokers()
+        return render_template(
+            "settings_brokers.html",
+            available_brokers=available_brokers,
+        )
+
+    @app.get("/api/brokers/connections")
+    def api_brokers_connections():
+        """Return the caller's real broker connections plus the registry
+        of available brokers (STORY-18).
+
+        ``connections``: one entry per broker this user has ever
+        connected (from a real ``broker_connections`` row), with status,
+        ``broker_user_id``, ``connected_at``, ``last_import_at``, and
+        ``last_error`` -- never an access token.
+
+        ``available_brokers``: every broker in the connector registry
+        (so a newly-registered broker appears automatically, never a
+        hardcoded list), each tagged ``configured`` -- false when that
+        broker's own required credentials are missing, so the UI can
+        show a disabled "Connect" button with an explanatory tooltip
+        instead of a real OAuth attempt doomed to fail.
+        """
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        registered = list_available_brokers()
+        infra = DefaultInfrastructure()
+
+        connections = []
+        for broker in registered:
+            record = infra.get_broker_connection(user_id, broker["broker_id"])
+            if record is None:
+                continue
+            connections.append({
+                "broker_id": record.broker_id,
+                "display_name": broker["display_name"],
+                "status": record.status,
+                "broker_user_id": record.broker_user_id,
+                "connected_at": _iso(record.connected_at),
+                "last_import_at": _iso(record.last_import_at),
+                "last_error": record.last_error,
+            })
+
+        available_brokers = [
+            {
+                "broker_id": broker["broker_id"],
+                "display_name": broker["display_name"],
+                "configured": _broker_is_configured(broker["broker_id"]),
+            }
+            for broker in registered
+        ]
+
+        return jsonify({"connections": connections, "available_brokers": available_brokers})
+
+    # -------------------------------------------------------------------------
+    # STORY-19: Trigger a broker import (holdings + transactions)
+    # -------------------------------------------------------------------------
+
+    @app.post("/api/brokers/<broker_id>/import")
+    def api_brokers_import(broker_id: str):
+        """Run a real import_holdings() then import_transactions() for the
+        caller against `broker_id` (STORY-19).
+
+        Runs synchronously in the request -- a real, deliberate choice
+        for this pass; a background job (so a slow broker response
+        doesn't hold the request open) is a real, tracked follow-up, not
+        implemented here. If the import runs past 120s the DB writes
+        still complete and return normally; only a warning is logged
+        recommending the async follow-up, since killing the request
+        mid-write would leave a real partial import behind.
+        """
+        import time as _time
+
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        body = request.get_json(silent=True) or {}
+        start_date = None
+        end_date = None
+        if "start_date" in body:
+            try:
+                start_date = date.fromisoformat(body["start_date"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid_date", "message": "start_date must be YYYY-MM-DD"}), 400
+        if "end_date" in body:
+            try:
+                end_date = date.fromisoformat(body["end_date"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid_date", "message": "end_date must be YYYY-MM-DD"}), 400
+
+        try:
+            connector = get_broker_connector(broker_id)
+        except UnsupportedBrokerError:
+            return jsonify({"error": "unsupported_broker"}), 404
+
+        portfolio_component = DefaultUserPortfolio(broker_connector=connector)
+        started = _time.monotonic()
+        try:
+            holdings_result = portfolio_component.import_holdings(user_id, broker_id)
+            transactions_kwargs: dict[str, Any] = {}
+            if start_date is not None:
+                transactions_kwargs["start_date"] = start_date
+            if end_date is not None:
+                transactions_kwargs["end_date"] = end_date
+            transactions_result = portfolio_component.import_transactions(
+                user_id, broker_id, **transactions_kwargs
+            )
+        except BrokerNotConnectedError:
+            return jsonify({"error": "not_connected"}), 409
+        except BrokerAuthError:
+            return jsonify({
+                "error": "reconnect_required",
+                "message": f"Your {connector.display_name} connection expired. Please reconnect.",
+            }), 401
+        except BrokerRateLimitError:
+            return jsonify({"error": "rate_limited"}), 429
+        except BrokerConfigError as exc:
+            return jsonify({"error": "broker_not_configured", "message": str(exc)}), 503
+        except BrokerApiError:
+            return jsonify({"error": "broker_api_error"}), 502
+
+        if _time.monotonic() - started > 120:
+            app.logger.warning(
+                "api_brokers_import: import for broker_id=%s exceeded 120s -- "
+                "consider moving this to a background job",
+                broker_id,
+            )
+
+        infra = DefaultInfrastructure()
+        connection = infra.get_broker_connection(user_id, broker_id)
+
+        return jsonify({
+            "broker_id": broker_id,
+            "holdings_written": holdings_result.holdings_written,
+            "transactions_inserted": transactions_result.transactions_inserted,
+            "transactions_skipped_existing": transactions_result.transactions_skipped_existing,
+            "rows_skipped_invalid": transactions_result.rows_skipped_invalid,
+            "last_import_at": _iso(connection.last_import_at) if connection else None,
+        })
+
+    # -------------------------------------------------------------------------
+    # STORY-16: Upstox OAuth connect flow — initiate
+    # -------------------------------------------------------------------------
+
+    @app.post("/api/brokers/upstox/connect")
+    def api_brokers_upstox_connect():
+        """POST /api/brokers/upstox/connect — start the Upstox OAuth flow.
+
+        Authenticated users only (session must carry a user_id).
+        Returns 200 with ``{"authorize_url": "...", "state": "..."}`` on
+        success, where ``authorize_url`` is the Upstox authorization URL
+        the frontend navigates to (302-redirect is deliberately omitted so
+        the caller controls navigation).
+
+        Returns 401 when no user is authenticated.
+
+        Returns 503 with ``{"error": "broker_not_configured", "message": "..."}``
+        when ``UPSTOX_CLIENT_ID``, ``UPSTOX_CLIENT_SECRET``, or
+        ``UPSTOX_REDIRECT_URI`` is not set in the environment — the
+        message names the missing variables so the operator can fix them
+        without guesswork. No state token is created in this case.
+
+        No network call to Upstox is made by this endpoint.
+        """
+        # Auth guard — unauthenticated users cannot initiate OAuth
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # Validate the Upstox config (reads env vars, raises BrokerConfigError
+        # on missing/empty values) BEFORE issuing a state token so that
+        # the "no state row created" AC is satisfied when the env is not set.
+        try:
+            from upstox_config import UpstoxConfig
+            UpstoxConfig.from_env()
+        except (BrokerConfigError, Exception) as exc:
+            # Catch both c01_user_portfolio.BrokerConfigError AND
+            # upstox_config.BrokerConfigError (two different classes).
+            # Also catch the bare Exception as a fallback: if the import
+            # succeeds but from_env() raises something unexpected we still
+            # want a 503 rather than a 500.
+            if exc.__class__.__name__ == "BrokerConfigError":
+                return jsonify({
+                    "error": "broker_not_configured",
+                    "message": str(exc),
+                }), 503
+            raise  # re-raise non-BrokerConfigError so other handlers catch it
+
+        # Issue a single-use CSRF state token for this user + broker
+        state = issue_state(user_id, "upstox")
+
+        # Build the authorization URL via the registered Upstox connector.
+        try:
+            connector = get_broker_connector("upstox")
+            authorize_url = connector.build_authorize_url(state=state)
+        except BrokerConfigError as exc:
+            return jsonify({
+                "error": "broker_not_configured",
+                "message": str(exc),
+            }), 503
+
+        return jsonify({"authorize_url": authorize_url, "state": state}), 200
+
+    # -------------------------------------------------------------------------
+    # STORY-17: Upstox OAuth callback — code exchange + persist + redirect
+    # -------------------------------------------------------------------------
+
+    @app.get("/api/brokers/upstox/callback")
+    def api_brokers_upstox_callback():
+        """GET /api/brokers/upstox/callback — Upstox OAuth redirect URI.
+
+        No session cookie is required; identity comes solely from the
+        single-use ``state`` parameter. ``user_id`` in the query string
+        is IGNORED (never trusted). On success the user is redirected
+        (302) to the frontend's settings page with a success marker. On
+        failure a failure marker and a machine-readable ``reason`` slug are
+        included in the redirect query string.
+
+        All error paths log the failure reason server-side with the state
+        value redacted so sensitive data never appears in logs.
+        """
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+
+        _FRONTEND_SUCCESS = "/settings/brokers?connect=success&broker=upstox"
+        _FRONTEND_ERROR_BASE = "/settings/brokers?connect=error&broker=upstox"
+
+        def _error_redirect(slug: str) -> tuple:
+            _logger.warning(
+                "[UPSTOX_CALLBACK_ERROR] redirect reason=%s",
+                slug,
+                extra={"callback_reason": slug},
+            )
+            return redirect(f"{_FRONTEND_ERROR_BASE}&reason={slug}", code=302)
+
+        # ── 1. Parse query params ─────────────────────────────────────────────
+        state = request.args.get("state", "")
+        code = request.args.get("code")
+
+        # Upstox may include an `error` param instead of `code` when the
+        # user denies the request or Upstox returns an OAuth error.
+        upstox_error = request.args.get("error")
+
+        # Ignore any user_id in the query string — identity comes from state.
+        _ = request.args.get("user_id")
+
+        # ── 2. Consume single-use state ──────────────────────────────────────
+        if not state:
+            return _error_redirect("invalid_state")
+
+        try:
+            user_id, broker_id = consume_state(state)
+        except InvalidOAuthStateError:
+            return _error_redirect("invalid_state")
+        except OAuthStateExpiredError:
+            return _error_redirect("state_expired")
+        except OAuthStateReplayError:
+            return _error_redirect("state_replayed")
+
+        # ── 3. Validate code presence / detect Upstox denial ─────────────────
+        if upstox_error:
+            # Upstox explicitly returned an error (e.g. user denied access).
+            return _error_redirect("access_denied")
+
+        if not code:
+            return _error_redirect("missing_code")
+
+        # ── 4. Exchange code for credentials via connector ─────────────────────
+        try:
+            portfolio = DefaultUserPortfolio()
+            portfolio.connect_portfolio(
+                user_id=user_id,
+                broker_id=broker_id,
+                payload={"code": code},
+            )
+        except BrokerAuthError:
+            return _error_redirect("token_exchange_failed")
+        except BrokerConfigError:
+            return _error_redirect("broker_not_configured")
+        except Exception:
+            _logger.exception("[UPSTOX_CALLBACK_ERROR] unexpected error during connect")
+            return _error_redirect("unexpected")
+
+        # ── 5. Success ────────────────────────────────────────────────────────
+        _logger.info(
+            "[UPSTOX_CALLBACK_SUCCESS] user_id=%s broker_id=%s",
+            user_id,
+            broker_id,
+        )
+        return redirect(_FRONTEND_SUCCESS, code=302)
 
     return app
 

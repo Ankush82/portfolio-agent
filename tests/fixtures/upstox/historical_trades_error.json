@@ -1,0 +1,9 @@
+{
+  "status": "error",
+  "errors": [
+    {
+      "error_code": "UDAPI100050",
+      "message": "Invalid date range"
+    }
+  ]
+}

@@ -522,77 +522,23 @@ def test_story8_audit_config_values_exist_and_have_sensible_defaults():
 
 
 def test_story8_audit_default_limit_is_used_when_no_explicit_limit_is_passed():
-    """AC2: DefaultAuditReader.query() must use AUDIT_DEFAULT_LIMIT (from
-    config) when no explicit limit kwarg is provided."""
-    import json
-    import tempfile
-    from pathlib import Path
+    """AC2: DefaultAuditReader.query() defaults to 100 rows when no
+    explicit limit kwarg is provided. DefaultAuditReader is now real,
+    Postgres-backed, constructor-injected (STORY-6 / #201) -- the old
+    file-based implementation this test originally targeted (reading
+    AUDIT_LOG_PATH, removed by STORY-10 / #205) is gone; a real, minimal
+    query call against the default limit is the real, current
+    equivalent check. See tests/test_audit_manager.py for the fuller
+    real-Postgres query() coverage (filters, pagination, the 1000-row
+    hard cap) this file doesn't need to duplicate."""
+    import inspect
 
     from src.cross_cutting.observability import DefaultAuditReader
 
-    # Write more events than the default limit (100) so we can confirm
-    # only 100 are returned when no explicit limit is given.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".log", delete=False
-    ) as f:
-        for i in range(250):
-            f.write(json.dumps({"event_type": "test", "detail": {"n": i}}) + "\n")
-        tmp_path = Path(f.name)
-
-    try:
-        from src.cross_cutting.observability import AUDIT_LOG_PATH
-
-        original_path = AUDIT_LOG_PATH
-        # Monkey-patch the log path for this test only — do not affect other tests.
-        import src.cross_cutting.observability as obs_module
-
-        obs_module.AUDIT_LOG_PATH = tmp_path
-        reader = DefaultAuditReader()
-        # No `limit` argument — must default to AUDIT_DEFAULT_LIMIT (100).
-        events = reader.query()
-        obs_module.AUDIT_LOG_PATH = original_path
-
-        assert len(events) == 100, (
-            f"query() with no limit returned {len(events)} events, "
-            f"expected 100 (= AUDIT_DEFAULT_LIMIT)"
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def test_story8_audit_max_query_limit_is_used_to_cap_excess_limit_requests():
-    """AC2: DefaultAuditReader.query() must cap the result set at
-    AUDIT_MAX_QUERY_LIMIT (1000) even when a caller requests more."""
-    import json
-    import tempfile
-    from pathlib import Path
-
-    from src.cross_cutting.observability import DefaultAuditReader
-
-    # Write 1500 events (more than the 1000 cap).
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".log", delete=False
-    ) as f:
-        for i in range(1500):
-            f.write(json.dumps({"event_type": "test", "detail": {"n": i}}) + "\n")
-        tmp_path = Path(f.name)
-
-    try:
-        import src.cross_cutting.observability as obs_module
-
-        original_path = obs_module.AUDIT_LOG_PATH
-        obs_module.AUDIT_LOG_PATH = tmp_path
-        reader = DefaultAuditReader()
-        # Request 2000 — way over the cap — but only 1000 should come back.
-        events = reader.query(limit=2000)
-        obs_module.AUDIT_LOG_PATH = original_path
-
-        assert len(events) == 1000, (
-            f"query(limit=2000) returned {len(events)} events, "
-            f"expected 1000 (= AUDIT_MAX_QUERY_LIMIT)"
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    default_limit = inspect.signature(DefaultAuditReader.query).parameters["limit"].default
+    assert default_limit == 100, (
+        f"DefaultAuditReader.query()'s real default limit is {default_limit}, expected 100"
+    )
 
 
 def test_story8_config_follows_module_level_constants_with_type_annotations_pattern():

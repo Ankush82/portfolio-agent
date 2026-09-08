@@ -39,7 +39,7 @@
       <div class="stat bg-base-100 rounded-lg border">
         <div class="stat-title">Indian Stocks (INR)</div>
         <div class="stat-value text-lg">
-          <span class="currency-symbol" data-currency="INR">{{ inr_symbol }}</span>{{ inr_total|format_price_with_thousand_separators }}
+          <span class="currency-symbol" data-currency="INR">{{ inr_symbol }}</span>{{ inr_total }}
         </div>
         <div class="stat-desc">{{ inr_holdings|length }} holding{% if inr_holdings|length != 1 %}s{% endif %}</div>
       </div>
@@ -48,7 +48,7 @@
       <div class="stat bg-base-100 rounded-lg border">
         <div class="stat-title">US Stocks (USD)</div>
         <div class="stat-value text-lg">
-          <span class="currency-symbol" data-currency="USD">{{ usd_symbol }}</span>{{ usd_total|format_price_with_thousand_separators }}
+          <span class="currency-symbol" data-currency="USD">{{ usd_symbol }}</span>{{ usd_total }}
         </div>
         <div class="stat-desc">{{ usd_holdings|length }} holding{% if usd_holdings|length != 1 %}s{% endif %}</div>
       </div>

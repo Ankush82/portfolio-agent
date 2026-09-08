@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": [],
+  "meta_data": {
+    "page": {
+      "page_number": 1,
+      "page_size": 1000,
+      "total_records": 0,
+      "total_pages": 1
+    }
+  }
+}

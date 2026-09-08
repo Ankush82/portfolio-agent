@@ -22,7 +22,6 @@ behavior. Everything downstream of this file stays a traced no-op.
 """
 
 import inspect
-import json
 import time
 import uuid
 from contextlib import contextmanager
@@ -32,7 +31,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 TRACE_LOG_PATH = Path("trace.log")
-AUDIT_LOG_PATH = Path("audit.log")
+# AUDIT_LOG_PATH removed (STORY-10 / #205): DefaultAuditManager.record()
+# has only ever persisted to Postgres (Infrastructure.record_audit_event()),
+# never to a file -- the file-based fallback this constant supported was
+# a real dead code path (nothing in src/ ever wrote to it) that
+# DefaultAuditReader.query() was the last real reader of, before STORY-6
+# / #201 replaced that class with a real Postgres-backed one. No
+# conditional file-based fallback is implemented: Infrastructure always
+# has a working DB connection in every real deployment this project
+# targets (ADR-0019's managed Postgres), so there was no real scenario
+# for a fallback to cover.
 
 
 @dataclass
@@ -152,59 +160,111 @@ class DefaultAuditManager(AuditManager):
 
 
 class DefaultAuditReader(AuditReader):
-    """Production implementation of AuditReader: reads from AUDIT_LOG_PATH.
+    """Production implementation of AuditReader: real Postgres queries
+    against the `audit_events` table (STORY-6), the same table
+    `DefaultAuditManager.record()` writes to via
+    `Infrastructure.record_audit_event()`. Accepts an `Infrastructure`
+    instance via constructor injection, the same dependency-injection
+    pattern every other real component in this project already uses --
+    NOT obtained via `infrastructure.get_audit_reader()` (that factory
+    method still exists on the Protocol for other callers, but this
+    class itself just needs a real connection to query against, the
+    same one `record_audit_event` already writes through).
 
-    This is the real implementation operators should use for investigative
-    queries and ad-hoc analysis. Routine component logic should use the
-    AuditManager interface to emit events instead.
-
-    To obtain an instance, call infrastructure.get_audit_reader() where
-    ``infrastructure`` is the Infrastructure object available via the existing
-    dependency-injection pattern (e.g., passed into your function/class
-    constructor, retrieved from the application container).
+    Replaces the old file-based implementation entirely (STORY-10 /
+    #205 removes the AUDIT_LOG_PATH fallback this class used to read;
+    there is no file-based reader left to fall back to).
 
     Minimal usage example::
 
-        reader = infrastructure.get_audit_reader(); events = reader.query(component="x")
-
-    Enforces AUDIT_MAX_QUERY_LIMIT as a hard ceiling on the number of
-    rows returned per call, and uses AUDIT_DEFAULT_LIMIT when no explicit
-    limit is provided.
+        reader = DefaultAuditReader(infrastructure)
+        events = reader.query(component="x", limit=50)
     """
 
-    def query(self, **kwargs) -> list[dict]:
+    def __init__(self, infrastructure) -> None:
+        self._infrastructure = infrastructure
+
+    def query(
+        self,
+        event_type: str | None = None,
+        actor: dict | None = None,
+        component: str | None = None,
+        resource_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
         with traced("DefaultAuditReader.query"):
-            # Pull out what we care about; ignore any unknown kwargs so
-            # future Protocol-extended parameters are handled gracefully.
-            from src.config import AUDIT_MAX_QUERY_LIMIT, AUDIT_DEFAULT_LIMIT
+            from psycopg.types.json import Jsonb
 
-            event_type = kwargs.get("event_type")
-            component = kwargs.get("component")
-            resource_id = kwargs.get("resource_id")
-            limit = kwargs.get("limit", AUDIT_DEFAULT_LIMIT)
-            offset = kwargs.get("offset", 0)
+            clauses: list[str] = []
+            params: list = []
 
-            effective_limit = min(limit, AUDIT_MAX_QUERY_LIMIT)
+            if event_type is not None:
+                clauses.append("event_type = %s")
+                params.append(event_type)
+            if component is not None:
+                clauses.append("component = %s")
+                params.append(component)
+            if actor is not None:
+                # JSONB containment: actor @> {'id': 'value'} matches any
+                # stored actor JSONB that CONTAINS this shape, not an
+                # exact-equality match -- a stored actor like
+                # {'id': 'user_123', 'role': 'admin'} still matches
+                # actor={'id': 'user_123'}.
+                clauses.append("actor @> %s")
+                params.append(Jsonb(actor))
+            if resource_id is not None:
+                # resource has no single, universal id field across every
+                # real event shape normalize_audit_event() produces
+                # (portfolio_id, agent_id, or a caller-supplied 'id') --
+                # match either of the two real conventions actually in use.
+                clauses.append("(resource->>'id' = %s OR resource->>'portfolio_id' = %s)")
+                params.extend([resource_id, resource_id])
+            if start_time is not None:
+                clauses.append("timestamp >= %s")
+                params.append(start_time)
+            if end_time is not None:
+                clauses.append("timestamp <= %s")
+                params.append(end_time)
 
-            if not AUDIT_LOG_PATH.exists():
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            # Hard cap at 1000 regardless of what the caller asks for --
+            # this is an investigative/operator tool, not a bulk export
+            # path; a single call must not be able to pull an unbounded
+            # window. limit defaults to 100 (the "most recent 100 events"
+            # behavior for a no-argument call).
+            effective_limit = max(1, min(int(limit), 1000))
+            sql = (
+                "SELECT id, event_type, timestamp, actor, component, resource, "
+                "action, outcome, metadata "
+                f"FROM audit_events {where_sql} "
+                "ORDER BY timestamp DESC LIMIT %s OFFSET %s"
+            )
+            params.extend([effective_limit, offset])
+
+            with self._infrastructure._connection().cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+
+            if not rows:
                 return []
 
-            events: list[dict] = []
-            for line in AUDIT_LOG_PATH.read_text().splitlines():
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-
-            # Apply basic filters
-            if event_type is not None:
-                events = [e for e in events if e.get("event_type") == event_type]
-            if component is not None:
-                events = [e for e in events if e.get("detail", {}).get("component") == component]
-            if resource_id is not None:
-                events = [e for e in events if e.get("detail", {}).get("resource_id") == resource_id]
-
-            return events[offset : offset + effective_limit]
+            return [
+                {
+                    "event_id": str(row[0]),
+                    "event_type": row[1],
+                    "timestamp": row[2],
+                    "actor": row[3],
+                    "component": row[4],
+                    "resource": row[5],
+                    "action": row[6],
+                    "outcome": row[7],
+                    "metadata": row[8],
+                }
+                for row in rows
+            ]
 
 
 # ---------------------------------------------------------------------------

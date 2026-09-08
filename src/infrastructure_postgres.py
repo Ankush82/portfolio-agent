@@ -15,10 +15,15 @@ error propagate if the service isn't reachable — this class never
 hides a down Postgres or a down Redis behind a fake success.
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from datetime import date as _date
+from decimal import Decimal as _Decimal
 from typing import Any
 
 import psycopg
@@ -30,6 +35,71 @@ from src.broker_token_crypto import encrypt_secret, decrypt_secret, BrokerConfig
 
 DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+
+class DefaultAuditReader:
+    """Postgres-backed AuditReader (STORY-7).
+
+    Constructed with the DefaultInfrastructure that owns the
+    connection — reuses its `_connection()` so the `queue_events`
+    schema is guaranteed to exist by the time the first read happens
+    (the `_ensure_schema` call inside `_connection()` is idempotent).
+    Stateless beyond the bound infrastructure reference; safe for
+    repeated read-only queries."""
+
+    def __init__(self, infrastructure: "DefaultInfrastructure") -> None:
+        self._infrastructure = infrastructure
+
+    def query(
+        self,
+        topic: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Read the `queue_events` audit trail newest-first (STORY-7).
+
+        Each returned dict has keys: id (int), topic (str),
+        event (dict, the original payload published), published_at
+        (ISO-8601 string with microseconds + UTC offset), and
+        consumed (bool). Filters compose with AND; limit is capped at
+        10000 so a single call cannot accidentally pull a giant
+        window."""
+        with traced("DefaultAuditReader.query"):
+            capped_limit = max(1, min(int(limit), 10000))
+            sql = (
+                "SELECT id, topic, event, "
+                "to_char(published_at AT TIME ZONE 'UTC', "
+                "        'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS published_at, "
+                "consumed "
+                "FROM queue_events "
+                "WHERE 1=1"
+            )
+            params: list = []
+            if topic is not None:
+                sql += " AND topic = %s"
+                params.append(topic)
+            if since is not None:
+                sql += " AND published_at >= %s"
+                params.append(since)
+            if until is not None:
+                sql += " AND published_at <= %s"
+                params.append(until)
+            sql += " ORDER BY id DESC LIMIT %s"
+            params.append(capped_limit)
+            with self._infrastructure._connection().cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "topic": row[1],
+                    "event": row[2],
+                    "published_at": row[3],
+                    "consumed": row[4],
+                }
+                for row in rows
+            ]
 
 
 class BrokerConnectionRecord:
@@ -93,6 +163,25 @@ class BrokerConnectionRecord:
         )
 
 
+def _broker_connection_from_row(row: tuple) -> BrokerConnectionRecord:
+    """Build a BrokerConnectionRecord from a 13-column broker_connections row."""
+    return BrokerConnectionRecord(
+        id=row[0],
+        user_id=row[1],
+        broker_id=row[2],
+        broker_user_id=row[3],
+        access_token_encrypted=row[4],
+        token_type=row[5],
+        access_token_expires_at=row[6],
+        status=row[7],
+        last_error=row[8],
+        connected_at=row[9],
+        last_import_at=row[10],
+        created_at=str(row[11]),
+        updated_at=str(row[12]),
+    )
+
+
 class DefaultInfrastructure:
     """Real implementation of Infrastructure (ADR-0019).
 
@@ -118,6 +207,7 @@ class DefaultInfrastructure:
         self._redis_url = redis_url
         self._pg_connection: psycopg.Connection | None = None
         self._redis_client: redis.Redis | None = None
+        self._logger = logging.getLogger(__name__)
 
     def _connection(self) -> psycopg.Connection:
         """Opens (and caches) the Postgres connection on first use,
@@ -197,9 +287,14 @@ class DefaultInfrastructure:
                 """
             )
             # Minimal users table: broker_connections.user_id references
-            # this. No user-management story has defined a real `users`
-            # schema yet, so this is intentionally the smallest table
-            # that satisfies the FK below -- not a full user model.
+            # this. Real, pre-existing gap found live on STORY-18 --
+            # STORY-11's own broker_connections migration (#166)
+            # declared the FK but never created the table it points at,
+            # so any genuinely fresh database fails on the very first
+            # broker_connections write with a real ForeignKeyViolation.
+            # No user-management story has defined a real `users` schema
+            # yet, so this is intentionally the smallest table that
+            # satisfies the FK below -- not a full user model.
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -266,6 +361,77 @@ class DefaultInfrastructure:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE(user_id, broker_id)
+                )
+                """
+            )
+            # broker_transactions (STORY-15/19): matches
+            # scripts/migrate_broker_transactions.py exactly. Real,
+            # pre-existing gap found live on STORY-19 -- that standalone
+            # migration is the schema of record but was never
+            # self-healing here, so upsert_broker_transaction() silently
+            # no-ops (logs a warning, returns False) on any database that
+            # hasn't had it run by hand, making transactions_inserted
+            # always 0 regardless of what the connector actually
+            # returned.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broker_transactions (
+                    id              BIGSERIAL PRIMARY KEY,
+                    user_id         TEXT NOT NULL,
+                    broker_id       TEXT NOT NULL,
+                    external_id     TEXT NOT NULL,
+                    symbol          TEXT NOT NULL,
+                    isin            TEXT NOT NULL,
+                    trade_date      DATE NOT NULL,
+                    side            TEXT NOT NULL,
+                    quantity        DECIMAL(18, 4) NOT NULL,
+                    price           DECIMAL(18, 4) NOT NULL,
+                    amount          DECIMAL(18, 4) NOT NULL,
+                    exchange        TEXT NOT NULL,
+                    segment         TEXT NOT NULL,
+                    raw             JSONB NOT NULL,
+                    imported_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (user_id, broker_id, external_id)
+                )
+                """
+            )
+            # User settings table for storing user preferences (STORY-18)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id TEXT NOT NULL,
+                    setting_name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (user_id, setting_name)
+                )
+                """
+            )
+            # broker_holdings (STORY-14): one row per (user_id, broker_id,
+            # isin) -- the whole point-in-time snapshot for a connection,
+            # replaced atomically on every real import (see
+            # replace_broker_holdings below), never upserted row-by-row.
+            # Self-healing here (unlike broker_transactions' standalone-
+            # migration-only table) after a real, demonstrated fragility
+            # bug elsewhere in this file: a table that depends on someone
+            # having run a separate migration script silently breaks the
+            # first time anything drops/recreates it.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS broker_holdings (
+                    user_id        TEXT NOT NULL,
+                    broker_id      TEXT NOT NULL,
+                    isin           TEXT NOT NULL,
+                    symbol         TEXT NOT NULL,
+                    quantity       NUMERIC,
+                    average_price  NUMERIC,
+                    last_price     NUMERIC,
+                    exchange       TEXT,
+                    instrument_id  TEXT,
+                    raw            JSONB NOT NULL DEFAULT '{}',
+                    imported_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (user_id, broker_id, isin)
                 )
                 """
             )
@@ -383,6 +549,28 @@ class DefaultInfrastructure:
         with traced("DefaultInfrastructure.get_secret"):
             return os.environ[name]
 
+    def transaction(self):
+        """Real atomic transaction boundary (STORY-SYNC-06), backed by
+        psycopg3's own `Connection.transaction()` context manager.
+        Works correctly even though this connection runs with
+        autocommit=True (psycopg3 documents `Connection.transaction()`
+        as safe under either mode: it suspends autocommit for the
+        block's real duration, issues a real BEGIN, then a real COMMIT
+        on clean exit or a real ROLLBACK if the block raises -- the
+        same connection every store/retrieve/query/delete call already
+        shares via `_connection()`, so any of those calls made inside
+        this block genuinely participate in the same transaction, not
+        a separate one)."""
+        with traced("DefaultInfrastructure.transaction"):
+            return self._connection().transaction()
+
+    def get_audit_reader(self) -> "DefaultAuditReader":
+        """Return a DefaultAuditReader bound to this infrastructure's
+        Postgres connection (STORY-7). The reader reuses
+        `_connection()` so the `queue_events` schema is guaranteed to
+        exist by the time the first query runs."""
+        return DefaultAuditReader(self)
+
     def load_us_tickers(self, csv_path: str = '/app/data/us_tickers.csv') -> None:
         """Loads the US ticker universe into a session-scoped TEMP
         table (`tmp_us_tickers`) from a one-ticker-per-line CSV at
@@ -480,6 +668,24 @@ class DefaultInfrastructure:
                     ),
                 )
 
+    def _broker_connection_from_row(self, row: tuple) -> BrokerConnectionRecord:
+        """Build a BrokerConnectionRecord from a SELECT row (13 columns, 0-indexed)."""
+        return BrokerConnectionRecord(
+            id=row[0],
+            user_id=row[1],
+            broker_id=row[2],
+            broker_user_id=row[3],
+            access_token_encrypted=row[4],
+            token_type=row[5],
+            access_token_expires_at=row[6],
+            status=row[7],
+            last_error=row[8],
+            connected_at=row[9],
+            last_import_at=row[10],
+            created_at=str(row[11]),
+            updated_at=str(row[12]),
+        )
+
     def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
         """Fetch a broker connection row by user_id and broker_id, or None if not found."""
         with traced("DefaultInfrastructure.get_broker_connection"):
@@ -498,21 +704,7 @@ class DefaultInfrastructure:
                 row = cursor.fetchone()
             if row is None:
                 return None
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return self._broker_connection_from_row(row)
 
     def upsert_broker_connection(
         self,
@@ -569,21 +761,7 @@ class DefaultInfrastructure:
                     ),
                 )
                 row = cursor.fetchone()
-            return BrokerConnectionRecord(
-                id=row[0],
-                user_id=row[1],
-                broker_id=row[2],
-                broker_user_id=row[3],
-                access_token_encrypted=row[4],
-                token_type=row[5],
-                access_token_expires_at=row[6],
-                status=row[7],
-                last_error=row[8],
-                connected_at=row[9],
-                last_import_at=row[10],
-                created_at=str(row[11]),
-                updated_at=str(row[12]),
-            )
+            return self._broker_connection_from_row(row)
 
     def mark_broker_connection_error(
         self,
@@ -602,3 +780,179 @@ class DefaultInfrastructure:
                     """,
                     (error_message, datetime.now(timezone.utc), user_id, broker_id),
                 )
+
+    # STORY-18: User settings (base currency preference)
+    def get_user_setting(self, user_id: str, setting_name: str) -> str | None:
+        """Get a user setting value by name.
+        
+        Args:
+            user_id: The user's ID
+            setting_name: The setting name (e.g., 'base_currency')
+            
+        Returns:
+            The setting value as a string, or None if not found.
+        """
+        with traced("DefaultInfrastructure.get_user_setting"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT value FROM user_settings
+                    WHERE user_id = %s AND setting_name = %s
+                    """,
+                    (user_id, setting_name),
+                )
+                row = cursor.fetchone()
+            return row[0] if row is not None else None
+
+    def set_user_setting(self, user_id: str, setting_name: str, value: str) -> None:
+        """Set a user setting value.
+
+        Args:
+            user_id: The user's ID
+            setting_name: The setting name (e.g., 'base_currency')
+            value: The setting value as a string
+        """
+        with traced("DefaultInfrastructure.set_user_setting"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO user_settings (user_id, setting_name, value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id, setting_name) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = now()
+                    """,
+                    (user_id, setting_name, value),
+                )
+
+    def upsert_broker_transaction(
+        self,
+        user_id: str,
+        broker_id: str,
+        external_id: str,
+        symbol: str,
+        isin: str,
+        trade_date: _date,
+        side: str,
+        quantity: _Decimal,
+        price: _Decimal,
+        amount: _Decimal,
+        exchange: str,
+        segment: str,
+        raw: dict,
+    ) -> bool:
+        """Insert or update a broker transaction (STORY-15).
+
+        Keyed on UNIQUE(user_id, broker_id, external_id). Returns True
+        when a new row was inserted, False when an existing row was
+        skipped (idempotent upsert). If the table does not exist yet
+        (migration not applied), logs a warning and returns False.
+        """
+        with traced("DefaultInfrastructure.upsert_broker_transaction"):
+            try:
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO broker_transactions
+                          (user_id, broker_id, external_id, symbol, isin,
+                           trade_date, side, quantity, price, amount,
+                           exchange, segment, raw)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, broker_id, external_id) DO UPDATE SET
+                            symbol     = EXCLUDED.symbol,
+                            isin       = EXCLUDED.isin,
+                            trade_date = EXCLUDED.trade_date,
+                            side       = EXCLUDED.side,
+                            quantity   = EXCLUDED.quantity,
+                            price      = EXCLUDED.price,
+                            amount     = EXCLUDED.amount,
+                            exchange   = EXCLUDED.exchange,
+                            segment    = EXCLUDED.segment,
+                            raw        = EXCLUDED.raw,
+                            imported_at = now()
+                        RETURNING (xmax = 0) AS inserted
+                        """,
+                        (
+                            user_id, broker_id, external_id, symbol, isin,
+                            trade_date, side, quantity, price, amount,
+                            exchange, segment, Jsonb(raw),
+                        ),
+                    )
+                    # Real bug, found live on STORY-19: this always
+                    # returned True regardless of insert vs update,
+                    # making transactions_skipped_existing always 0 no
+                    # matter how many rows already existed. Postgres's
+                    # own xmax=0 idiom distinguishes them: a row's xmax
+                    # is 0 only when it was never touched by an UPDATE
+                    # (i.e. this exact call's own INSERT branch fired),
+                    # and non-zero when the ON CONFLICT DO UPDATE branch
+                    # fired instead.
+                    row = cursor.fetchone()
+                    return bool(row[0]) if row is not None else True
+            except psycopg.errors.UndefinedTable:
+                # Migration not yet applied — log and return False rather
+                # than crashing the import.
+                self._logger.warning(
+                    "DefaultInfrastructure.upsert_broker_transaction: "
+                    "[BROKER_TRANSACTIONS_TABLE_MISSING] "
+                    "broker_transactions table does not exist; "
+                    "run migration broker_transactions_v1 first",
+                    extra={"event_code": "BROKER_TRANSACTIONS_TABLE_MISSING"},
+                )
+                return False
+
+    def touch_last_import(self, user_id: str, broker_id: str) -> None:
+        """Update last_import_at on the broker connection row (STORY-15).
+
+        Idempotent: no-op when no connection row exists.
+        """
+        with traced("DefaultInfrastructure.touch_last_import"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE broker_connections
+                    SET last_import_at = %s, updated_at = %s
+                    WHERE user_id = %s AND broker_id = %s
+                    """,
+                    (
+                        datetime.now(timezone.utc),
+                        datetime.now(timezone.utc),
+                        user_id,
+                        broker_id,
+                    ),
+                )
+
+    def replace_broker_holdings(self, user_id: str, broker_id: str, holdings: list[dict]) -> None:
+        """Atomically replace the entire broker_holdings snapshot for
+        (user_id, broker_id) (STORY-14): delete every existing row for
+        this connection, then insert the freshly fetched set -- both
+        inside one real transaction, so a failure partway through
+        leaves the PRE-existing rows completely unchanged rather than a
+        half-deleted, half-inserted mix. `holdings` is a list of dicts
+        with keys symbol/isin/quantity/average_price/last_price/
+        exchange/instrument_id/raw (isin required -- it's part of this
+        table's primary key). An empty list is a valid, real "holdings
+        went to zero" snapshot, not a no-op."""
+        with traced("DefaultInfrastructure.replace_broker_holdings"):
+            with self._connection().transaction():
+                with self._connection().cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM broker_holdings WHERE user_id = %s AND broker_id = %s",
+                        (user_id, broker_id),
+                    )
+                    for holding in holdings:
+                        cursor.execute(
+                            """
+                            INSERT INTO broker_holdings
+                                (user_id, broker_id, isin, symbol, quantity,
+                                 average_price, last_price, exchange, instrument_id, raw)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                user_id, broker_id,
+                                holding["isin"], holding["symbol"],
+                                holding.get("quantity"), holding.get("average_price"),
+                                holding.get("last_price"), holding.get("exchange"),
+                                holding.get("instrument_id"), Jsonb(holding.get("raw", {})),
+                            ),
+                        )

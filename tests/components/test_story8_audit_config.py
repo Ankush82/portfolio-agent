@@ -59,70 +59,72 @@ def test_story8_audit_config_values_exist_and_have_sensible_defaults():
 
 
 def test_story8_audit_default_limit_is_used_when_no_explicit_limit_is_passed():
-    """AC2: DefaultAuditReader.query() must use AUDIT_DEFAULT_LIMIT (from
-    config) when no explicit limit kwarg is provided."""
-    # Import only the specific module under test — avoids triggering the
-    # infrastructure_postgres import chain that has a Python-version issue.
+    """AC2: DefaultAuditReader.query() defaults to 100 rows when no
+    explicit limit kwarg is provided. DefaultAuditReader is now real,
+    Postgres-backed, constructor-injected (STORY-6 / #201) -- the old
+    file-based implementation this test originally targeted (reading
+    AUDIT_LOG_PATH, removed by STORY-10 / #205) is gone. See
+    tests/test_audit_manager.py for the fuller real-Postgres query()
+    coverage this file doesn't need to duplicate."""
+    import inspect
+
     import src.cross_cutting.observability as obs_module
 
-    DefaultAuditReader = obs_module.DefaultAuditReader
-    AUDIT_LOG_PATH = obs_module.AUDIT_LOG_PATH
-
-    # Write more events than the default limit (100) so we can confirm
-    # only 100 are returned when no explicit limit is given.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".log", delete=False
-    ) as f:
-        for i in range(250):
-            f.write(json.dumps({"event_type": "test", "detail": {"n": i}}) + "\n")
-        tmp_path = Path(f.name)
-
-    try:
-        original_path = AUDIT_LOG_PATH
-        obs_module.AUDIT_LOG_PATH = tmp_path
-        reader = DefaultAuditReader()
-        # No `limit` argument — must default to AUDIT_DEFAULT_LIMIT (100).
-        events = reader.query()
-        obs_module.AUDIT_LOG_PATH = original_path
-
-        assert len(events) == 100, (
-            f"query() with no limit returned {len(events)} events, "
-            f"expected 100 (= AUDIT_DEFAULT_LIMIT from config)"
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    default_limit = inspect.signature(obs_module.DefaultAuditReader.query).parameters["limit"].default
+    assert default_limit == 100, (
+        f"DefaultAuditReader.query()'s real default limit is {default_limit}, expected 100"
+    )
 
 
 def test_story8_audit_max_query_limit_is_used_to_cap_excess_limit_requests():
-    """AC2: DefaultAuditReader.query() must cap the result set at
-    AUDIT_MAX_QUERY_LIMIT (1000) even when a caller requests more."""
+    """AC2: DefaultAuditReader.query() caps the effective result set at
+    1000 rows even when a caller requests more -- verified directly
+    against the real, current SQL-building logic (the LIMIT clause it
+    actually sends), not by seeding 1500 real rows through Postgres just
+    to count them back (tests/test_audit_manager.py's own
+    test_query_no_arguments_returns_most_recent_events_capped already
+    covers that end-to-end, against a live database)."""
     import src.cross_cutting.observability as obs_module
 
-    DefaultAuditReader = obs_module.DefaultAuditReader
-    AUDIT_LOG_PATH = obs_module.AUDIT_LOG_PATH
+    class _CapturingCursor:
+        def __init__(self) -> None:
+            self.sql = None
+            self.params = None
 
-    # Write 1500 events (more than the 1000 cap).
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".log", delete=False
-    ) as f:
-        for i in range(1500):
-            f.write(json.dumps({"event_type": "test", "detail": {"n": i}}) + "\n")
-        tmp_path = Path(f.name)
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
 
-    try:
-        original_path = AUDIT_LOG_PATH
-        obs_module.AUDIT_LOG_PATH = tmp_path
-        reader = DefaultAuditReader()
-        # Request 2000 — way over the cap — but only 1000 should come back.
-        events = reader.query(limit=2000)
-        obs_module.AUDIT_LOG_PATH = original_path
+        def fetchall(self):
+            return []
 
-        assert len(events) == 1000, (
-            f"query(limit=2000) returned {len(events)} events, "
-            f"expected 1000 (= AUDIT_MAX_QUERY_LIMIT from config)"
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _CapturingConnection:
+        def __init__(self) -> None:
+            self.cursor_obj = _CapturingCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    class _FakeInfrastructure:
+        def __init__(self) -> None:
+            self.conn = _CapturingConnection()
+
+        def _connection(self):
+            return self.conn
+
+    infra = _FakeInfrastructure()
+    reader = obs_module.DefaultAuditReader(infra)
+    reader.query(limit=2000)  # way over the cap
+
+    # The real LIMIT param actually sent to Postgres must be capped at
+    # 1000, regardless of the 2000 the caller asked for.
+    assert infra.conn.cursor_obj.params[-2] == 1000
 
 
 # ---------------------------------------------------------------------------

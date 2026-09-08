@@ -132,20 +132,28 @@ def test_three_in_a_row_same_component_failures_classify_as_loop_or_cascade_and_
     assert circuit_breaker.is_available("flaky_tool") is False
 
 
-def test_escalate_records_an_audit_event(tmp_path, monkeypatch):
-    from cross_cutting import observability
+def test_escalate_records_an_audit_event():
+    # DefaultAuditManager has only ever persisted to Postgres (via
+    # Infrastructure.record_audit_event()), never a file --
+    # AUDIT_LOG_PATH (removed, STORY-10 / #205) was never actually
+    # written to by it. A minimal in-memory recording double is the
+    # real, correct way to assert what escalate() records without
+    # needing a live Postgres connection just for a unit test.
+    class _RecordingAuditManager:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
 
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+        def record(self, event_type: str, detail: dict) -> None:
+            self.events.append((event_type, detail))
 
-    manager = DefaultRecoveryManager(audit_manager=observability.DefaultAuditManager())
+    recorder = _RecordingAuditManager()
+    manager = DefaultRecoveryManager(audit_manager=recorder)
     checkpoint = Checkpoint(id="cp-4", subgoal={})
 
     manager.escalate(checkpoint, "some reason")
 
-    lines = audit_log_path.read_text().splitlines()
-    assert len(lines) == 1
-    assert '"event_type": "escalation"' in lines[0]
+    assert len(recorder.events) == 1
+    assert recorder.events[0][0] == "escalation"
 
 
 # --- DefaultDelegationManager --------------------------------------------
