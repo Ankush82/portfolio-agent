@@ -431,6 +431,23 @@ class DefaultUpstoxBrokerConnector:
     # no version bump, no trailing slash.
     _UPSTOX_LONG_TERM_HOLDINGS_PATH = "/v2/portfolio/long-term-holdings"
 
+    # STORY-8: the historical-trades endpoint. Same "pin as a class
+    # constant" convention as the holdings path above -- the AC's
+    # "Request URL is exactly https://api.upstox.com/v2/charges/
+    # historical-trades" rule is a single grep. Page size is pinned at
+    # the AC's own required value (1000, the max Upstox allows per
+    # page) rather than left as a caller-tunable parameter -- the AC
+    # doesn't ask for one, and a smaller caller-chosen size would only
+    # mean more real HTTP round trips for the same data.
+    _UPSTOX_HISTORICAL_TRADES_PATH = "/v2/charges/historical-trades"
+    _UPSTOX_HISTORICAL_TRADES_PAGE_SIZE = 1000
+    # Real safety valve, not a value Upstox's docs specify: a broker
+    # that never reports a real total_pages (or reports one that keeps
+    # growing) must not spin this loop forever. 200 pages at 1000 rows
+    # each is 200,000 transactions in one call -- comfortably beyond
+    # any real account's history, so a legitimate call never hits this.
+    _UPSTOX_HISTORICAL_TRADES_MAX_PAGES = 200
+
     # Logger for ``fetch_holdings`` — a module-level ``logging.getLogger``
     # on ``__name__`` so a real operator can route per-module log
     # records (e.g. ``logging.getLogger("components.c01_user_portfolio")``)
@@ -941,10 +958,213 @@ class DefaultUpstoxBrokerConnector:
         start_date: date,
         end_date: date,
     ) -> list[BrokerTransaction]:
-        raise NotImplementedError(
-            "DefaultUpstoxBrokerConnector.fetch_transactions is "
-            "implemented in STORY-8"
-        )
+        """Fetch historical trades from Upstox (STORY-8), paging through
+        every page rather than just the first.
+
+        Performs authenticated GETs against
+        ``https://api.upstox.com/v2/charges/historical-trades`` via
+        ``_UpstoxHttp.get`` -- the query string carries ``start_date``/
+        ``end_date`` (``YYYY-mm-dd``), ``page_number`` (starting at 1),
+        and ``page_size=1000``; ``segment`` is deliberately never
+        included so every segment is returned. ``_UpstoxHttp.get``
+        takes only a ``path``, so the query string is built here (via
+        ``urlencode``, same percent-encoding convention as
+        ``build_authorize_url`` above) and appended to the path rather
+        than changing the helper's signature -- ``fetch_holdings``'s
+        existing, unparameterised call is unaffected.
+
+        Real response shape (verbatim from the story's own docs)::
+
+            {
+              "status": "success",
+              "data": [
+                {"exchange", "segment", "trade_id", "trade_date",
+                 "scrip_name", "symbol", "transaction_type",
+                 "quantity", "price", "amount", "isin"},
+                ...
+              ],
+              "meta_data": {"page": {"page_number", "page_size",
+                                      "total_records", "total_pages"}}
+            }
+
+        Pages until ``page_number >= total_pages`` OR a page's own
+        ``data`` comes back empty (whichever happens first -- a
+        broker that ever reports a ``total_pages`` inconsistent with
+        its real data must not be trusted over the data itself), and
+        hard-caps at ``_UPSTOX_HISTORICAL_TRADES_MAX_PAGES`` real pages
+        fetched, raising ``BrokerApiError`` rather than looping forever
+        if that cap is reached without the loop ending on its own.
+
+        Mapping to ``BrokerTransaction`` (the STORY-8 table):
+
+          * ``external_id  <- trade_id``
+          * ``symbol       <- symbol``
+          * ``isin         <- isin``
+          * ``trade_date   <- date.fromisoformat(trade_date)``
+          * ``side         <- transaction_type.upper()`` -- only
+            ``BUY``/``SELL`` are accepted; any other value (Upstox
+            also reports non-trade ledger entries like dividends
+            through this same endpoint) is skipped with a warning
+            log, not a failure of the whole call.
+          * ``quantity``/``price``/``amount`` ``<- Decimal(str(...))``
+            -- same float-rounding-avoidance rule ``fetch_holdings``
+            already follows above.
+          * ``exchange``/``segment`` <- verbatim.
+          * ``raw`` <- the whole element, so an undocumented key is
+            never silently dropped.
+
+        De-duplicates by ``trade_id`` across pages, keeping the FIRST
+        occurrence seen (a real broker page can legitimately overlap
+        at its boundary if a trade lands exactly on the page-size
+        cutoff between two requests).
+
+        Raises:
+            ValueError: ``start_date > end_date``, checked before any
+                HTTP call is made.
+            BrokerApiError: a non-``'success'`` status, a malformed
+                response shape, an unparseable numeric/date field, or
+                the ``_UPSTOX_HISTORICAL_TRADES_MAX_PAGES`` cap being
+                reached.
+            BrokerAuthError / BrokerRateLimitError: propagated
+                unchanged from ``_UpstoxHttp.get`` -- same auth/rate-
+                limit contract ``fetch_holdings`` already relies on.
+        """
+        if start_date > end_date:
+            raise ValueError(
+                "DefaultUpstoxBrokerConnector.fetch_transactions: "
+                "start_date must be <= end_date"
+            )
+
+        transactions: list[BrokerTransaction] = []
+        seen_trade_ids: set = set()
+        page_number = 1
+
+        while True:
+            if page_number > self._UPSTOX_HISTORICAL_TRADES_MAX_PAGES:
+                raise BrokerApiError(
+                    "Upstox historical-trades pagination exceeded "
+                    f"{self._UPSTOX_HISTORICAL_TRADES_MAX_PAGES} real "
+                    "pages without the broker's own total_pages ending "
+                    "the loop"
+                )
+
+            query = urlencode(
+                [
+                    ("start_date", start_date.isoformat()),
+                    ("end_date", end_date.isoformat()),
+                    ("page_number", str(page_number)),
+                    ("page_size", str(self._UPSTOX_HISTORICAL_TRADES_PAGE_SIZE)),
+                ]
+            )
+            response_body = self._http.get(
+                path=f"{self._UPSTOX_HISTORICAL_TRADES_PATH}?{query}"
+            )
+
+            # Belt-and-braces status check -- same reasoning as
+            # fetch_holdings' own identical check above: the real
+            # helper already enforces this on a 2xx, but a test that
+            # mocks ``_UpstoxHttp.get`` directly (bypassing the
+            # helper's own mapping) still gets the documented
+            # behaviour for free.
+            if response_body.get("status") != "success":
+                raise BrokerApiError(
+                    "Upstox historical-trades response status is "
+                    f"{response_body.get('status')!r}, not 'success'"
+                )
+
+            data = response_body.get("data")
+
+            # An empty page ends pagination immediately, regardless of
+            # what total_pages claims -- the AC's explicit "stopping
+            # also if data comes back empty" rule. This is also what
+            # makes the empty-fixture case make exactly one request.
+            if not data:
+                break
+
+            if not isinstance(data, list):
+                raise BrokerApiError(
+                    "Upstox historical-trades response 'data' field is "
+                    f"not a list; got {type(data).__name__}"
+                )
+
+            for element in data:
+                if not isinstance(element, dict):
+                    raise BrokerApiError(
+                        "Upstox historical-trades 'data' element is not "
+                        f"a dict; got {type(element).__name__}"
+                    )
+
+                # Dedup by trade_id BEFORE any other processing --
+                # "keeping the first occurrence" means identity alone
+                # decides it, independent of whether that occurrence
+                # is later skipped for an unrecognized transaction_type.
+                trade_id = element.get("trade_id")
+                if trade_id is not None:
+                    if trade_id in seen_trade_ids:
+                        continue
+                    seen_trade_ids.add(trade_id)
+
+                transaction_type_raw = element.get("transaction_type")
+                side = (
+                    transaction_type_raw.upper()
+                    if isinstance(transaction_type_raw, str)
+                    else ""
+                )
+                if side not in ("BUY", "SELL"):
+                    self._logger.warning(
+                        "DefaultUpstoxBrokerConnector.fetch_transactions: "
+                        "[UPSTOX_TRANSACTION_ROW_SKIPPED] skipping row "
+                        "with an unrecognized transaction_type",
+                        extra={
+                            "error_code": "UPSTOX_TRANSACTION_ROW_SKIPPED",
+                            "trade_id": trade_id,
+                            "transaction_type": transaction_type_raw,
+                        },
+                    )
+                    continue
+
+                trade_date_raw = element.get("trade_date")
+                try:
+                    trade_date_value = date.fromisoformat(trade_date_raw)
+                except (TypeError, ValueError) as exc:
+                    raise BrokerApiError(
+                        "Upstox historical-trades element has an "
+                        f"invalid trade_date: {trade_date_raw!r}"
+                    ) from exc
+
+                try:
+                    quantity = Decimal(str(element.get("quantity")))
+                    price = Decimal(str(element.get("price")))
+                    amount = Decimal(str(element.get("amount")))
+                except (InvalidOperation, ValueError) as exc:
+                    raise BrokerApiError(
+                        "Upstox historical-trades element has a "
+                        "non-numeric value where a number was expected"
+                    ) from exc
+
+                transactions.append(
+                    BrokerTransaction(
+                        external_id=str(trade_id) if trade_id is not None else "",
+                        symbol=element.get("symbol") or "",
+                        isin=element.get("isin") or "",
+                        trade_date=trade_date_value,
+                        side=side,
+                        quantity=quantity,
+                        price=price,
+                        amount=amount,
+                        exchange=element.get("exchange") or "",
+                        segment=element.get("segment") or "",
+                        raw=element,
+                    )
+                )
+
+            page_info = (response_body.get("meta_data") or {}).get("page") or {}
+            total_pages = page_info.get("total_pages")
+            if not isinstance(total_pages, int) or page_number >= total_pages:
+                break
+            page_number += 1
+
+        return transactions
 
 
 # Canned default data for StubBrokerConnector — defined at module

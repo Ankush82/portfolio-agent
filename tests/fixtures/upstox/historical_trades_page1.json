@@ -1,0 +1,39 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "exchange": "NSE",
+      "segment": "EQ",
+      "trade_id": "TRD001",
+      "trade_date": "2024-01-05",
+      "scrip_name": "Reliance Industries",
+      "symbol": "RELIANCE",
+      "transaction_type": "BUY",
+      "quantity": 10,
+      "price": 2400.50,
+      "amount": 24005.00,
+      "isin": "INE002A01018"
+    },
+    {
+      "exchange": "NSE",
+      "segment": "EQ",
+      "trade_id": "TRD002",
+      "trade_date": "2024-01-10",
+      "scrip_name": "Tata Consultancy Services",
+      "symbol": "TCS",
+      "transaction_type": "SELL",
+      "quantity": 5,
+      "price": 3850.25,
+      "amount": 19251.25,
+      "isin": "INE467B01029"
+    }
+  ],
+  "meta_data": {
+    "page": {
+      "page_number": 1,
+      "page_size": 1000,
+      "total_records": 6,
+      "total_pages": 3
+    }
+  }
+}

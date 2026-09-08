@@ -1,0 +1,52 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "exchange": "NASDAQ",
+      "segment": "EQ",
+      "trade_id": "TRD004",
+      "trade_date": "2024-02-15",
+      "scrip_name": "Alphabet Inc.",
+      "symbol": "GOOGL",
+      "transaction_type": "SELL",
+      "quantity": 3,
+      "price": 140.00,
+      "amount": 420.00,
+      "isin": "US02079K3059"
+    },
+    {
+      "exchange": "BSE",
+      "segment": "EQ",
+      "trade_id": "TRD005",
+      "trade_date": "2024-03-01",
+      "scrip_name": "Infosys Limited",
+      "symbol": "INFY",
+      "transaction_type": "BUY",
+      "quantity": 4,
+      "price": 1450.00,
+      "amount": 5800.00,
+      "isin": "INE009A01021"
+    },
+    {
+      "exchange": "NSE",
+      "segment": "EQ",
+      "trade_id": "TRD006",
+      "trade_date": "2024-03-10",
+      "scrip_name": "HDFC Bank Limited",
+      "symbol": "HDFCBANK",
+      "transaction_type": "DIVIDEND",
+      "quantity": 0,
+      "price": 0,
+      "amount": 120.00,
+      "isin": "INE040A01034"
+    }
+  ],
+  "meta_data": {
+    "page": {
+      "page_number": 3,
+      "page_size": 1000,
+      "total_records": 6,
+      "total_pages": 3
+    }
+  }
+}
