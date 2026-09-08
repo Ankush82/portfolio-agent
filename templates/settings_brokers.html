@@ -22,13 +22,25 @@
   </button>
 </div>
 
-<div class="card bg-base-100 shadow-md">
+<div class="card bg-base-100 shadow-md mb-4">
   <div class="card-body">
     <h2 class="card-title text-2xl mb-2">Broker Connections</h2>
     <p class="text-sm text-base-content/70 mb-6">
       Connect your brokerage accounts to import holdings and transactions automatically.
     </p>
 
+    <!-- STORY-22: connection status cards, rendered entirely from
+         GET /api/brokers/connections -- one card per connection the
+         API returns, including a broker_id this page's server-side
+         render never heard of (a broker registered after page load).
+         Empty when the caller has zero connections, leaving only the
+         "Connect <broker>" buttons below as the sole affordance. -->
+    <div id="broker-connections-list" class="space-y-4 mb-4"></div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow-md">
+  <div class="card-body">
     <div id="broker-list" class="space-y-4">
       {% for broker in available_brokers %}
       <div class="border border-base-300 rounded-lg p-4" data-broker-id="{{ broker.broker_id }}">
@@ -155,6 +167,221 @@
     if (notConfiguredMsg) notConfiguredMsg.classList.add('hidden');
   }
 
+  // ---------- STORY-22: connection status cards ----------
+
+  function escapeHtml(value) {
+    var div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+  }
+
+  function formatLocalTime(isoString) {
+    if (!isoString) return null;
+    var d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleString();
+  }
+
+  function pillForStatus(status) {
+    if (status === 'CONNECTED') return { label: 'Connected', cssClass: 'badge-success' };
+    if (status === 'ERROR') return { label: 'Needs reconnect', cssClass: 'badge-error' };
+    return { label: 'Not connected', cssClass: 'badge-ghost' };
+  }
+
+  function getConnectionCard(brokerId) {
+    return document.querySelector('[data-connection-broker-id="' + brokerId + '"]');
+  }
+
+  function renderConnectionCard(connection) {
+    var brokerId = connection.broker_id;
+    var displayName = connection.display_name || brokerId;
+    var status = connection.status;
+    var pill = pillForStatus(status);
+    var connectedAt = formatLocalTime(connection.connected_at);
+    var lastImportAt = formatLocalTime(connection.last_import_at);
+
+    var div = document.createElement('div');
+    div.className = 'border border-base-300 rounded-lg p-4';
+    div.setAttribute('data-connection-broker-id', brokerId);
+
+    var html = '';
+    html += '<div class="flex items-center justify-between gap-4 flex-wrap">';
+    html += '  <div>';
+    html += '    <span class="font-semibold text-lg">' + escapeHtml(displayName) + '</span>';
+    html += '    <span class="badge ' + pill.cssClass + ' broker-status-pill ml-2">' + pill.label + '</span>';
+    html += '  </div>';
+    html += '  <div class="flex items-center gap-2">';
+    html += '    <button class="btn btn-sm btn-outline broker-import-btn" data-broker-id="' + escapeHtml(brokerId) + '">Import now</button>';
+    if (status === 'ERROR') {
+      html += '    <button class="btn btn-sm btn-primary broker-reconnect-btn" data-broker-id="' + escapeHtml(brokerId) + '" data-display-name="' + escapeHtml(displayName) + '">Reconnect</button>';
+    }
+    html += '  </div>';
+    html += '</div>';
+    html += '<div class="text-xs text-base-content/60 mt-2 broker-connection-times">';
+    html += '  Connected: ' + escapeHtml(connectedAt || 'Unknown') + '<br>';
+    html += '  Last import: ' + escapeHtml(lastImportAt || 'Never imported');
+    html += '</div>';
+    if (status === 'ERROR' && connection.last_error) {
+      html += '<div class="text-sm text-error mt-2 broker-last-error">' + escapeHtml(connection.last_error) + '</div>';
+    }
+    html += '<div class="broker-import-summary text-sm text-success mt-2 hidden"></div>';
+    html += '<div class="broker-import-error alert alert-error mt-2 hidden" role="alert">';
+    html += '  <span class="broker-import-error-text"></span>';
+    html += '  <button class="btn btn-sm broker-import-retry-btn ml-2 hidden" data-broker-id="' + escapeHtml(brokerId) + '">Retry</button>';
+    html += '  <button class="btn btn-sm btn-primary broker-import-reconnect-btn ml-2 hidden" data-broker-id="' + escapeHtml(brokerId) + '" data-display-name="' + escapeHtml(displayName) + '">Reconnect</button>';
+    html += '  <button class="btn btn-sm btn-primary broker-import-connect-btn ml-2 hidden" data-broker-id="' + escapeHtml(brokerId) + '" data-display-name="' + escapeHtml(displayName) + '">Connect</button>';
+    html += '</div>';
+
+    div.innerHTML = html;
+    return div;
+  }
+
+  function renderConnections(connections) {
+    var container = document.getElementById('broker-connections-list');
+    if (!container) return;
+    container.innerHTML = '';
+    connections.forEach(function (connection) {
+      container.appendChild(renderConnectionCard(connection));
+    });
+  }
+
+  function setImportLoading(brokerId, loading) {
+    var card = getConnectionCard(brokerId);
+    if (!card) return;
+    var btn = card.querySelector('.broker-import-btn');
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.textContent = loading ? 'Importing…' : 'Import now';
+  }
+
+  function hideImportMessages(brokerId) {
+    var card = getConnectionCard(brokerId);
+    if (!card) return;
+    var summary = card.querySelector('.broker-import-summary');
+    if (summary) summary.classList.add('hidden');
+    var errorBlock = card.querySelector('.broker-import-error');
+    if (errorBlock) errorBlock.classList.add('hidden');
+  }
+
+  function showImportSummary(brokerId, body) {
+    var card = getConnectionCard(brokerId);
+    if (!card) return;
+    var el = card.querySelector('.broker-import-summary');
+    if (!el) return;
+    el.textContent =
+      body.holdings_written + ' holdings and ' + body.transactions_inserted +
+      ' transactions imported (' + body.transactions_skipped_existing + ' already up to date)';
+    el.classList.remove('hidden');
+  }
+
+  // Fixed, documented messages per STORY-22's error-handling table --
+  // never a raw status code or server-generated string except the 401
+  // case, whose server message ("Your <broker> connection expired.
+  // Please reconnect.") already IS the documented text, broker-name
+  // included.
+  function showImportError(brokerId, status, body) {
+    var card = getConnectionCard(brokerId);
+    if (!card) return;
+    var errorBlock = card.querySelector('.broker-import-error');
+    if (!errorBlock) return;
+    var textEl = errorBlock.querySelector('.broker-import-error-text');
+    var retryBtn = errorBlock.querySelector('.broker-import-retry-btn');
+    var reconnectBtn = errorBlock.querySelector('.broker-import-reconnect-btn');
+    var connectBtn = errorBlock.querySelector('.broker-import-connect-btn');
+
+    retryBtn.classList.add('hidden');
+    reconnectBtn.classList.add('hidden');
+    connectBtn.classList.add('hidden');
+
+    var message;
+    if (status === 409) {
+      message = 'This broker is not connected yet.';
+      connectBtn.classList.remove('hidden');
+    } else if (status === 401) {
+      message = (body && body.message) || 'Your broker connection expired. Please reconnect.';
+      reconnectBtn.classList.remove('hidden');
+    } else if (status === 429) {
+      message = 'Upstox is rate-limiting us, please try again in a few minutes.';
+      retryBtn.classList.remove('hidden');
+    } else if (status === 502) {
+      message = 'Upstox could not be reached. Please try again.';
+      retryBtn.classList.remove('hidden');
+    } else if (status === 503) {
+      message = 'Upstox integration is not configured on this server.';
+      retryBtn.classList.remove('hidden');
+    } else {
+      message = 'Something went wrong importing your data. Please try again.';
+      retryBtn.classList.remove('hidden');
+    }
+
+    textEl.textContent = message;
+    errorBlock.classList.remove('hidden');
+  }
+
+  function triggerImport(brokerId) {
+    hideImportMessages(brokerId);
+    setImportLoading(brokerId, true);
+
+    fetch('/api/brokers/' + brokerId + '/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(function (res) {
+        return res.json().then(function (body) {
+          return { ok: res.ok, status: res.status, body: body };
+        });
+      })
+      .then(function (result) {
+        setImportLoading(brokerId, false);
+        if (result.ok) {
+          showImportSummary(brokerId, result.body);
+        } else {
+          showImportError(brokerId, result.status, result.body);
+        }
+        // Refetch after both successful and failed imports (STORY-22
+        // acceptance criterion) -- re-renders every card fresh, so the
+        // just-shown summary/error is captured first and re-applied
+        // below rather than lost to the rebuild.
+        var lastKind = result.ok ? 'summary' : 'error';
+        var lastBody = result.ok ? result.body : { status: result.status, body: result.body };
+        refetchConnections().then(function () {
+          if (lastKind === 'summary') {
+            showImportSummary(brokerId, lastBody);
+          } else {
+            showImportError(brokerId, lastBody.status, lastBody.body);
+          }
+        });
+      })
+      .catch(function () {
+        setImportLoading(brokerId, false);
+        showImportError(brokerId, 0, {});
+        refetchConnections();
+      });
+  }
+
+  document.addEventListener('click', function (e) {
+    var importBtn = e.target.closest('.broker-import-btn');
+    if (importBtn) {
+      triggerImport(importBtn.getAttribute('data-broker-id'));
+      return;
+    }
+    var retryBtn = e.target.closest('.broker-import-retry-btn');
+    if (retryBtn) {
+      triggerImport(retryBtn.getAttribute('data-broker-id'));
+      return;
+    }
+    var reconnectBtn = e.target.closest('.broker-reconnect-btn, .broker-import-reconnect-btn');
+    if (reconnectBtn) {
+      connectBroker(reconnectBtn.getAttribute('data-broker-id'));
+      return;
+    }
+    var connectFromErrorBtn = e.target.closest('.broker-import-connect-btn');
+    if (connectFromErrorBtn) {
+      connectBroker(connectFromErrorBtn.getAttribute('data-broker-id'));
+      return;
+    }
+  });
+
   // ---------- connect action ----------
 
   function connectBroker(brokerId) {
@@ -231,10 +458,15 @@
   var GENERIC_FAILURE_MESSAGE = 'Something went wrong connecting your broker. Please try again.';
 
   function refetchConnections() {
-    fetch('/api/brokers/connections', { headers: { Accept: 'application/json' } }).catch(function () {
-      // A failed refetch just leaves the existing card state on screen —
-      // not a reason to also fail the banner render.
-    });
+    return fetch('/api/brokers/connections', { headers: { Accept: 'application/json' } })
+      .then(function (res) { return res.json(); })
+      .then(function (body) {
+        renderConnections(body.connections || []);
+      })
+      .catch(function () {
+        // A failed refetch just leaves the existing card state on screen —
+        // not a reason to also fail the banner render.
+      });
   }
 
   function showCallbackBanner(kind, message) {
@@ -269,9 +501,18 @@
     var connect = params.get('connect');
     if (!connect) return;
 
+    var callbackBrokerId = params.get('broker');
+
     if (connect === 'success') {
       showCallbackBanner('success', 'Upstox connected successfully.');
       refetchConnections();
+      var importNowLink = document.getElementById('broker-callback-import-now-link');
+      if (importNowLink && callbackBrokerId) {
+        importNowLink.addEventListener('click', function (e) {
+          e.preventDefault();
+          triggerImport(callbackBrokerId);
+        });
+      }
     } else if (connect === 'error') {
       var reason = params.get('reason');
       var message = (reason && REASON_MESSAGES[reason]) || GENERIC_FAILURE_MESSAGE;
@@ -292,6 +533,13 @@
   if (dismissBtn) {
     dismissBtn.addEventListener('click', dismissCallbackBanner);
   }
+
+  // Initial render: show connection status cards for whatever this
+  // caller already has connected, on every page load -- not only after
+  // a fresh OAuth callback. Zero connections leaves this list empty,
+  // showing only the "Connect <broker>" buttons above (STORY-22
+  // acceptance criterion).
+  refetchConnections();
 })();
 </script>
 {% endblock %}
