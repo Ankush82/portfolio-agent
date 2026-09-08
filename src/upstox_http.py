@@ -337,16 +337,19 @@ class _UpstoxHttp:
         own duplicate-grant rejection, both of which is worse than
         surfacing the first response verbatim.
 
-        Returns the parsed JSON body on a 2xx whose top-level
-        ``status`` field is ``"success"``.
+        Returns the parsed JSON body on any 2xx. Unlike every other
+        endpoint on this class, Upstox's real token-exchange response
+        is the raw token payload (``access_token``, ``user_id``,
+        ``email``, ...) with no ``status`` envelope -- confirmed
+        against a real Upstox response, so this method does not
+        require one (``require_status_envelope=False``).
 
         Raises:
             BrokerAuthError: 401 / 403 — the auth code or client
                 credentials are invalid.
-            BrokerApiError: any other non-2xx, or a 2xx whose body
-                has ``status != "success"``. Carries the HTTP status
-                and the body truncated to ``_RESPONSE_BODY_MAX_LEN``
-                chars.
+            BrokerApiError: any other non-2xx, or a non-JSON /
+                non-dict 2xx body. Carries the HTTP status and the
+                body truncated to ``_RESPONSE_BODY_MAX_LEN`` chars.
         """
         url = UPSTOX_API_BASE_URL + UPSTOX_TOKEN_EXCHANGE_PATH
         headers = {"Accept": "application/json"}
@@ -354,7 +357,7 @@ class _UpstoxHttp:
         # No retry on the token exchange — see module docstring.
         response = self._do_request(method="POST", url=url, headers=headers,
                                     data=form, timeout=timeout)
-        return self._map_response_to_body(response)
+        return self._map_response_to_body(response, require_status_envelope=False)
 
     # ---- internal HTTP plumbing ---------------------------------------
 
@@ -447,18 +450,34 @@ class _UpstoxHttp:
 
     # ---- response mapping ----------------------------------------------
 
-    def _map_response_to_body(self, response: requests.Response) -> dict:
+    def _map_response_to_body(
+        self, response: requests.Response, *, require_status_envelope: bool = True
+    ) -> dict:
         """Map a ``requests.Response`` to either a parsed JSON body
         (success path) or a STORY-2 exception (failure path).
 
-        The 2xx branch checks the top-level ``status`` field; a 2xx
-        whose body's ``status`` is not ``"success"`` is mapped to
-        ``BrokerApiError`` (the AC's explicit "200 with status=error
-        → BrokerApiError" rule). Body parsing failures (non-JSON
-        2xx) also map to ``BrokerApiError`` — Upstox's contract is
-        JSON, so a non-JSON 2xx is a real upstream-side bug we
-        surface honestly rather than silently fabricating an
-        empty dict."""
+        The 2xx branch checks the top-level ``status`` field by
+        default; a 2xx whose body's ``status`` is not ``"success"``
+        is mapped to ``BrokerApiError`` (the AC's explicit "200 with
+        status=error -> BrokerApiError" rule) -- this is Upstox's real,
+        documented envelope for its v2 data endpoints (``get()``,
+        used by fetch_holdings/fetch_transactions). Body parsing
+        failures (non-JSON 2xx) also map to ``BrokerApiError`` --
+        Upstox's contract is JSON, so a non-JSON 2xx is a real
+        upstream-side bug we surface honestly rather than silently
+        fabricating an empty dict.
+
+        ``require_status_envelope=False`` (used by
+        ``post_token_exchange``) skips the ``status`` field check:
+        Upstox's real OAuth token-exchange response is the raw token
+        payload (``access_token``, ``user_id``, ``email``, ...) with
+        no ``status`` wrapper at all -- confirmed against a real
+        Upstox response captured live (every real token exchange was
+        being rejected as a failure despite Upstox actually granting
+        access, because this check assumed every Upstox endpoint uses
+        the same envelope). The caller (``exchange_auth_code``)
+        already validates the real success signal for this endpoint:
+        a non-empty ``access_token`` string."""
         if 200 <= response.status_code < 300:
             try:
                 body = response.json()
@@ -482,7 +501,7 @@ class _UpstoxHttp:
                 api_exc.http_status = response.status_code
                 api_exc.body_snippet = snippet
                 raise api_exc
-            if body.get("status") != "success":
+            if require_status_envelope and body.get("status") != "success":
                 snippet = self._body_snippet(response)
                 api_exc = BrokerApiError(
                     f"Upstox returned HTTP {response.status_code} with "
