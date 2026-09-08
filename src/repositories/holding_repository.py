@@ -46,7 +46,7 @@ Explicit non-goals for this repository:
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, get_type_hints
 import uuid
 from decimal import Decimal
 
@@ -59,6 +59,14 @@ class HoldingRepository(BaseRepository):
     """Typed CRUD over the ``holdings`` table via the ``Infrastructure``
     Protocol.
 
+    The natural key (portfolio_id, security_id) is the real, meaningful
+    identity for a holding -- two rows sharing that pair are the same
+    logical holding. ``get_by_id``/``update``/``delete`` (by synthetic
+    id) exist for uniformity with this project's other repositories,
+    not because a synthetic id is how callers actually think about a
+    holding; prefer ``get_by_security``/``update`` (natural-key
+    overload)/``delete_by_security`` when the natural key is known.
+
     Stateless apart from the injected infrastructure; every method
     goes through ``self._infrastructure.store`` / ``retrieve`` /
     ``query`` / ``delete``. No module-level caches, no connection
@@ -69,6 +77,76 @@ class HoldingRepository(BaseRepository):
         super().__init__(infrastructure, HOLDINGS_TABLE)
 
     # ---- CRUD ------------------------------------------------------------
+    #
+    # create/get_by_id/delete are inherited from BaseRepository unchanged:
+    # they only ever touch a row's opaque "id" string, never the natural
+    # key, so they work correctly for Holding as-is (create() generates a
+    # real str(uuid.uuid4()) synthetic id per this story's own AC, since
+    # Holding itself carries no id field -- see the class docstring
+    # above). update() is overridden below because BaseRepository's own
+    # version reads entity.id directly, which Holding does not have.
+
+    def update(self, holding: Holding) -> Holding:
+        """Full update of an existing holding, resolved by its natural
+        key (portfolio_id, security_id) rather than a synthetic id --
+        Holding carries no id attribute for BaseRepository.update() to
+        read. Raises KeyError if no row exists for that natural key."""
+        existing = self.get_by_security(holding.portfolio_id, holding.security_id)
+        if existing is None:
+            raise KeyError((holding.portfolio_id, holding.security_id))
+        row = self._to_row(holding)
+        row["id"] = self._natural_key_id(holding.portfolio_id, holding.security_id)
+        self._infrastructure.store(self._table, row)
+        return self._from_row(row)
+
+    def get_by_security(self, portfolio_id: str, security_id: str) -> Holding | None:
+        """Look up a holding by its real, meaningful identity: the
+        natural key (portfolio_id, security_id). Returns None when no
+        row matches."""
+        row = self._infrastructure.retrieve(
+            self._table, self._natural_key_id(portfolio_id, security_id)
+        )
+        if row is None:
+            return None
+        return self._from_row(row)
+
+    def delete_by_security(self, portfolio_id: str, security_id: str) -> bool:
+        """Delete a holding by its natural key. Idempotent: True if a
+        row was actually removed, False if none matched."""
+        return self._infrastructure.delete(
+            self._table, self._natural_key_id(portfolio_id, security_id)
+        )
+
+    @staticmethod
+    def _coerce_to_declared_type(value: Any, field_name: str) -> Any:
+        """Coerce ``value`` to whatever type ``Holding.<field_name>`` is
+        actually declared as -- driven by the real, current dataclass
+        annotation (via ``typing.get_type_hints``) rather than a value
+        hardcoded to assume Decimal forever. Values coming back from a
+        real backend are commonly Decimal (Postgres NUMERIC) even when
+        the dataclass itself declares float/int, so this is real,
+        needed coercion, not defensive paranoia."""
+        declared_type = get_type_hints(Holding).get(field_name)
+        if isinstance(declared_type, type) and isinstance(value, declared_type):
+            return value
+        if declared_type is float:
+            return float(value)
+        if declared_type is int:
+            return int(value)
+        if declared_type is Decimal:
+            return Decimal(str(value))
+        if declared_type is str:
+            return str(value)
+        return value
+
+    @staticmethod
+    def _natural_key_id(portfolio_id: str, security_id: str) -> str:
+        """The same deterministic synthetic-id scheme upsert() already
+        uses (STORY-9, already merged) -- kept as one shared helper so
+        every natural-key-keyed method (upsert, update, get_by_security,
+        delete_by_security) agrees on the exact same id string for a
+        given natural key."""
+        return f"{portfolio_id}:{security_id}"
 
     def upsert(self, holding: Holding) -> Holding:
         """Upsert a holding by natural key (portfolio_id, security_id).
@@ -82,7 +160,7 @@ class HoldingRepository(BaseRepository):
         # generates a uuid4. We set the id to a deterministic string
         # derived from the natural key so that store becomes an upsert
         # on that natural key.
-        row["id"] = f"{holding.portfolio_id}:{holding.security_id}"
+        row["id"] = self._natural_key_id(holding.portfolio_id, holding.security_id)
         record_id = self._infrastructure.store(self._table, row)
         # The id we used is the record_id returned by store.
         return self._from_row(row)
@@ -162,11 +240,7 @@ class HoldingRepository(BaseRepository):
         if "security_id" in row:
             kwargs["security_id"] = str(row["security_id"])
         if "quantity" in row:
-            # The quantity is stored as a Decimal; ensure it's a Decimal.
-            q = row["quantity"]
-            if not isinstance(q, Decimal):
-                q = Decimal(str(q))
-            kwargs["quantity"] = q
+            kwargs["quantity"] = self._coerce_to_declared_type(row["quantity"], "quantity")
         if "currency" in row:
             kwargs["currency"] = str(row["currency"])
         if "exchange" in row:
