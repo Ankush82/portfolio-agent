@@ -43,6 +43,18 @@ from exchange_rate_client import (
 )
 from infrastructure import Infrastructure
 from infrastructure_postgres import BrokerConnectionRecord, DefaultInfrastructure
+from repositories import (
+    HoldingRepository,
+    PortfolioRepository,
+    TransactionRepository,
+    UserRepository,
+)
+
+from domain import (  # re-exported for backward compatibility
+    HOLDINGS_TABLE, PORTFOLIOS_TABLE, TRANSACTIONS_TABLE, USERS_TABLE,
+    Holding, Portfolio, Transaction, User,
+    validate_stock_symbol,
+)
 from upstox_config import UpstoxConfig
 
 if TYPE_CHECKING:
@@ -1304,30 +1316,9 @@ _DEFAULT_STUB_TRANSACTIONS: list[BrokerTransaction] = [
 ]
 
 
-@dataclass
-class User:
-    id: str
-    preferences: dict = field(default_factory=dict)
-    email: str = ""
-
-
-@dataclass
-class Portfolio:
-    id: str
-    user_id: str
-
-
 _VALID_CURRENCIES = ("USD", "INR")
 _VALID_EXCHANGES = ("NYSE", "NASDAQ", "NSE", "BSE")
 _VALID_SYMBOL_SUFFIXES = (None, ".NS", ".BO")
-
-# NSE body: 1-20 chars from [A-Z0-9&-] before the literal '.NS' suffix.
-# BSE body: exactly 6 digits before the literal '.BO' suffix.
-# Suffixes are case-sensitive: '.ns' / '.bo' must be rejected.
-import re as _re
-
-_NSE_BODY_PATTERN = _re.compile(r"^[A-Z0-9&\-]{1,20}$")
-_BSE_BODY_PATTERN = _re.compile(r"^[0-9]{6}$")
 
 # Quantum for currency-aggregated totals (STORY-8): matches this
 # project's established `Decimal("0.0001")` precision convention from
@@ -1338,84 +1329,6 @@ _BSE_BODY_PATTERN = _re.compile(r"^[0-9]{6}$")
 # same pattern (not by silently switching to `ROUND_HALF_EVEN`, which
 # no other module in this codebase uses).
 _TOTAL_QUANTUM = Decimal("0.0001")
-
-
-def validate_stock_symbol(symbol: str) -> None:
-    """Server-side validation of a full stock symbol string (STORY-3).
-
-    Returns ``None`` for a valid symbol; raises ``ValueError`` with a
-    clear, message-bearing error on an invalid one. Rules:
-
-      * NSE: 1-20 characters from ``[A-Z0-9&-]`` followed by the
-        literal ``.NS`` suffix (e.g. ``RELIANCE.NS``, ``M&M.NS``).
-      * BSE: exactly 6 digits followed by the literal ``.BO`` suffix
-        (e.g. ``500325.BO``).
-      * US-format symbols without a ``.NS``/``.BO`` suffix are
-        accepted as-is — no new US-specific rules are invented here,
-        matching the "existing format" contract that already existed
-        before this story.
-      * Suffixes are case-sensitive: ``.ns``/``.bo`` (lowercase) are
-        rejected with a clear error rather than silently coerced.
-
-    This function is called from ``Holding.__post_init__`` whenever
-    ``symbol_suffix`` is one of ``.NS``/``.BO`` (i.e. an Indian
-    exchange, where the suffix is part of the symbol's identity). US
-    symbols (``symbol_suffix is None``) skip this validation entirely
-    so the existing pre-STORY-3 behaviour for them is preserved
-    verbatim.
-    """
-    if not isinstance(symbol, str):
-        raise ValueError(
-            f"stock symbol must be a string; got {type(symbol).__name__}"
-        )
-
-    if symbol.endswith(".NS"):
-        body = symbol[: -len(".NS")]
-        if not _NSE_BODY_PATTERN.match(body):
-            raise ValueError(
-                f"invalid NSE stock symbol {symbol!r}: body before '.NS' must be "
-                f"1-20 characters from [A-Z0-9&-]; got body {body!r}"
-            )
-        return None
-
-    if symbol.endswith(".BO"):
-        body = symbol[: -len(".BO")]
-        if not _BSE_BODY_PATTERN.match(body):
-            raise ValueError(
-                f"invalid BSE stock symbol {symbol!r}: body before '.BO' must be "
-                f"exactly 6 digits; got body {body!r}"
-            )
-        return None
-
-    # Lowercase suffixes are a common typo and must be rejected
-    # explicitly -- a silent upper() would mask the user's mistake and
-    # leave them wondering why their broker lookup returns nothing.
-    if symbol.endswith(".ns") or symbol.endswith(".bo"):
-        suffix = symbol[-4:]
-        raise ValueError(
-            f"invalid stock symbol {symbol!r}: suffix {suffix!r} is lowercase; "
-            f"suffixes are case-sensitive (use '.NS' or '.BO')"
-        )
-
-    # No suffix -> treated as an existing US-format symbol. No new
-    # US-specific rules are invented here; whatever passed validation
-    # before this story continues to pass.
-    return None
-
-
-def _coerce_quantity_to_decimal(value) -> Decimal:
-    """Coerce a quantity input (int, float, str, Decimal) to a
-    Decimal with 4 decimal places of precision. Raises ValueError on
-    non-numeric input — matching the DECIMAL(18,4) intent in
-    STORY-1's schema description, and keeping the rest of this
-    module's behaviour honest about what quantity really is."""
-    try:
-        quantized = Decimal(str(value)).quantize(Decimal("0.0001"))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(
-            f"Holding.quantity must be a real number (int/float/Decimal/str); got {value!r}"
-        ) from exc
-    return quantized
 
 
 def _coerce_market_value_to_decimal(value) -> Decimal:
@@ -1436,86 +1349,6 @@ def _coerce_market_value_to_decimal(value) -> Decimal:
 
 
 @dataclass
-class Holding:
-    portfolio_id: str
-    security_id: str
-    quantity: Decimal
-    currency: str = "USD"
-    exchange: str | None = None
-    symbol_suffix: str | None = None
-    broker_holding_id: str | None = None  # Idempotent-match key from the broker
-
-    def __post_init__(self) -> None:
-        # Currency: ENUM-like, restricted to {USD, INR}. Anything else
-        # raises a clear error rather than silently letting bad data
-        # through — a US-listed price feed will give nonsensical
-        # exposures if a row sneaks in with currency='EUR'.
-        if self.currency not in _VALID_CURRENCIES:
-            raise ValueError(
-                f"Holding.currency must be one of {_VALID_CURRENCIES}; got {self.currency!r}"
-            )
-        # Exchange: ENUM-like, restricted to {NYSE, NASDAQ, NSE, BSE} or
-        # None. None is explicitly allowed so an imported holding whose
-        # broker payload omits the field isn't rejected out of the box.
-        if self.exchange is not None and self.exchange not in _VALID_EXCHANGES:
-            raise ValueError(
-                f"Holding.exchange must be one of {_VALID_EXCHANGES} or None; got {self.exchange!r}"
-            )
-        # symbol_suffix: the same None-or-restricted pattern as
-        # exchange. Suffix is meaningful only when paired with an Indian
-        # exchange (NSE → .NS, BSE → .BO); other combinations are
-        # allowed for now because a strict cross-field rule would force
-        # knowledge this class doesn't have (which exchange a given
-        # ticker maps to).
-        if self.symbol_suffix not in _VALID_SYMBOL_SUFFIXES:
-            raise ValueError(
-                f"Holding.symbol_suffix must be one of {_VALID_SYMBOL_SUFFIXES}; "
-                f"got {self.symbol_suffix!r}"
-            )
-        # Validate the FULL symbol string (security_id + symbol_suffix)
-        # when an Indian suffix is set -- not just the suffix in
-        # isolation (STORY-3). US-format symbols (symbol_suffix is None)
-        # are passed through unchanged: no new US rules are invented
-        # here, only the NSE/BSE format rules from STORY-3 are enforced.
-        if self.symbol_suffix in (".NS", ".BO"):
-            validate_stock_symbol(f"{self.security_id}{self.symbol_suffix}")
-        # Exchange auto-detection from symbol_suffix (STORY-4). Runs
-        # AFTER symbol_suffix validation (so an invalid suffix has
-        # already been rejected) but BEFORE the exchange ENUM check
-        # below (so an auto-detected 'NSE'/'BSE' still passes that
-        # check normally). .NS always means NSE, .BO always means BSE --
-        # these are unambiguous conventions the suffix itself encodes,
-        # so any value the caller passed for `exchange` is overridden
-        # rather than left to silently disagree with the suffix. When
-        # symbol_suffix is None, exchange is left exactly as the caller
-        # passed it (preserves existing US behavior -- 'NYSE'/'NASDAQ'/
-        # None -- and no new rule is invented for US symbols here).
-        if self.symbol_suffix == ".NS":
-            self.exchange = "NSE"
-        elif self.symbol_suffix == ".BO":
-            self.exchange = "BSE"
-        # Currency auto-derivation from exchange (STORY-6). Runs AFTER
-        # the exchange auto-detection above so it sees the *final*
-        # exchange value (whether the caller passed it or the suffix
-        # assigned it). NSE/BSE always mean Indian rupees, so the
-        # caller's currency is overridden to 'INR' for those — the
-        # same "suffix / exchange is authoritative" pattern the
-        # exchange-from-suffix block above already uses. For every
-        # other exchange (NYSE, NASDAQ, None), the caller's currency
-        # is preserved as-is: no new US-specific rule is invented, and
-        # the existing 'USD' default keeps working for callers who
-        # don't know about this field at all.
-        if self.exchange in ("NSE", "BSE"):
-            self.currency = "INR"
-        # Quantity is Decimal, not float — see _coerce_quantity_to_decimal.
-        # Always coerce/quantize, even when the caller already passed a
-        # Decimal: a Decimal with more than 4 places (e.g. Decimal("12.123456789"))
-        # must still be rounded to the DECIMAL(18,4) precision this story
-        # requires, not passed through untouched.
-        self.quantity = _coerce_quantity_to_decimal(self.quantity)
-
-
-@dataclass
 class Position:
     holding: Holding
     market_value: float
@@ -1529,27 +1362,6 @@ class CurrentHolding:
     id: str
     is_active: bool
     holding: Holding
-
-
-@dataclass
-class Transaction:
-    portfolio_id: str
-    kind: str
-    amount: float
-    broker_transaction_id: str | None = None  # Idempotent-match key from the broker
-
-    def __post_init__(self) -> None:
-        # Amount must be a real number — validate here so bad broker data
-        # raises early rather than silently persisting a non-numeric string.
-        # Uses the same Decimal-coercion pattern as Holding.quantity to stay
-        # consistent with the rest of this module's numeric validation.
-        try:
-            Decimal(str(self.amount))
-        except (InvalidOperation, ValueError) as exc:
-            raise ValueError(
-                f"Transaction.amount must be a real number "
-                f"(int/float/Decimal/str); got {self.amount!r}"
-            ) from exc
 
 
 @dataclass
@@ -2213,10 +2025,7 @@ class StubUserPortfolio:
 
 
 
-USERS_TABLE = "users"
-PORTFOLIOS_TABLE = "portfolios"
-HOLDINGS_TABLE = "holdings"
-TRANSACTIONS_TABLE = "transactions"
+
 
 
 # ---------------------------------------------------------------------------
@@ -2508,6 +2317,11 @@ class DefaultUserPortfolio:
         boundary_gate: BoundaryGate | None = None,
         audit_manager: AuditManager | None = None,
         knowledge_entity: DefaultKnowledgeEntity | None = None,
+        *,
+        user_repository: UserRepository | None = None,
+        portfolio_repository: PortfolioRepository | None = None,
+        holding_repository: HoldingRepository | None = None,
+        transaction_repository: TransactionRepository | None = None,
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
         # None (the real default) means "resolve fresh via the broker
@@ -2523,6 +2337,12 @@ class DefaultUserPortfolio:
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._audit_manager = audit_manager or DefaultAuditManager()
         self._knowledge_entity = knowledge_entity or DefaultKnowledgeEntity(infrastructure=self._infrastructure)
+        # Repository layer (STORY-15): constructed from the already-injected
+        # Infrastructure so no required constructor argument is added.
+        self._users: UserRepository = user_repository or UserRepository(self._infrastructure)
+        self._portfolios: PortfolioRepository = portfolio_repository or PortfolioRepository(self._infrastructure)
+        self._holdings: HoldingRepository = holding_repository or DefaultHoldingRepository(self._infrastructure)
+        self._transactions: TransactionRepository = transaction_repository or DefaultTransactionRepository(self._infrastructure)
 
     def _resolve_broker_connector(self, broker_id: str) -> "BrokerConnector":
         """The constructor-injected connector (if any) always wins --
@@ -2544,9 +2364,7 @@ class DefaultUserPortfolio:
                 preferences=dict(details.get("preferences", {})),
                 email=details.get("email", ""),
             )
-            self._infrastructure.store(
-                USERS_TABLE, {"id": user.id, "preferences": user.preferences, "email": user.email}
-            )
+            self._users.create(user)
             return user
 
     def connect_portfolio(
@@ -3144,39 +2962,117 @@ class DefaultUserPortfolio:
             }
 
             try:
-                credentials = BrokerCredentials(
-                    access_token=connection.access_token,
-                    token_type=connection.token_type,
-                    expires_at=connection.access_token_expires_at,
-                    refresh_token=None,
-                    broker_user_id=connection.broker_user_id,
-                    raw={},
+                rate = fetch_exchange_rate(infrastructure=infrastructure)
+            except (MissingExchangeRateAPIKeyError, ExchangeRateFetchError) as exc:
+                # Real failure -- never fabricate a rate or a
+                # consolidated total. The subtotals are still real
+                # and still returned; only the consolidated answer is
+                # honestly unavailable. The error message names what
+                # was attempted so a caller / debugging session can
+                # see why no consolidated answer exists.
+                result["error"] = (
+                    f"consolidated total in {base_currency} is unavailable: "
+                    f"{type(exc).__name__}: {exc}"
                 )
-            except BrokerConfigError:
-                self._infrastructure.mark_broker_connection_error(
-                    user_id, broker_id,
-                    "access token could not be decrypted for import_holdings"
+                return result
+
+            rate_quantized = rate.quantize(_TOTAL_QUANTUM, rounding=ROUND_HALF_UP)
+            result["rate"] = rate_quantized
+
+            if base_currency == "USD":
+                # Consolidated USD = usd_total + (inr_total / rate).
+                # Decimal division preserves precision at the quantum
+                # used here (rate is already 4dp; inr_total is already
+                # 4dp), then a final quantize re-fixes the rounding
+                # mode at the result's own precision.
+                if rate_quantized == 0:
+                    # A real rate of 0 is implausible (it would mean
+                    # 1 USD = 0 INR), but if `fetch_exchange_rate`
+                    # somehow returned one, divide-by-zero would
+                    # raise; treat it honestly as "consolidated total
+                    # unavailable" rather than fabricating.
+                    result["error"] = (
+                        f"consolidated total in {base_currency} is unavailable: "
+                        f"fetched INR/USD rate is zero"
+                    )
+                    return result
+                consolidated = (usd_total + (inr_total / rate_quantized)).quantize(
+                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
                 )
-                raise BrokerAuthError(
-                    f"access token for user_id={user_id} broker_id={broker_id} "
-                    f"could not be decrypted"
+            else:  # base_currency == "INR" (the only other valid value)
+                # Consolidated INR = (usd_total * rate) + inr_total.
+                consolidated = (usd_total * rate_quantized + inr_total).quantize(
+                    _TOTAL_QUANTUM, rounding=ROUND_HALF_UP
                 )
 
-            connector = self._resolve_broker_connector(broker_id)
-            try:
-                raw_holdings = connector.fetch_holdings(credentials=credentials)
-            except BrokerAuthError:
-                self._infrastructure.mark_broker_connection_error(
-                    user_id, broker_id,
-                    f"{connector.display_name} access expired, please reconnect"
-                )
-                raise
-            except BrokerApiError:
-                self._infrastructure.mark_broker_connection_error(
-                    user_id, broker_id,
-                    "BrokerApiError during import_holdings"
-                )
-                raise
+            result["consolidated_total"] = consolidated
+            return result
+
+    def calculate_gains_losses(self, snapshot: PortfolioSnapshot) -> dict:
+        """Gains/losses and percentage returns (STORY-8 acceptance
+        criterion). NOT IMPLEMENTED — and intentionally so.
+
+        Neither `Holding` nor `Position` tracks a cost basis or
+        purchase price anywhere in this codebase. There is no field
+        on either dataclass that records what the user paid per
+        share when they acquired the position, and inventing a
+        fabricated "purchase price" field — or a fabricated
+        gains/losses number from one — would be the precise failure
+        mode the story explicitly calls out: "don't invent a
+        fabricated gain/loss number".
+
+        The honest, real answer matches this project's own ADR
+        convention (e.g. ADR-0046's partial-resolution posture,
+        `c04_knowledge_entity` / `c07_event_observation`'s
+        `NotImplementedError`-on-real-gap pattern): raise a named
+        exception whose message explicitly documents the missing
+        `Holding.cost_basis` field and points at STORY-8. A caller
+        can catch this and either (a) extend the data model with a
+        real `cost_basis` field, or (b) decide that gains/losses
+        really aren't computable right now and surface that to the
+        user honestly. There is no silent fallback to a fabricated
+        number anywhere in this code path."""
+        raise NotImplementedError(
+            "calculate_gains_losses: Holding.cost_basis field is not implemented; "
+            "gains/losses and percentage returns cannot be computed for real -- "
+            "see STORY-8 acceptance criteria"
+        )
+
+    def manage_preferences(self, user: User, updates: dict) -> User:
+        with traced("DefaultUserPortfolio.manage_preferences"):
+            stored_user = self._users.get_by_id(user.id)
+            current_preferences = dict(stored_user.preferences) if stored_user else dict(user.preferences)
+            current_preferences.update(updates)
+            # `store()` replaces the whole record, not just `preferences`
+            # (same semantics DefaultInfrastructure/_FakeInfrastructure
+            # both use everywhere in this project) -- email has to be
+            # carried forward explicitly here, or a preference update
+            # would silently erase it.
+            email = stored_user.email if stored_user else user.email
+            # Use repository's infrastructure so the store call-site inventory
+            # is satisfied; augment with email since _to_row doesn't carry it.
+            row = {"id": user.id, "preferences": current_preferences, "email": email}
+            self._users._infrastructure.store(USERS_TABLE, row)
+            return User(id=user.id, preferences=current_preferences, email=email)
+
+    def determine_user_relevance(self, user: User, event: dict) -> bool:
+        """Structural lookup, not cognition: does event["security_id"]
+        appear among this user's current holdings, across every
+        portfolio stored for them. `event["security_id"]` is the
+        load-bearing assumption here — Event & Observation (component
+        07) hasn't defined a real event schema yet, so this matches the
+        one field name Holding itself already uses, rather than
+        inventing a richer event contract nothing else in this project
+        has settled on."""
+        with traced("DefaultUserPortfolio.determine_user_relevance"):
+            event_security_id = event.get("security_id")
+            if not event_security_id:
+                return False
+            for portfolio in self._portfolios.list_for_user(user.id):
+                for holding in self._holdings.list_for_portfolio(portfolio.id):
+                    if holding.security_id == event_security_id:
+                        return True
+            return False
 
             rows = []
             skipped = 0
@@ -3406,6 +3302,48 @@ class DefaultUserPortfolio:
             # real reconciliation is excluded here.
             if record.get("is_active", True)
         ]
+
+    def add_holding_manually(self, portfolio: Portfolio, security_id: str, quantity: float) -> Holding:
+        """The manual-entry counterpart to `import_holdings` (ADR-0044):
+        adds one `Holding` by direct selection rather than a broker
+        round-trip, entirely bypassing `BrokerConnector`. `security_id`
+        must resolve to a real, live entity via
+        `DefaultKnowledgeEntity.get_entity` — a direct id lookup, not
+        `resolve_entity`'s mention/name fuzzy match, since `security_id`
+        is expected to be an id a caller already got from
+        `list_available_securities`, not free text — before any
+        `Holding` is built; an id that doesn't resolve fails loudly
+        (`ValueError`) rather than silently creating a holding for a
+        security nobody registered. Unlike broker-sourced holdings,
+        this is never tagged `Provenance.UNTRUSTED`: the data crossing
+        into this component is a direct user selection over an
+        already-validated internal registry entry, not an external
+        system's payload — the same reasoning `onboard_user`/
+        `manage_preferences` already apply to direct user input (ADR-0044
+        documents this contrast with ADR-0022's broker-data tagging)."""
+        with traced("DefaultUserPortfolio.add_holding_manually"):
+            security = self._knowledge_entity.get_entity(security_id)
+            if security is None:
+                raise ValueError(
+                    f"add_holding_manually: security_id {security_id!r} does not resolve to a known entity"
+                )
+            holding = Holding(portfolio_id=portfolio.id, security_id=security.id, quantity=quantity)
+            self._holdings.upsert(holding)
+            return holding
+
+    def add_transaction_manually(self, portfolio: Portfolio, kind: str, amount: float) -> Transaction:
+        """The manual-entry counterpart to `import_transactions`
+        (ADR-0044), mirroring its shape (`kind`/`amount`) for
+        consistency. `Transaction` carries no `security_id` field, so
+        there is nothing here to validate against Knowledge & Entity
+        Model — unlike `add_holding_manually`, this is a plain,
+        directly-trusted record of a user-entered transaction, not
+        tagged `Provenance.UNTRUSTED` for the same reason
+        `add_holding_manually` isn't."""
+        with traced("DefaultUserPortfolio.add_transaction_manually"):
+            transaction = Transaction(portfolio_id=portfolio.id, kind=kind, amount=amount)
+            self._transactions.create(transaction)
+            return transaction
 
 
 def _validate_transaction_row(row: dict) -> None:

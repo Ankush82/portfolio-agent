@@ -69,6 +69,8 @@ uv sync --extra dev          # install dependencies
 uv run --python 3.11 pytest tests/ -v    # 534 pass, 13 skip without a live DB
 
 docker-compose up -d         # bring up local Postgres + Redis
+# Apply the core domain entities migration before the first run:
+./scripts/run_migration.sh   # creates users / portfolios / holdings / transactions tables
 uv run --python 3.11 pytest tests/ -v    # same suite, now with real DB coverage too
 
 PYTHONPATH=src uv run --python 3.11 python src/run_trace.py   # static wiring demo, writes trace.log

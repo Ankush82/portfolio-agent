@@ -25,10 +25,15 @@ from components.c01_user_portfolio import (
     BrokerHolding,
     BrokerRateLimitError,
     BrokerTransaction,
+    CurrentHolding,
+    CurrentTransaction,
+    DefaultHoldingRepository,
+    DefaultTransactionRepository,
     DefaultUpstoxBrokerConnector,
     DefaultUserPortfolio,
     FailedRecord,
     Holding,
+    HoldingRepository,
     ImportResult,
     Portfolio,
     PortfolioSnapshot,
@@ -37,6 +42,7 @@ from components.c01_user_portfolio import (
     StubUserPortfolio,
     SyncResult,
     Transaction,
+    TransactionRepository,
     UnsupportedBrokerError,
     User,
     get_broker_connector,
@@ -85,6 +91,9 @@ class _InMemoryInfrastructure:
             for record in self._tables.get(table, {}).values()
             if all(record.get(key) == value for key, value in filters.items())
         ]
+
+    def delete(self, table: str, id: str) -> bool:
+        return self._tables.get(table, {}).pop(id, None) is not None
 
     # STORY-15 extensions
     def get_broker_connection(self, user_id: str, broker_id: str) -> "BrokerConnectionRecord | None":

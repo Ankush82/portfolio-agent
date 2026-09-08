@@ -15,6 +15,7 @@ from infrastructure_postgres import (
     DEFAULT_POSTGRES_DSN,
     DEFAULT_REDIS_URL,
     DefaultInfrastructure,
+    MigrationRequiredError,
 )
 
 
@@ -67,6 +68,28 @@ def test_retrieve_missing_id_returns_none(infra):
     table = f"test_records_{uuid.uuid4().hex}"
 
     assert infra.retrieve(table, "does-not-exist") is None
+
+
+@requires_postgres
+def test_store_then_delete_then_retrieve_returns_none(infra):
+    table = f"test_records_{uuid.uuid4().hex}"
+    record = {"id": "widget-1", "name": "Widget", "count": 3}
+
+    record_id = infra.store(table, record)
+    deleted = infra.delete(table, record_id)
+    retrieved = infra.retrieve(table, record_id)
+
+    assert deleted is True
+    assert retrieved is None
+
+
+@requires_postgres
+def test_delete_unknown_id_returns_false_and_does_not_raise(infra):
+    table = f"test_records_{uuid.uuid4().hex}"
+
+    deleted = infra.delete(table, "does-not-exist")
+
+    assert deleted is False
 
 
 @requires_postgres
@@ -322,53 +345,56 @@ AAPL  # duplicate
     
     # Load the tickers
     infra.load_us_tickers(str(csv_file))
-    
-    # Insert some test holdings data
+
+    # STORY-10: holdings is now a real, typed, FK-constrained table --
+    # portfolio_id must reference a real portfolios row, and quantity/
+    # currency are NOT NULL. Real users/portfolios rows first.
+    user_id = f"user-{uuid.uuid4()}"
+    portfolio1, portfolio2 = f"portfolio1-{uuid.uuid4()}", f"portfolio2-{uuid.uuid4()}"
+    infra.store("users", {"id": user_id, "email": f"{user_id}@example.com", "preferences": {}})
+    infra.store("portfolios", {"id": portfolio1, "user_id": user_id})
+    infra.store("portfolios", {"id": portfolio2, "user_id": user_id})
+
+    def _holding(id_, security_id, portfolio_id):
+        return {
+            "id": id_,
+            "security_id": security_id,
+            "portfolio_id": portfolio_id,
+            "quantity": 1,
+            "currency": "USD",
+            "exchange": None,
+            "symbol_suffix": None,
+        }
+
     holdings_table = "holdings"
+    holding_ids = [f"holding{i}-{uuid.uuid4()}" for i in range(1, 7)]
     # Insert a holding with a US ticker (should be counted)
-    infra.store(holdings_table, {
-        "id": "holding1",
-        "security_id": "AAPL",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[0], "AAPL", portfolio1))
     # Insert a holding with another US ticker (should be counted)
-    infra.store(holdings_table, {
-        "id": "holding2",
-        "security_id": "MSFT",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[1], "MSFT", portfolio1))
     # Insert a holding with a non-US ticker (should NOT be counted - has dot)
-    infra.store(holdings_table, {
-        "id": "holding3",
-        "security_id": "BRK.B",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[2], "BRK.B", portfolio1))
     # Insert a holding with a non-US ticker (should NOT be counted - has hyphen)
-    infra.store(holdings_table, {
-        "id": "holding4",
-        "security_id": "BRK-B",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[3], "BRK-B", portfolio1))
     # Insert a holding with a ticker not in CSV (should NOT be counted)
-    infra.store(holdings_table, {
-        "id": "holding5",
-        "security_id": "XYZ",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[4], "XYZ", portfolio1))
     # Insert a holding for a different portfolio (should be counted in total but not portfolio-specific)
-    infra.store(holdings_table, {
-        "id": "holding6",
-        "security_id": "GOOGL",
-        "portfolio_id": "portfolio2"
-    })
-    
-    # Count US stocks for portfolio1 (should be 2: AAPL and MSFT)
-    count_portfolio1 = infra.count_us_stocks("portfolio1")
-    assert count_portfolio1 == 2
-    
-    # Count US stocks for all portfolios (should be 3: AAPL, MSFT, GOOGL)
-    count_all = infra.count_us_stocks()
-    assert count_all == 3
+    infra.store(holdings_table, _holding(holding_ids[5], "GOOGL", portfolio2))
+
+    try:
+        # Count US stocks for portfolio1 (should be 2: AAPL and MSFT)
+        count_portfolio1 = infra.count_us_stocks(portfolio1)
+        assert count_portfolio1 == 2
+
+        # Count US stocks for all portfolios (should be 3: AAPL, MSFT, GOOGL)
+        count_all = infra.count_us_stocks()
+        assert count_all == 3
+    finally:
+        for holding_id in holding_ids:
+            infra.delete(holdings_table, holding_id)
+        infra.delete("portfolios", portfolio1)
+        infra.delete("portfolios", portfolio2)
+        infra.delete("users", user_id)
 
 
 @requires_postgres
@@ -397,16 +423,42 @@ MSFT
     
     # Load the tickers
     infra.load_us_tickers(str(csv_file))
-    
+
+    # STORY-10: holdings is now a real, typed, FK-constrained table --
+    # portfolio_id must reference a real portfolios row, and quantity/
+    # currency are NOT NULL. Real users/portfolios rows first.
+    user_id = f"user-{uuid.uuid4()}"
+    portfolio_id = f"p1-{uuid.uuid4()}"
+    infra.store("users", {"id": user_id, "email": f"{user_id}@example.com", "preferences": {}})
+    infra.store("portfolios", {"id": portfolio_id, "user_id": user_id})
+
+    def _holding(id_, security_id):
+        return {
+            "id": id_,
+            "security_id": security_id,
+            "portfolio_id": portfolio_id,
+            "quantity": 1,
+            "currency": "USD",
+            "exchange": None,
+            "symbol_suffix": None,
+        }
+
+    holding_ids = [f"h{i}-{uuid.uuid4()}" for i in range(1, 5)]
     # Insert holdings for each unique ticker
-    infra.store("holdings", {"id": "h1", "security_id": "AAPL", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h2", "security_id": "MSFT", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h3", "security_id": "TSLA", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h4", "security_id": "XYZ", "portfolio_id": "p1"})  # not in CSV
-    
-    # Should count 3 US stocks (duplicates removed)
-    count = infra.count_us_stocks("p1")
-    assert count == 3
+    infra.store("holdings", _holding(holding_ids[0], "AAPL"))
+    infra.store("holdings", _holding(holding_ids[1], "MSFT"))
+    infra.store("holdings", _holding(holding_ids[2], "TSLA"))
+    infra.store("holdings", _holding(holding_ids[3], "XYZ"))  # not in CSV
+
+    try:
+        # Should count 3 US stocks (duplicates removed)
+        count = infra.count_us_stocks(portfolio_id)
+        assert count == 3
+    finally:
+        for holding_id in holding_ids:
+            infra.delete("holdings", holding_id)
+        infra.delete("portfolios", portfolio_id)
+        infra.delete("users", user_id)
 
 
 @requires_postgres
@@ -455,3 +507,152 @@ MSFT
         cursor.execute("SELECT ticker FROM tmp_us_tickers ORDER BY ticker")
         rows = cursor.fetchall()
         assert [r[0] for r in rows] == ["AAPL", "MSFT"]
+
+
+# ---------------------------------------------------------------------------
+# STORY-14 — Stop lazy-creation for migrated tables; raise MigrationRequiredError
+# ---------------------------------------------------------------------------
+
+
+def test_migration_required_error_is_subclass_of_runtime_error():
+    """STORY-14: MigrationRequiredError must be a subclass of RuntimeError."""
+    assert issubclass(MigrationRequiredError, RuntimeError)
+
+
+def test_migration_required_error_message_contains_table_and_command():
+    """STORY-14: the exception message names the table and the exact run command."""
+    from infrastructure_postgres import _MIGRATION_SCRIPT
+
+    exc = MigrationRequiredError("Table 'holdings' does not exist. Run: ./scripts/run_migration.sh")
+    assert "holdings" in str(exc)
+    assert "./scripts/run_migration.sh" in str(exc)
+    assert _MIGRATION_SCRIPT in str(exc)
+
+
+@requires_postgres
+def test_store_to_unrelated_table_still_works(infra):
+    """STORY-14 AC: lazy CREATE TABLE IF NOT EXISTS still works unchanged for
+    a table NOT in MIGRATED_TABLES.  Store to and retrieve from a random
+    table name and confirm the data round-trips."""
+    table = f"test_non_migrated_{uuid.uuid4().hex}"
+    record = {"id": "x", "foo": "bar"}
+
+    record_id = infra.store(table, record)
+    retrieved = infra.retrieve(table, record_id)
+
+    assert record_id == "x"
+    assert retrieved == record
+
+
+@requires_postgres
+def test_migrated_table_not_auto_created_on_missing(infra):
+    """STORY-14 AC: DefaultInfrastructure does NOT issue CREATE TABLE for
+    any table in MIGRATED_TABLES.  Operate against 'holdings' without
+    running the migration, then probe Postgres directly to confirm the
+    holdings relation does NOT exist (i.e. no silent CREATE TABLE occurred)."""
+    import psycopg
+
+    # Verify holdings is absent before we try anything.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_tables WHERE tablename = 'holdings'"
+        )
+        exists_before = cursor.fetchone() is not None
+
+    if exists_before:
+        pytest.skip("holdings table already exists in this DB; cannot verify auto-creation is absent")
+
+    # Attempt a store — must raise MigrationRequiredError, not succeed silently.
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.store("holdings", {"id": "h1", "portfolio_id": "p1", "security_id": "AAPL"})
+
+    # Error message must mention the table name.
+    assert "holdings" in str(exc_info.value)
+
+    # Verify holdings STILL does not exist — the infrastructure did NOT
+    # silently create it as part of handling the error.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_tables WHERE tablename = 'holdings'"
+        )
+        exists_after = cursor.fetchone() is not None
+
+    assert not exists_after, (
+        "holdings table was auto-created by DefaultInfrastructure — "
+        "the lazy CREATE TABLE must NOT fire for migrated tables"
+    )
+
+
+@requires_postgres
+def test_operations_against_missing_migrated_table_raise_migration_required_error(infra):
+    """STORY-14 AC: any operation against a missing migrated table raises
+    MigrationRequiredError, and psycopg's UndefinedTable does not propagate.
+    Tests store / retrieve / query / delete on the 'holdings' table with
+    the relation absent from the DB."""
+    import psycopg
+
+    # Confirm holdings is absent; skip if already present.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_tables WHERE tablename = 'holdings'"
+        )
+        if cursor.fetchone() is not None:
+            pytest.skip("holdings table already exists; cannot test missing-table behaviour")
+
+    # store() must raise MigrationRequiredError, not UndefinedTable.
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.store("holdings", {"id": "h1", "portfolio_id": "p1", "security_id": "AAPL"})
+    assert "holdings" in str(exc_info.value)
+    assert "run_migration" in str(exc_info.value)
+    # psycopg's UndefinedTable must NOT be the exception type seen by the caller.
+    assert not isinstance(exc_info.value, psycopg.errors.UndefinedTable)
+
+    # retrieve() must also raise MigrationRequiredError.
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.retrieve("holdings", "h1")
+    assert "holdings" in str(exc_info.value)
+    assert not isinstance(exc_info.value, psycopg.errors.UndefinedTable)
+
+    # query() must also raise MigrationRequiredError.
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.query("holdings", {"portfolio_id": "p1"})
+    assert "holdings" in str(exc_info.value)
+    assert not isinstance(exc_info.value, psycopg.errors.UndefinedTable)
+
+    # delete() must also raise MigrationRequiredError.
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.delete("holdings", "h1")
+    assert "holdings" in str(exc_info.value)
+    assert not isinstance(exc_info.value, psycopg.errors.UndefinedTable)
+
+
+@requires_postgres
+def test_migration_required_error_message_contains_migration_filename():
+    """STORY-14 AC: MigrationRequiredError message must contain both the
+    table name AND the migration script filename (scripts/run_migration.sh).
+    Uses the real migration script path from infrastructure_postgres."""
+    import psycopg
+    from infrastructure_postgres import (
+        DEFAULT_POSTGRES_DSN,
+        DefaultInfrastructure,
+        MigrationRequiredError,
+        _MIGRATION_SCRIPT,
+    )
+
+    # Confirm holdings is absent; skip if already present.
+    with psycopg.connect(DEFAULT_POSTGRES_DSN) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_tables WHERE tablename = 'holdings'"
+        )
+        if cursor.fetchone() is not None:
+            pytest.skip("holdings table already exists; cannot test missing-table behaviour")
+
+    infra = DefaultInfrastructure()
+    with pytest.raises(MigrationRequiredError) as exc_info:
+        infra.store("holdings", {"id": "h1", "portfolio_id": "p1", "security_id": "AAPL"})
+
+    msg = str(exc_info.value)
+    assert "holdings" in msg, f"'holdings' not found in error message: {msg!r}"
+    assert _MIGRATION_SCRIPT in msg, (
+        f"migration script path {_MIGRATION_SCRIPT!r} not found in error message: {msg!r}"
+    )

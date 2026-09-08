@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "module": "components.c01_user_portfolio",
+    "description": "Public-API snapshot for c01_user_portfolio.py. Contains ONLY names defined directly in this file (verified via __module__ / inspect.getfile). Items imported for backward compatibility (Holding, Portfolio, Transaction, User, validate_stock_symbol, DefaultInfrastructure, DefaultKnowledgeEntity, etc.) are excluded because they belong to other components. Regenerate with --generate ONLY when intentionally accepting a purely additive defaulted keyword-only parameter, and name that parameter explicitly in the PR description.",
+    "added_kwonly_params": []
+  },
+  "module_level_functions": {},
+  "classes": {
+    "BrokerApiError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "BrokerAuthError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "BrokerConfigError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "BrokerConnector": {
+      "kind": "_ProtocolMeta",
+      "public_callables": {
+        "build_authorize_url": "(self, *, state: str) -> str",
+        "exchange_auth_code": "(self, *, code: str) -> components.c01_user_portfolio.BrokerCredentials",
+        "fetch_holdings": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials) -> list[components.c01_user_portfolio.BrokerHolding]",
+        "fetch_transactions": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials, start_date: datetime.date, end_date: datetime.date) -> list[components.c01_user_portfolio.BrokerTransaction]"
+      }
+    },
+    "BrokerCredentials": {
+      "kind": "type",
+      "public_callables": {}
+    },
+    "BrokerError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "BrokerHolding": {
+      "kind": "type",
+      "public_callables": {}
+    },
+    "BrokerRateLimitError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "BrokerTransaction": {
+      "kind": "type",
+      "public_callables": {}
+    },
+    "DefaultUserPortfolio": {
+      "kind": "type",
+      "public_callables": {
+        "add_holding_manually": "(self, portfolio: domain.Portfolio, security_id: str, quantity: float) -> domain.Holding",
+        "add_transaction_manually": "(self, portfolio: domain.Portfolio, kind: str, amount: float) -> domain.Transaction",
+        "calculate_exposure": "(self, snapshot: components.c01_user_portfolio.PortfolioSnapshot) -> dict",
+        "calculate_gains_losses": "(self, snapshot: components.c01_user_portfolio.PortfolioSnapshot) -> dict",
+        "calculate_portfolio_totals": "(self, snapshot: components.c01_user_portfolio.PortfolioSnapshot, base_currency: str, infrastructure: infrastructure.Infrastructure | None = None) -> dict",
+        "connect_portfolio": "(self, user: domain.User, broker_credentials: dict) -> domain.Portfolio",
+        "determine_user_relevance": "(self, user: domain.User, event: dict) -> bool",
+        "import_holdings": "(self, portfolio: domain.Portfolio) -> list[domain.Holding]",
+        "import_transactions": "(self, portfolio: domain.Portfolio, start_date: datetime.date = datetime.date(1, 1, 1), end_date: datetime.date = datetime.date(9999, 12, 31)) -> list[domain.Transaction]",
+        "list_available_securities": "(self, query: str = '') -> list[components.c04_knowledge_entity.Entity]",
+        "manage_preferences": "(self, user: domain.User, updates: dict) -> domain.User",
+        "onboard_user": "(self, details: dict) -> domain.User",
+        "synchronize_portfolio": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot",
+        "track_portfolio_state": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot"
+      }
+    },
+    "PlaceholderBrokerConnector": {
+      "kind": "type",
+      "public_callables": {
+        "build_authorize_url": "(self, *, state: str) -> str",
+        "exchange_auth_code": "(self, *, code: str) -> components.c01_user_portfolio.BrokerCredentials",
+        "fetch_holdings": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials) -> list[components.c01_user_portfolio.BrokerHolding]",
+        "fetch_transactions": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials, start_date: datetime.date, end_date: datetime.date) -> list[components.c01_user_portfolio.BrokerTransaction]"
+      }
+    },
+    "PortfolioSnapshot": {
+      "kind": "type",
+      "public_callables": {}
+    },
+    "Position": {
+      "kind": "type",
+      "public_callables": {}
+    },
+    "Protocol": {
+      "kind": "Protocol",
+      "public_callables": {}
+    },
+    "StubBrokerConnector": {
+      "kind": "type",
+      "public_callables": {
+        "build_authorize_url": "(self, *, state: str) -> str",
+        "exchange_auth_code": "(self, *, code: str) -> components.c01_user_portfolio.BrokerCredentials",
+        "fetch_holdings": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials) -> list[components.c01_user_portfolio.BrokerHolding]",
+        "fetch_transactions": "(self, *, credentials: components.c01_user_portfolio.BrokerCredentials, start_date: datetime.date, end_date: datetime.date) -> list[components.c01_user_portfolio.BrokerTransaction]"
+      }
+    },
+    "StubUserPortfolio": {
+      "kind": "type",
+      "public_callables": {
+        "calculate_exposure": "(self, snapshot: components.c01_user_portfolio.PortfolioSnapshot) -> dict",
+        "connect_portfolio": "(self, user: domain.User, broker_credentials: dict) -> domain.Portfolio",
+        "determine_user_relevance": "(self, user: domain.User, event: dict) -> bool",
+        "import_holdings": "(self, portfolio: domain.Portfolio) -> list[domain.Holding]",
+        "import_transactions": "(self, portfolio: domain.Portfolio) -> list[domain.Transaction]",
+        "manage_preferences": "(self, user: domain.User, updates: dict) -> domain.User",
+        "onboard_user": "(self, details: dict) -> domain.User",
+        "synchronize_portfolio": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot",
+        "track_portfolio_state": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot"
+      }
+    },
+    "UnsupportedBrokerError": {
+      "kind": "type",
+      "public_callables": {
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "UserPortfolio": {
+      "kind": "_ProtocolMeta",
+      "public_callables": {
+        "calculate_exposure": "(self, snapshot: components.c01_user_portfolio.PortfolioSnapshot) -> dict",
+        "connect_portfolio": "(self, user: domain.User, broker_credentials: dict) -> domain.Portfolio",
+        "determine_user_relevance": "(self, user: domain.User, event: dict) -> bool",
+        "import_holdings": "(self, portfolio: domain.Portfolio) -> list[domain.Holding]",
+        "import_transactions": "(self, portfolio: domain.Portfolio) -> list[domain.Transaction]",
+        "manage_preferences": "(self, user: domain.User, updates: dict) -> domain.User",
+        "onboard_user": "(self, details: dict) -> domain.User",
+        "synchronize_portfolio": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot",
+        "track_portfolio_state": "(self, portfolio: domain.Portfolio) -> components.c01_user_portfolio.PortfolioSnapshot"
+      }
+    }
+  }
+}
