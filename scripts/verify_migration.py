@@ -66,8 +66,8 @@ _CORE_DOMAIN_TABLE_SPECS: dict[str, dict] = {
             ("id",          "TEXT",    "NO"),
             ("email",       "TEXT",    "YES"),
             ("preferences", "JSONB",   "NO"),
-            ("created_at",  "TIMESTAMPTZ", "NO"),
-            ("updated_at",  "TIMESTAMPTZ", "NO"),
+            ("created_at",  "TIMESTAMP WITH TIME ZONE", "NO"),
+            ("updated_at",  "TIMESTAMP WITH TIME ZONE", "NO"),
         ],
         "expected_indexes": ["idx_users_email"],
         "pk_column": "id",
@@ -76,8 +76,8 @@ _CORE_DOMAIN_TABLE_SPECS: dict[str, dict] = {
         "expected_columns": [
             ("id",         "TEXT",    "NO"),
             ("user_id",    "TEXT",    "NO"),
-            ("created_at", "TIMESTAMPTZ", "NO"),
-            ("updated_at", "TIMESTAMPTZ", "NO"),
+            ("created_at", "TIMESTAMP WITH TIME ZONE", "NO"),
+            ("updated_at", "TIMESTAMP WITH TIME ZONE", "NO"),
         ],
         "expected_indexes": ["idx_portfolios_user_id"],
         "pk_column": "id",
@@ -91,8 +91,8 @@ _CORE_DOMAIN_TABLE_SPECS: dict[str, dict] = {
             ("currency",      "TEXT",  "YES"),
             ("exchange",      "TEXT",  "YES"),
             ("symbol_suffix",  "TEXT",  "YES"),
-            ("created_at",    "TIMESTAMPTZ", "NO"),
-            ("updated_at",    "TIMESTAMPTZ", "NO"),
+            ("created_at",    "TIMESTAMP WITH TIME ZONE", "NO"),
+            ("updated_at",    "TIMESTAMP WITH TIME ZONE", "NO"),
         ],
         "expected_indexes": ["idx_holdings_portfolio_id", "uq_holdings_portfolio_security"],
         "pk_column": "id",
@@ -103,8 +103,8 @@ _CORE_DOMAIN_TABLE_SPECS: dict[str, dict] = {
             ("portfolio_id", "TEXT",  "NO"),
             ("kind",         "TEXT",  "NO"),
             ("amount",       "NUMERIC", "NO"),
-            ("created_at",   "TIMESTAMPTZ", "NO"),
-            ("updated_at",   "TIMESTAMPTZ", "NO"),
+            ("created_at",   "TIMESTAMP WITH TIME ZONE", "NO"),
+            ("updated_at",   "TIMESTAMP WITH TIME ZONE", "NO"),
         ],
         "expected_indexes": ["idx_transactions_portfolio_id"],
         "pk_column": "id",
@@ -330,12 +330,13 @@ def verify_migration(dsn: str = DEFAULT_POSTGRES_DSN) -> int:
         summaries = _collect_summaries(connection)
         # STORY-13: additive core-domain table checks
         core_failures = _check_core_domain_tables(connection)
-        failures.extend(core_failures)
 
     stocks = summaries["stocks"]
     log = summaries["migration_log"]
 
     passed, failures = _evaluate(stocks, log)
+    failures.extend(core_failures)
+    passed = passed and not core_failures
     log_success_flag = 1 if log["log_success"] > 0 else 0
 
     print(f"stocks.total_rows     = {stocks['total_rows']}")

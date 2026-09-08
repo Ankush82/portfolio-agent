@@ -74,7 +74,7 @@ WHERE EXISTS (
 
 -- ---------------------------------------------------------------------------
 -- (4) users indexes  (expected: idx_users_email)
-SELECT 1 FROM pg_indexes
+SELECT schemaname, tablename, indexname FROM pg_indexes
 WHERE  schemaname = 'public'
   AND  tablename  = 'users'
   AND  indexname = 'idx_users_email';
@@ -119,7 +119,7 @@ WHERE EXISTS (
 
 -- ---------------------------------------------------------------------------
 -- (8) portfolios indexes  (expected: idx_portfolios_user_id)
-SELECT 1 FROM pg_indexes
+SELECT schemaname, tablename, indexname FROM pg_indexes
 WHERE  schemaname = 'public'
   AND  tablename  = 'portfolios'
   AND  indexname  = 'idx_portfolios_user_id';
@@ -168,7 +168,7 @@ WHERE EXISTS (
 
 -- ---------------------------------------------------------------------------
 -- (12) holdings indexes  (expected: idx_holdings_portfolio_id, uq_holdings_portfolio_security)
-SELECT 1 FROM pg_indexes
+SELECT schemaname, tablename, indexname FROM pg_indexes
 WHERE  schemaname = 'public'
   AND  tablename  = 'holdings'
   AND  indexname  IN ('idx_holdings_portfolio_id', 'uq_holdings_portfolio_security');
@@ -213,7 +213,7 @@ WHERE EXISTS (
 
 -- ---------------------------------------------------------------------------
 -- (16) transactions indexes  (expected: idx_transactions_portfolio_id)
-SELECT 1 FROM pg_indexes
+SELECT schemaname, tablename, indexname FROM pg_indexes
 WHERE  schemaname = 'public'
   AND  tablename  = 'transactions'
   AND  indexname  = 'idx_transactions_portfolio_id';
@@ -233,7 +233,7 @@ WHERE  schemaname = 'public'
 --                        references a parent row that does not exist
 SELECT
     fkf.fk_name,
-    fkf.fk_present,
+    (c.oid IS NOT NULL)::int AS fk_present,
     CASE
         WHEN fkf.fk_name = 'fk_portfolios_user'
              THEN (

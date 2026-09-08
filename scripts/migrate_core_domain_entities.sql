@@ -82,6 +82,47 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences  JSONB NOT NULL DEFAULT '
 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at   TIMESTAMPTZ NOT NULL DEFAULT now();
 
+-- (2b) Legacy-type convergence: ADD COLUMN IF NOT EXISTS above is a no-op
+--      when the column already exists with the WRONG type -- a lazily
+--      created `users` table (old DefaultInfrastructure._ensure_schema
+--      fallback) stored `preferences` as TEXT, not JSONB. Without this
+--      step the type mismatch survives every future run and the JSONB
+--      backfill comparison below (`IS DISTINCT FROM ... jsonb`) fails
+--      with "operator does not exist: text = jsonb". Guarded on the
+--      actual current type so this is a real no-op once converged.
+DO $$
+BEGIN
+    IF (
+        SELECT data_type FROM information_schema.columns
+        WHERE  table_name = 'users' AND column_name = 'preferences'
+    ) != 'jsonb' THEN
+        ALTER TABLE users ALTER COLUMN preferences DROP DEFAULT;
+        ALTER TABLE users
+            ALTER COLUMN preferences TYPE JSONB
+            USING COALESCE(NULLIF(preferences, '')::jsonb, '{}'::jsonb);
+        ALTER TABLE users ALTER COLUMN preferences SET DEFAULT '{}'::jsonb;
+    END IF;
+END
+$$;
+
+-- (2c) Legacy-nullability convergence: a lazily created `users` table
+--      (or one converged by (2b) above) can still have `preferences`
+--      declared nullable -- ADD COLUMN IF NOT EXISTS never revisits
+--      nullability on a pre-existing column, matching the same gap
+--      the header note above documents for `id`. Backfill any real
+--      NULL to '{}' first so SET NOT NULL cannot fail on legacy rows.
+DO $$
+BEGIN
+    IF (
+        SELECT is_nullable FROM information_schema.columns
+        WHERE  table_name = 'users' AND column_name = 'preferences'
+    ) = 'YES' THEN
+        UPDATE users SET preferences = '{}'::jsonb WHERE preferences IS NULL;
+        ALTER TABLE users ALTER COLUMN preferences SET NOT NULL;
+    END IF;
+END
+$$;
+
 -- (3) Guarded backfill from legacy records.data JSONB column (V3 recon doc).
 --     Only runs when records.data exists; otherwise this is a no-op.
 --     The legacy column is RETAINED (not dropped) -- see header note above.

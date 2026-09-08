@@ -407,13 +407,10 @@ def test_verify_migration_does_not_modify_data(
 def _assert_core_domain_tables_pass(captured) -> None:
     """Shared assertions for a fully-passing core-domain check scenario.
 
-    After the fixture has created all four tables with correct DDL,
-    verify_migration must emit exists=1, pk=present, and indexes=present
-    for each table. FKs are absent because no FKs were added in the
-    fixture (no parent-child relationships were seeded), and since
-    orphan_count=0, the FK-absent case must be reported as absent
-    (not as an error, because the migration itself would have skipped
-    adding them in the same situation).
+    After the fixture has created all four tables with correct DDL
+    (including the three FKs -- a real 0-orphan migration always adds
+    them), verify_migration must emit exists=1, pk=present, and
+    indexes=present for each table, plus PRESENT for each FK.
     """
     for table in ("users", "portfolios", "holdings", "transactions"):
         assert f"{table}.exists = 1" in captured.out, (
@@ -424,10 +421,10 @@ def _assert_core_domain_tables_pass(captured) -> None:
         )
     # Both holdings indexes present
     assert "holdings.indexes = all present (2)" in captured.out
-    # FKs: absent (no rows, no FKs added) but no failure lines
-    assert "FK fk_portfolios_user: ABSENT (0 orphan" in captured.out
-    assert "FK fk_holdings_portfolio: ABSENT (0 orphan" in captured.out
-    assert "FK fk_transactions_portfolio: ABSENT (0 orphan" in captured.out
+    # FKs: all present (0 orphans, migration always adds them)
+    assert "FK fk_portfolios_user: PRESENT" in captured.out
+    assert "FK fk_holdings_portfolio: PRESENT" in captured.out
+    assert "FK fk_transactions_portfolio: PRESENT" in captured.out
     # No failure lines
     assert "FAIL:" not in captured.err
 
@@ -438,8 +435,38 @@ def test_verify_migration_core_domain_passes_with_correct_tables(
     """STORY-13 acceptance: when all four core-domain tables exist with
     correct DDL (PK on id, correct columns, correct indexes), the script
     exits 0 and prints per-table / per-FK summary lines."""
-    _log_success(psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True))
-    # stocks_and_log_tables already created all four core-domain tables.
+    conn = psycopg.connect(DEFAULT_POSTGRES_DSN, autocommit=True)
+    # stocks_and_log_tables already created all four core-domain tables,
+    # but without FKs (other tests in this file need that FK-absent
+    # baseline for their own scenarios). A genuinely "correctly migrated"
+    # schema has 0 orphans -- migrate_core_domain_entities.sql always adds
+    # the FK in that case -- so this test adds them itself to model that.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            ALTER TABLE portfolios
+                ADD CONSTRAINT fk_portfolios_user
+                FOREIGN KEY (user_id) REFERENCES users(id)
+                ON DELETE CASCADE
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE holdings
+                ADD CONSTRAINT fk_holdings_portfolio
+                FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+                ON DELETE CASCADE
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE transactions
+                ADD CONSTRAINT fk_transactions_portfolio
+                FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+                ON DELETE CASCADE
+            """
+        )
+    _log_success(conn)
     exit_code = verify_migration()
     captured = capsys.readouterr()
     assert exit_code == EXIT_PASS, (
