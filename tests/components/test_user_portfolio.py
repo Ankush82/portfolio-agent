@@ -1,5 +1,5 @@
 """Tests for DefaultUserPortfolio, BrokerConnector, and
-PlaceholderBrokerConnector (src/components/c01_user_portfolio.py).
+StubBrokerConnector (src/components/c01_user_portfolio.py).
 
 Uses an in-memory Infrastructure test double rather than a live
 Postgres/Redis connection, so these tests run unconditionally (unlike
@@ -25,10 +25,10 @@ from components.c01_user_portfolio import (
     BrokerHolding,
     BrokerRateLimitError,
     BrokerTransaction,
+    DefaultUpstoxBrokerConnector,
     DefaultUserPortfolio,
     Holding,
     ImportResult,
-    PlaceholderBrokerConnector,
     Portfolio,
     PortfolioSnapshot,
     Position,
@@ -37,6 +37,9 @@ from components.c01_user_portfolio import (
     Transaction,
     UnsupportedBrokerError,
     User,
+    get_broker_connector,
+    register_broker_connector,
+    unregister_broker_connector,
     validate_stock_symbol,
 )
 from components.c04_knowledge_entity import DefaultKnowledgeEntity
@@ -63,6 +66,7 @@ class _InMemoryInfrastructure:
         self._broker_connections: dict[tuple[str, str], dict] = {}
         self._broker_transactions: list[dict] = []
         self._last_import_calls: list[tuple[str, str]] = []
+        self._broker_holdings: dict[tuple[str, str], list[dict]] = {}
 
     def store(self, table: str, record: dict) -> str:
         self._next_id += 1
@@ -157,11 +161,14 @@ class _InMemoryInfrastructure:
         """Test helper to seed a broker connection row."""
         self._broker_connections[(row["user_id"], row["broker_id"])] = dict(row)
 
+    def replace_broker_holdings(self, user_id: str, broker_id: str, holdings: list[dict]) -> None:
+        self._broker_holdings[(user_id, broker_id)] = list(holdings)
+
 
 class _FakeBrokerConnector:
     """Test double returning caller-configured holdings/transactions,
     so the import/synchronize/exposure/relevance pipeline can be
-    exercised with real (non-empty) data — PlaceholderBrokerConnector
+    exercised with real (non-empty) data — StubBrokerConnector
     always returns empty lists by design (ADR-0022), which is correct
     for it but not useful for testing what happens when a connector
     actually returns something."""
@@ -283,14 +290,14 @@ def test_connect_portfolio_tags_broker_connection_untrusted_and_persists_it():
 
 def test_connect_portfolio_with_placeholder_connector_produces_synthetic_unmistakable_connection():
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=PlaceholderBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(), broker_connector=StubBrokerConnector()
     )
     user = User(id="user-1", preferences={})
 
     portfolio = portfolio_component.connect_portfolio(user, {})
 
     assert portfolio.user_id == "user-1"
-    # PlaceholderBrokerConnector's own contract (ADR-0022): synthetic,
+    # StubBrokerConnector's own contract (ADR-0022): synthetic,
     # never a value a real broker would return.
     assert portfolio.id  # a real portfolio is still constructed
 
@@ -319,7 +326,7 @@ def test_connect_portfolio_records_an_audit_event(tmp_path, monkeypatch):
 
 def test_import_holdings_with_placeholder_connector_returns_a_real_empty_list():
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=PlaceholderBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(), broker_connector=StubBrokerConnector()
     )
     portfolio = Portfolio(id="pf-1", user_id="user-1")
 
@@ -384,7 +391,7 @@ def test_track_portfolio_state_reads_previously_stored_holdings_without_calling_
 
     # Swap in a connector that would raise if it were ever called, to
     # prove track_portfolio_state only reads storage.
-    class _ExplodingConnector(PlaceholderBrokerConnector):
+    class _ExplodingConnector(StubBrokerConnector):
         def fetch_holdings(self, portfolio):
             raise AssertionError("track_portfolio_state must not call the broker connector")
 
@@ -627,25 +634,108 @@ def test_manually_added_holding_flows_through_track_portfolio_state_and_calculat
     assert portfolio_component.determine_user_relevance(user, {"security_id": apple.id}) is True
 
 
-# --- PlaceholderBrokerConnector ---------------------------------------------
+# --- StubBrokerConnector protocol conformance --------------------------------
 
 
-def test_placeholder_broker_connector_connect_is_synthetic_and_never_looks_real():
-    connector = PlaceholderBrokerConnector()
-    user = User(id="user-1", preferences={})
-
-    result = connector.connect(user, {"api_key": "whatever"})
-
-    assert result["broker"] == "placeholder"
-    assert result["external_account_id"].startswith("placeholder-account-")
+# --- Broker registry (STORY-9) ----------------------------------------------
 
 
-def test_placeholder_broker_connector_fetch_methods_return_empty_not_synthetic_positions():
-    connector = PlaceholderBrokerConnector()
-    portfolio = Portfolio(id="pf-1", user_id="user-1")
+def test_get_broker_connector_upstox_returns_a_real_default_upstox_broker_connector(monkeypatch):
+    monkeypatch.setenv("UPSTOX_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("UPSTOX_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("UPSTOX_REDIRECT_URI", "https://example.com/cb")
 
-    assert connector.fetch_holdings(portfolio) == []
-    assert connector.fetch_transactions(portfolio) == []
+    connector = get_broker_connector("upstox")
+
+    assert isinstance(connector, DefaultUpstoxBrokerConnector)
+
+
+def test_get_broker_connector_unknown_id_raises_unsupported_broker_error_naming_supported_ids():
+    with pytest.raises(UnsupportedBrokerError) as exc_info:
+        get_broker_connector("zerodha")
+
+    assert "upstox" in str(exc_info.value)
+
+
+def test_get_broker_connector_upstox_raises_broker_config_error_when_env_unset(monkeypatch):
+    # The AC's own wording is specific: "BrokerConfigError from STORY-1"
+    # -- that's upstox_config.BrokerConfigError (raised directly by
+    # UpstoxConfig.from_env()), a real, separate class from this
+    # module's own broader BrokerConfigError of the same name (used
+    # here for broker-token-decryption failures instead). Asserting
+    # against the wrong one would pass for the wrong reason if the two
+    # were ever unified later.
+    from upstox_config import BrokerConfigError as UpstoxConfigError
+
+    monkeypatch.delenv("UPSTOX_CLIENT_ID", raising=False)
+    monkeypatch.delenv("UPSTOX_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("UPSTOX_REDIRECT_URI", raising=False)
+
+    with pytest.raises(UpstoxConfigError):
+        get_broker_connector("upstox")
+
+
+class _ThrowawayBrokerConnector:
+    """A throwaway fake connector registered under a brand-new
+    broker_id -- proves DefaultUserPortfolio drives an arbitrary
+    registered broker purely through get_broker_connector(broker_id),
+    with ZERO changes to DefaultUserPortfolio itself (STORY-9's core
+    "a second broker is addable with zero caller changes" claim)."""
+
+    broker_id = "throwaway-test-broker"
+    display_name = "Throwaway Test Broker"
+
+    def __init__(self) -> None:
+        self.fetch_holdings_call_count = 0
+
+    def build_authorize_url(self, *, state: str) -> str:
+        return f"https://throwaway.example/auth?state={state}"
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        return BrokerCredentials(access_token=f"throwaway-token-{code}")
+
+    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
+        self.fetch_holdings_call_count += 1
+        return [
+            BrokerHolding(
+                symbol="THROWAWAY",
+                isin="THROWAWAY-ISIN-0001",
+                quantity=None,
+                average_price=None,
+                last_price=None,
+            )
+        ]
+
+    def fetch_transactions(self, *, credentials, start_date, end_date) -> list[BrokerTransaction]:
+        return []
+
+
+def test_default_user_portfolio_drives_a_newly_registered_broker_via_the_registry_alone():
+    """No broker_connector injected at construction -- DefaultUserPortfolio
+    must resolve _ThrowawayBrokerConnector purely via get_broker_connector,
+    with no code in DefaultUserPortfolio naming this broker_id at all."""
+    infra = _InMemoryInfrastructure()
+    infra._put_broker_connection({
+        "user_id": "user-1",
+        "broker_id": "throwaway-test-broker",
+        "access_token": "seeded-token",
+        "token_type": "Bearer",
+        "access_token_expires_at": None,
+        "broker_user_id": None,
+        "status": "CONNECTED",
+    })
+    connector = _ThrowawayBrokerConnector()
+    register_broker_connector(connector)
+    try:
+        portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+
+        result = portfolio_component.import_holdings("user-1", "throwaway-test-broker")
+
+        assert connector.fetch_holdings_call_count == 1
+        assert result.holdings_written == 1
+        assert result.skipped == 0
+    finally:
+        unregister_broker_connector("throwaway-test-broker")
 
 
 # --- DefaultBoundaryGate wiring, end to end ---------------------------------
@@ -829,14 +919,14 @@ def test_qa_story2_protocol_is_runtime_checkable_and_required_members_match_brie
     from typing import runtime_checkable
 
     # Protocol is runtime_checkable — actual conformance check: an
-    # implementer (PlaceholderBrokerConnector) is isinstance(.)
+    # implementer (StubBrokerConnector) is isinstance(.)
     # against the Protocol, which is the whole point of
     # @runtime_checkable. Without it, the conformance claim is
     # unsubstantiated.
     assert runtime_checkable(BrokerConnector), "BrokerConnector must be @runtime_checkable"
-    placeholder_instance = PlaceholderBrokerConnector()
+    placeholder_instance = StubBrokerConnector()
     assert isinstance(placeholder_instance, BrokerConnector), (
-        "PlaceholderBrokerConnector must satisfy BrokerConnector at "
+        "StubBrokerConnector must satisfy BrokerConnector at "
         "runtime (the @runtime_checkable guarantee)"
     )
 
@@ -1169,7 +1259,7 @@ def test_qa_story2_no_upstox_leak_in_protocol_dtos_or_exceptions_across_the_sour
     for sym in (BrokerConnector, BrokerCredentials, BrokerHolding,
                 BrokerTransaction, BrokerError, BrokerConfigError,
                 BrokerAuthError, BrokerApiError, BrokerRateLimitError,
-                UnsupportedBrokerError, PlaceholderBrokerConnector):
+                UnsupportedBrokerError, StubBrokerConnector):
         try:
             sources.append(inspect.getsource(sym))
         except (TypeError, OSError):
