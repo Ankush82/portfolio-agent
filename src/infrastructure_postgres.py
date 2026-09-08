@@ -287,20 +287,61 @@ class DefaultInfrastructure:
                 """
             )
             # Minimal users table: broker_connections.user_id references
-            # this. Real, pre-existing gap found live on STORY-18 (this
-            # story) -- STORY-11's own broker_connections migration
-            # (#166) declared the FK but never created the table it
-            # points at, so any genuinely fresh database fails on the
-            # very first broker_connections write with a real
-            # ForeignKeyViolation. No user-management story has defined
-            # a real `users` schema yet, so this is intentionally the
-            # smallest table that satisfies the FK below.
+            # this. Real, pre-existing gap found live on STORY-18 --
+            # STORY-11's own broker_connections migration (#166)
+            # declared the FK but never created the table it points at,
+            # so any genuinely fresh database fails on the very first
+            # broker_connections write with a real ForeignKeyViolation.
+            # No user-management story has defined a real `users` schema
+            # yet, so this is intentionally the smallest table that
+            # satisfies the FK below -- not a full user model.
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY
                 )
                 """
+            )
+            # audit_events (STORY-4): matches scripts/migrate_audit_events.sql
+            # exactly. That standalone migration is the schema of record and
+            # still exists for its own deliberate drop/recreate migration
+            # tests -- this IF NOT EXISTS copy exists so DefaultAuditManager
+            # self-heals via the same lazy-schema mechanism every other
+            # DefaultInfrastructure table already uses, instead of hard-
+            # failing with "relation audit_events does not exist" whenever
+            # a fresh database (or a test run that drops this table, e.g.
+            # tests/test_migrate_audit_events.py's own fixture) hasn't had
+            # the standalone migration run against it.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type    VARCHAR(255) NOT NULL,
+                    timestamp     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    actor         JSONB NOT NULL DEFAULT '{}',
+                    component     VARCHAR(255),
+                    resource      JSONB,
+                    action        VARCHAR(255),
+                    outcome       VARCHAR(50) DEFAULT 'success',
+                    metadata      JSONB NOT NULL DEFAULT '{}',
+                    raw_detail    JSONB
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events (timestamp DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_event_type ON audit_events (event_type)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events USING GIN (actor)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_component ON audit_events (component)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_resource ON audit_events USING GIN (resource)"
             )
             # Broker connections table for storing encrypted broker credentials
             cursor.execute(
@@ -597,6 +638,35 @@ class DefaultInfrastructure:
                     )
                 row = cursor.fetchone()
             return row[0] if row is not None else 0
+
+    def record_audit_event(self, event: dict, raw_detail: dict) -> None:
+        """Insert one row into `audit_events` (STORY-4). `event` is the
+        normalized dict produced by
+        cross_cutting.observability.normalize_audit_event(); `raw_detail`
+        is the original (already-redacted) `detail` dict a caller passed
+        to `AuditManager.record()`, kept for investigative queries
+        alongside the normalized fields."""
+        with traced("DefaultInfrastructure.record_audit_event"):
+            with self._connection().cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO audit_events
+                        (event_type, timestamp, actor, component, resource,
+                         action, outcome, metadata, raw_detail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        event["event_type"],
+                        event["timestamp"],
+                        Jsonb(event["actor"]),
+                        event["component"],
+                        Jsonb(event["resource"]) if event["resource"] is not None else None,
+                        event["action"],
+                        event["outcome"],
+                        Jsonb(event["metadata"]),
+                        Jsonb(raw_detail),
+                    ),
+                )
 
     def _broker_connection_from_row(self, row: tuple) -> BrokerConnectionRecord:
         """Build a BrokerConnectionRecord from a SELECT row (13 columns, 0-indexed)."""

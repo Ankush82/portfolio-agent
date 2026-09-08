@@ -159,20 +159,28 @@ def test_execute_tool_trips_circuit_breaker_after_three_same_tool_failures_in_a_
     assert "circuit breaker open" in fifth.output["error"]
 
 
-def test_execute_tool_records_audit_events_for_attempt_and_result(tmp_path, monkeypatch):
-    from cross_cutting import observability
+def test_execute_tool_records_audit_events_for_attempt_and_result():
+    # DefaultAuditManager has only ever persisted to Postgres (via
+    # Infrastructure.record_audit_event()), never a file --
+    # AUDIT_LOG_PATH (removed, STORY-10 / #205) was never actually
+    # written to by it. A minimal in-memory recording double is the
+    # real, correct way to assert what execute_tool() records without
+    # needing a live Postgres connection just for a unit test.
+    class _RecordingAuditManager:
+        def __init__(self) -> None:
+            self.event_types: list[str] = []
 
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+        def record(self, event_type: str, detail: dict) -> None:
+            self.event_types.append(event_type)
 
-    env = DefaultToolsEnvironment(audit_manager=observability.DefaultAuditManager())
+    recorder = _RecordingAuditManager()
+    env = DefaultToolsEnvironment(audit_manager=recorder)
     env.register_tool(_tool("market_data"), invoke=lambda args: {"ok": True})
 
     env.execute_tool(ToolCall(tool_name="market_data", arguments={}))
 
-    lines = audit_log_path.read_text().splitlines()
-    assert any('"event_type": "tool_execution_attempt"' in line for line in lines)
-    assert any('"event_type": "tool_execution_result"' in line for line in lines)
+    assert "tool_execution_attempt" in recorder.event_types
+    assert "tool_execution_result" in recorder.event_types
 
 
 # --- validate_result --------------------------------------------------------

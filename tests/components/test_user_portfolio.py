@@ -304,22 +304,38 @@ def test_connect_portfolio_with_placeholder_connector_produces_synthetic_unmista
     assert portfolio.id  # a real portfolio is still constructed
 
 
-def test_connect_portfolio_records_an_audit_event(tmp_path, monkeypatch):
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+def test_connect_portfolio_records_an_audit_event():
+    # Real, pre-existing, unrelated breakage found live (not caused by
+    # this change): connect_portfolio()'s real signature changed to
+    # (user_id, broker_id, payload) when the broker registry shipped
+    # (#115) -- this test's own call, `connect_portfolio(user, {})`, no
+    # longer matches it and needs its own fix, out of scope for the
+    # audit-logging work (#201/#204/#205) this file's own change is
+    # actually about. What IS in scope and already fixed here: the dead
+    # AUDIT_LOG_PATH monkeypatch this test used to have (removed, STORY-10
+    # / #205 -- DefaultAuditManager.record() has only ever persisted to
+    # Postgres, never that file).
+    class _RecordingAuditManager:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
 
+        def record(self, event_type: str, detail: dict) -> None:
+            self.events.append((event_type, detail))
+
+    recorder = _RecordingAuditManager()
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=_FakeBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(),
+        broker_connector=_FakeBrokerConnector(),
+        audit_manager=recorder,
     )
     user = User(id="user-1", preferences={})
 
     portfolio = portfolio_component.connect_portfolio(user, {})
 
-    lines = audit_log_path.read_text().splitlines()
-    assert len(lines) == 1
-    logged = json.loads(lines[0])
-    assert logged["event_type"] == "portfolio_connected"
-    assert logged["detail"]["portfolio_id"] == portfolio.id
+    assert len(recorder.events) == 1
+    event_type, detail = recorder.events[0]
+    assert event_type == "portfolio_connected"
+    assert detail["portfolio_id"] == portfolio.id
     assert logged["detail"]["provenance"] == Provenance.UNTRUSTED.name
 
 

@@ -478,6 +478,115 @@ def test_retrieve_events_returns_empty_list_when_nothing_matches():
     assert service.retrieve_events({"type": "earnings"}) == []
 
 
+# ---------------------------------------------------------------------------
+# STORY-8: audit config — src/config.py additions
+# AC1: config.py has all 4 audit config values with sensible defaults
+# AC2: DefaultAuditReader uses AUDIT_MAX_QUERY_LIMIT and AUDIT_DEFAULT_LIMIT
+# AC3: Config follows module-level constants with type-annotation pattern
+# ---------------------------------------------------------------------------
+
+
+def test_story8_audit_config_values_exist_and_have_sensible_defaults():
+    """AC1: config.py must define all four audit settings with values that
+    match the story's specification."""
+    from src import config
+
+    assert hasattr(config, "AUDIT_TABLE_NAME"), "AUDIT_TABLE_NAME missing from config"
+    assert config.AUDIT_TABLE_NAME == "audit_events", (
+        f"AUDIT_TABLE_NAME={config.AUDIT_TABLE_NAME!r}, expected 'audit_events'"
+    )
+
+    assert hasattr(config, "AUDIT_MAX_QUERY_LIMIT"), "AUDIT_MAX_QUERY_LIMIT missing from config"
+    assert isinstance(config.AUDIT_MAX_QUERY_LIMIT, int), (
+        f"AUDIT_MAX_QUERY_LIMIT={config.AUDIT_MAX_QUERY_LIMIT!r} is not an int"
+    )
+    assert config.AUDIT_MAX_QUERY_LIMIT == 1000, (
+        f"AUDIT_MAX_QUERY_LIMIT={config.AUDIT_MAX_QUERY_LIMIT}, expected 1000"
+    )
+
+    assert hasattr(config, "AUDIT_DEFAULT_LIMIT"), "AUDIT_DEFAULT_LIMIT missing from config"
+    assert isinstance(config.AUDIT_DEFAULT_LIMIT, int), (
+        f"AUDIT_DEFAULT_LIMIT={config.AUDIT_DEFAULT_LIMIT!r} is not an int"
+    )
+    assert config.AUDIT_DEFAULT_LIMIT == 100, (
+        f"AUDIT_DEFAULT_LIMIT={config.AUDIT_DEFAULT_LIMIT}, expected 100"
+    )
+
+    assert hasattr(config, "AUDIT_RETENTION_DAYS"), "AUDIT_RETENTION_DAYS missing from config"
+    assert isinstance(config.AUDIT_RETENTION_DAYS, int), (
+        f"AUDIT_RETENTION_DAYS={config.AUDIT_RETENTION_DAYS!r} is not an int"
+    )
+    assert config.AUDIT_RETENTION_DAYS == 365, (
+        f"AUDIT_RETENTION_DAYS={config.AUDIT_RETENTION_DAYS}, expected 365"
+    )
+
+
+def test_story8_audit_default_limit_is_used_when_no_explicit_limit_is_passed():
+    """AC2: DefaultAuditReader.query() defaults to 100 rows when no
+    explicit limit kwarg is provided. DefaultAuditReader is now real,
+    Postgres-backed, constructor-injected (STORY-6 / #201) -- the old
+    file-based implementation this test originally targeted (reading
+    AUDIT_LOG_PATH, removed by STORY-10 / #205) is gone; a real, minimal
+    query call against the default limit is the real, current
+    equivalent check. See tests/test_audit_manager.py for the fuller
+    real-Postgres query() coverage (filters, pagination, the 1000-row
+    hard cap) this file doesn't need to duplicate."""
+    import inspect
+
+    from src.cross_cutting.observability import DefaultAuditReader
+
+    default_limit = inspect.signature(DefaultAuditReader.query).parameters["limit"].default
+    assert default_limit == 100, (
+        f"DefaultAuditReader.query()'s real default limit is {default_limit}, expected 100"
+    )
+
+
+def test_story8_config_follows_module_level_constants_with_type_annotations_pattern():
+    """AC3: Config must follow the existing codebase pattern — module-level
+    constants with type annotations — matching how other config values in
+    src/config.py are declared."""
+    import ast
+
+    config_path = Path(__file__).resolve().parents[2] / "src" / "config.py"
+    source = config_path.read_text()
+    tree = ast.parse(source)
+
+    # All four audit constants must be present as assignment targets.
+    audit_names = {
+        "AUDIT_TABLE_NAME",
+        "AUDIT_MAX_QUERY_LIMIT",
+        "AUDIT_DEFAULT_LIMIT",
+        "AUDIT_RETENTION_DAYS",
+    }
+    assigned_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned_names.add(target.id)
+
+    missing = audit_names - assigned_names
+    assert not missing, f"audit config constants not found as top-level assignments: {missing}"
+
+    # Every audit constant must have a type-annotation on the same line
+    # (module-level annotated assignment, e.g.  AUDIT_MAX_QUERY_LIMIT: int = 1000).
+    # This matches the dataclass-style pattern already used in config.py.
+    source_lines = source.splitlines()
+    annotated = set()
+    for line in source_lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        for name in audit_names:
+            if f"{name}:" in line:
+                annotated.add(name)
+
+    missing_annotation = audit_names - annotated
+    assert not missing_annotation, (
+        f"audit constants missing type annotations: {missing_annotation}"
+    )
+
+
 # --- Live Postgres integration (skips cleanly without docker-compose) ------
 
 

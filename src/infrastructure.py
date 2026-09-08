@@ -14,9 +14,15 @@ ADR-0010, is also unresolved and may bypass parts of this for component
 """
 
 from contextlib import AbstractContextManager
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from cross_cutting.observability import traced
+
+if TYPE_CHECKING:
+    from cross_cutting.observability import AuditManager, AuditReader
+
+AuditManagerLike = "AuditManager"
+AuditReaderLike = "AuditReader"
 
 
 class Infrastructure(Protocol):
@@ -59,6 +65,19 @@ class Infrastructure(Protocol):
         """Reads from the cloud provider's secret manager. Never read
         an environment variable or config file directly for anything
         credential-shaped (ADR-0019)."""
+        ...
+
+    def get_audit_manager(self) -> "AuditManagerLike":
+        """Returns an AuditManager instance for recording audit events."""
+        ...
+
+    def get_audit_reader(self) -> "AuditReaderLike":
+        """Returns an AuditReader instance for querying audit events.
+
+        Obtain via: ``infrastructure.get_audit_reader()`` where ``infrastructure``
+        is the dependency-injected Infrastructure instance passed to components
+        via constructor injection.
+        """
         ...
 
     def transaction(self) -> "AbstractContextManager[None]":
@@ -201,6 +220,11 @@ class StubInfrastructure:
         with traced("StubInfrastructure.get_secret"):
             return ""
 
+    def get_audit_manager(self) -> "AuditManagerLike":
+        with traced("StubInfrastructure.get_audit_manager"):
+            from cross_cutting.observability import StubAuditManager
+            return StubAuditManager()
+
     def transaction(self) -> AbstractContextManager[None]:
         # A real, structural no-op -- the stub has nothing to commit or
         # roll back (every write above is itself a no-op), but must
@@ -212,5 +236,10 @@ class StubInfrastructure:
         return nullcontext()
 
     def get_audit_reader(self) -> AuditReader:
+        # Real bug in the pre-merge audit-logging branch, found live:
+        # this returned a real DefaultAuditReader (reads from an actual
+        # Postgres connection this stub never opens), not a stub --
+        # defeating the entire point of StubInfrastructure. Every other
+        # method here is a real, structural no-op; this one now matches.
         with traced("StubInfrastructure.get_audit_reader"):
             return StubAuditReader()
