@@ -588,10 +588,11 @@ def test_post_token_exchange_uses_url_encoded_form():
         captured["headers"] = headers
         captured["data"] = data
         captured["timeout"] = timeout
-        return _FakeResponse(body={
-            "status": "success",
-            "data": {"access_token": "new-token", "expires_in": 3600},
-        })
+        # Real Upstox token-exchange shape: the raw token payload, no
+        # "status"/"data" envelope (see
+        # test_real_upstox_token_exchange_response_shape_has_no_status_envelope
+        # for the actual response this is modeled on).
+        return _FakeResponse(body={"access_token": "new-token", "expires_in": 3600})
 
     with patch("upstox_http.requests.post", fake_post):
         http = _make_http()
@@ -617,7 +618,45 @@ def test_post_token_exchange_uses_url_encoded_form():
     # form content-type itself when `data=` is used.
     assert "Content-Type" not in (captured["headers"] or {})
     assert captured["headers"]["Accept"] == "application/json"
-    assert result["data"]["access_token"] == "new-token"
+    assert result["access_token"] == "new-token"
+
+
+def test_post_token_exchange_succeeds_without_a_status_envelope():
+    """BUG (found via a real, live Upstox OAuth round-trip -- see the
+    GitHub issue this test's fix closes): Upstox's real token-exchange
+    response is the raw token payload with NO top-level "status"
+    field at all, unlike every other Upstox endpoint _map_response_to_body
+    also handles. The generic status=="success" check was previously
+    applied unconditionally, so EVERY real, successful token exchange
+    was rejected as a BrokerApiError despite Upstox actually granting
+    access. This is (a redacted version of) an actual real response
+    captured from a live Upstox authorization."""
+    def fake_post(url, headers=None, data=None, timeout=None):
+        return _FakeResponse(body={
+            "email": "user@example.com",
+            "exchanges": ["BSE", "NSE", "BCD", "CDS", "BFO", "NFO", "MCX"],
+            "products": ["OCO", "D", "CO", "I"],
+            "broker": "UPSTOX",
+            "user_id": "87BJFY",
+            "user_name": "SOME USER",
+            "order_types": ["MARKET", "LIMIT", "SL", "SL-M"],
+            "user_type": "individual",
+            "ddpi": False,
+            "is_active": True,
+            "access_token": "real-looking-jwt-access-token",
+        })
+
+    with patch("upstox_http.requests.post", fake_post):
+        http = _make_http()
+        result = http.post_token_exchange(form={
+            "code": SAMPLE_CODE,
+            "client_id": "client-id",
+            "client_secret": SAMPLE_SECRET,
+            "redirect_uri": "https://example.com/callback",
+            "grant_type": "authorization_code",
+        })
+
+    assert result["access_token"] == "real-looking-jwt-access-token"
 
 
 def test_post_token_exchange_never_retries():
