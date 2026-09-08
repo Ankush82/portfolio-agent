@@ -345,53 +345,56 @@ AAPL  # duplicate
     
     # Load the tickers
     infra.load_us_tickers(str(csv_file))
-    
-    # Insert some test holdings data
+
+    # STORY-10: holdings is now a real, typed, FK-constrained table --
+    # portfolio_id must reference a real portfolios row, and quantity/
+    # currency are NOT NULL. Real users/portfolios rows first.
+    user_id = f"user-{uuid.uuid4()}"
+    portfolio1, portfolio2 = f"portfolio1-{uuid.uuid4()}", f"portfolio2-{uuid.uuid4()}"
+    infra.store("users", {"id": user_id, "email": f"{user_id}@example.com", "preferences": {}})
+    infra.store("portfolios", {"id": portfolio1, "user_id": user_id})
+    infra.store("portfolios", {"id": portfolio2, "user_id": user_id})
+
+    def _holding(id_, security_id, portfolio_id):
+        return {
+            "id": id_,
+            "security_id": security_id,
+            "portfolio_id": portfolio_id,
+            "quantity": 1,
+            "currency": "USD",
+            "exchange": None,
+            "symbol_suffix": None,
+        }
+
     holdings_table = "holdings"
+    holding_ids = [f"holding{i}-{uuid.uuid4()}" for i in range(1, 7)]
     # Insert a holding with a US ticker (should be counted)
-    infra.store(holdings_table, {
-        "id": "holding1",
-        "security_id": "AAPL",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[0], "AAPL", portfolio1))
     # Insert a holding with another US ticker (should be counted)
-    infra.store(holdings_table, {
-        "id": "holding2",
-        "security_id": "MSFT",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[1], "MSFT", portfolio1))
     # Insert a holding with a non-US ticker (should NOT be counted - has dot)
-    infra.store(holdings_table, {
-        "id": "holding3",
-        "security_id": "BRK.B",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[2], "BRK.B", portfolio1))
     # Insert a holding with a non-US ticker (should NOT be counted - has hyphen)
-    infra.store(holdings_table, {
-        "id": "holding4",
-        "security_id": "BRK-B",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[3], "BRK-B", portfolio1))
     # Insert a holding with a ticker not in CSV (should NOT be counted)
-    infra.store(holdings_table, {
-        "id": "holding5",
-        "security_id": "XYZ",
-        "portfolio_id": "portfolio1"
-    })
+    infra.store(holdings_table, _holding(holding_ids[4], "XYZ", portfolio1))
     # Insert a holding for a different portfolio (should be counted in total but not portfolio-specific)
-    infra.store(holdings_table, {
-        "id": "holding6",
-        "security_id": "GOOGL",
-        "portfolio_id": "portfolio2"
-    })
-    
-    # Count US stocks for portfolio1 (should be 2: AAPL and MSFT)
-    count_portfolio1 = infra.count_us_stocks("portfolio1")
-    assert count_portfolio1 == 2
-    
-    # Count US stocks for all portfolios (should be 3: AAPL, MSFT, GOOGL)
-    count_all = infra.count_us_stocks()
-    assert count_all == 3
+    infra.store(holdings_table, _holding(holding_ids[5], "GOOGL", portfolio2))
+
+    try:
+        # Count US stocks for portfolio1 (should be 2: AAPL and MSFT)
+        count_portfolio1 = infra.count_us_stocks(portfolio1)
+        assert count_portfolio1 == 2
+
+        # Count US stocks for all portfolios (should be 3: AAPL, MSFT, GOOGL)
+        count_all = infra.count_us_stocks()
+        assert count_all == 3
+    finally:
+        for holding_id in holding_ids:
+            infra.delete(holdings_table, holding_id)
+        infra.delete("portfolios", portfolio1)
+        infra.delete("portfolios", portfolio2)
+        infra.delete("users", user_id)
 
 
 @requires_postgres
@@ -420,16 +423,42 @@ MSFT
     
     # Load the tickers
     infra.load_us_tickers(str(csv_file))
-    
+
+    # STORY-10: holdings is now a real, typed, FK-constrained table --
+    # portfolio_id must reference a real portfolios row, and quantity/
+    # currency are NOT NULL. Real users/portfolios rows first.
+    user_id = f"user-{uuid.uuid4()}"
+    portfolio_id = f"p1-{uuid.uuid4()}"
+    infra.store("users", {"id": user_id, "email": f"{user_id}@example.com", "preferences": {}})
+    infra.store("portfolios", {"id": portfolio_id, "user_id": user_id})
+
+    def _holding(id_, security_id):
+        return {
+            "id": id_,
+            "security_id": security_id,
+            "portfolio_id": portfolio_id,
+            "quantity": 1,
+            "currency": "USD",
+            "exchange": None,
+            "symbol_suffix": None,
+        }
+
+    holding_ids = [f"h{i}-{uuid.uuid4()}" for i in range(1, 5)]
     # Insert holdings for each unique ticker
-    infra.store("holdings", {"id": "h1", "security_id": "AAPL", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h2", "security_id": "MSFT", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h3", "security_id": "TSLA", "portfolio_id": "p1"})
-    infra.store("holdings", {"id": "h4", "security_id": "XYZ", "portfolio_id": "p1"})  # not in CSV
-    
-    # Should count 3 US stocks (duplicates removed)
-    count = infra.count_us_stocks("p1")
-    assert count == 3
+    infra.store("holdings", _holding(holding_ids[0], "AAPL"))
+    infra.store("holdings", _holding(holding_ids[1], "MSFT"))
+    infra.store("holdings", _holding(holding_ids[2], "TSLA"))
+    infra.store("holdings", _holding(holding_ids[3], "XYZ"))  # not in CSV
+
+    try:
+        # Should count 3 US stocks (duplicates removed)
+        count = infra.count_us_stocks(portfolio_id)
+        assert count == 3
+    finally:
+        for holding_id in holding_ids:
+            infra.delete("holdings", holding_id)
+        infra.delete("portfolios", portfolio_id)
+        infra.delete("users", user_id)
 
 
 @requires_postgres
