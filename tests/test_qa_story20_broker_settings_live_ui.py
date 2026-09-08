@@ -87,15 +87,19 @@ def app_with_stub_broker():
 
 class TestBrokerConnectionsEndpoint:
     def test_returns_available_brokers_list(self, app_with_stub_broker):
+        """The stub broker registered by this fixture appears alongside
+        Upstox -- a real, shipped broker (BROKER_CONNECTORS) that is
+        always present regardless of what a test dynamically registers,
+        matching real production behavior."""
         client = _make_authenticated_client(app_with_stub_broker)
         response = client.get("/api/brokers/connections")
         assert response.status_code == 200
         data = response.get_json()
         assert "available_brokers" in data
         assert isinstance(data["available_brokers"], list)
-        assert len(data["available_brokers"]) == 1
-        assert data["available_brokers"][0]["broker_id"] == "stub"
-        assert data["available_brokers"][0]["display_name"] == "Stub Broker"
+        by_id = {b["broker_id"]: b for b in data["available_brokers"]}
+        assert set(by_id) == {"stub", "upstox"}
+        assert by_id["stub"]["display_name"] == "Stub Broker"
 
     def test_endpoint_includes_both_broker_id_and_display_name(self, app_with_stub_broker):
         client = _make_authenticated_client(app_with_stub_broker)
