@@ -278,7 +278,7 @@ def test_fetch_transactions_exceeding_200_pages_raises_broker_api_error():
     never_ending_page["meta_data"]["page"]["total_pages"] = 9999
 
     http_mock = Mock(spec=["get"])
-    http_mock.get.side_effect = lambda path: never_ending_page
+    http_mock.get.side_effect = lambda path, access_token=None: never_ending_page
 
     connector = _connector(http_mock)
     with pytest.raises(BrokerApiError):

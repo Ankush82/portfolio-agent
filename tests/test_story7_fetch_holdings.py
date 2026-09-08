@@ -111,7 +111,8 @@ def test_fetch_holdings_request_url_is_exactly_long_term_holdings_endpoint():
     connector.fetch_holdings(credentials=_VALID_CREDS)
 
     http_mock.get.assert_called_once_with(
-        path="/v2/portfolio/long-term-holdings"
+        path="/v2/portfolio/long-term-holdings",
+        access_token=_VALID_CREDS.access_token,
     )
 
 
@@ -596,39 +597,52 @@ def test_qa_request_url_is_exactly_long_term_holdings_full_path():
     connector = _connector(http_mock)
     connector.fetch_holdings(credentials=_VALID_CREDS)
 
-    # Exactly one call, exactly the right path, keyword-only.
+    # Exactly one call, exactly the right path, plus the real
+    # per-call access token (see the BUG note below).
     http_mock.get.assert_called_once_with(
-        path="/v2/portfolio/long-term-holdings"
+        path="/v2/portfolio/long-term-holdings",
+        access_token=_VALID_CREDS.access_token,
     )
     _, kwargs = http_mock.get.call_args
-    assert list(kwargs.keys()) == ["path"], (
-        "fetch_holdings must pass only `path=` to _UpstoxHttp.get, "
-        "not query-string args or headers (those live on the helper)."
+    assert set(kwargs.keys()) == {"path", "access_token"}, (
+        "fetch_holdings must pass only `path=` and `access_token=` to "
+        "_UpstoxHttp.get, not query-string args or headers (those "
+        "live on the helper)."
     )
 
 
-def test_qa_credentials_are_passed_to_fetch_holdings_but_not_to_http():
-    """QA's own AC: the connector requires ``credentials`` as a
-    keyword-only argument (per the Protocol) and forwards them only
-    to the connector itself — not to ``_UpstoxHttp.get``. The
-    helper owns the Authorization header construction via its
-    injected token_provider, so the connector must not try to
-    duplicate that work."""
+def test_qa_credentials_access_token_is_forwarded_to_http():
+    """BUG (found via a real, live Upstox connect+import round-trip):
+    this test previously asserted the OPPOSITE of what's correct here
+    -- that fetch_holdings must NOT forward credentials.access_token
+    to _UpstoxHttp.get, on the theory that the helper's own
+    constructor-bound token_provider already supplies it.
+
+    That's true only for a connector explicitly constructed with a
+    pre-wired, already-authenticated _UpstoxHttp -- never true for the
+    real production path, where get_broker_connector(broker_id)
+    resolves a FRESH DefaultUpstoxBrokerConnector on every call
+    (STORY-9), whose default _UpstoxHttp's token_provider always
+    raises ("no real access token bound yet"). Every real
+    import_holdings/import_transactions call built its BrokerCredentials
+    from the real, decrypted, stored connection specifically so
+    fetch_holdings could use it -- and then fetch_holdings silently
+    discarded it, so Import Now always failed with a misleading
+    "connection expired" 401, even immediately after a real, successful
+    connect. Confirmed by connecting a real Upstox account and hitting
+    Import Now."""
     http_mock = Mock(spec=["get"])
     http_mock.get.return_value = {"status": "success", "data": []}
 
     connector = _connector(http_mock)
     connector.fetch_holdings(credentials=_VALID_CREDS)
 
-    # _UpstoxHttp.get receives ONLY the path; no credentials,
-    # no token, no Authorization header (the helper does that).
     _, kwargs = http_mock.get.call_args
-    forbidden = ["credentials", "token", "access_token", "headers"]
-    for k in forbidden:
-        assert k not in kwargs, (
-            f"fetch_holdings must not pass `{k}` to _UpstoxHttp.get; "
-            f"the helper owns the Authorization header contract."
-        )
+    assert kwargs.get("access_token") == _VALID_CREDS.access_token, (
+        "fetch_holdings must forward credentials.access_token to "
+        "_UpstoxHttp.get(access_token=...) -- the real, per-call token "
+        "a fresh, registry-resolved connector has no other way to use."
+    )
 
 
 def test_qa_success_fixture_three_holdings_with_decimal_types():
