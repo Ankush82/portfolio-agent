@@ -244,6 +244,20 @@ class Transaction:
     portfolio_id: str
     kind: str
     amount: float
+    broker_transaction_id: str | None = None  # Idempotent-match key from the broker
+
+    def __post_init__(self) -> None:
+        # Amount must be a real number — validate here so bad broker data
+        # raises early rather than silently persisting a non-numeric string.
+        # Uses the same Decimal-coercion pattern as Holding.quantity to stay
+        # consistent with the rest of this module's numeric validation.
+        try:
+            Decimal(str(self.amount))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(
+                f"Transaction.amount must be a real number "
+                f"(int/float/Decimal/str); got {self.amount!r}"
+            ) from exc
 
 
 # --- Table-name constants -------------------------------------------------

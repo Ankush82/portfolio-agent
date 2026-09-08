@@ -1,7 +1,3 @@
-import json
-
-from cross_cutting import observability
-from cross_cutting.observability import DefaultAuditManager
 from cross_cutting.security import DefaultBoundaryGate, Provenance, StubBoundaryGate
 
 
@@ -109,33 +105,47 @@ def test_authorize_wildcard_grant_matches_any_action_or_resource():
     assert gate.authorize("user-2", "read", "portfolio:pf-1") is False
 
 
-def test_authorize_produces_an_audit_record_for_both_allow_and_deny(tmp_path, monkeypatch):
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+class _RecordingAuditManager:
+    """Real, minimal AuditManager test double: appends every real
+    record() call to an in-memory list instead of persisting anywhere
+    (file or Postgres) -- lets a unit test assert on exactly what
+    DefaultBoundaryGate.authorize() actually recorded without either a
+    live Postgres connection or the now-removed AUDIT_LOG_PATH
+    file-based audit trail (STORY-10 / #205 removed that fallback;
+    DefaultAuditManager has only ever persisted to Postgres, never a
+    file -- this test was checking a write path that never really
+    existed)."""
 
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def record(self, event_type: str, detail: dict) -> None:
+        self.events.append((event_type, detail))
+
+
+def test_authorize_produces_an_audit_record_for_both_allow_and_deny():
     infra = _InMemoryInfrastructure()
-    gate = DefaultBoundaryGate(infrastructure=infra)
+    recorder = _RecordingAuditManager()
+    gate = DefaultBoundaryGate(infrastructure=infra, audit_manager=recorder)
     gate.grant("user-1", "read", "document-1")
 
     gate.authorize("user-1", "read", "document-1")  # allowed
     gate.authorize("user-1", "delete", "document-1")  # denied
 
-    lines = audit_log_path.read_text().splitlines()
-    assert len(lines) == 2
+    assert len(recorder.events) == 2
 
-    allowed = json.loads(lines[0])
-    assert allowed["event_type"] == "authorization_decision"
-    assert allowed["detail"] == {
+    allowed_type, allowed_detail = recorder.events[0]
+    assert allowed_type == "authorization_decision"
+    assert allowed_detail == {
         "identity": "user-1",
         "action": "read",
         "resource": "document-1",
         "decision": True,
         "enforced": True,
     }
-    assert "timestamp" in allowed
 
-    denied = json.loads(lines[1])
-    assert denied["detail"] == {
+    denied_type, denied_detail = recorder.events[1]
+    assert denied_detail == {
         "identity": "user-1",
         "action": "delete",
         "resource": "document-1",
@@ -144,18 +154,15 @@ def test_authorize_produces_an_audit_record_for_both_allow_and_deny(tmp_path, mo
     }
 
 
-def test_default_audit_manager_used_directly_matches_authorize_record_shape(tmp_path, monkeypatch):
-    """Sanity check that DefaultAuditManager, constructed the same way
-    authorize() uses it internally, writes the same JSON-line format
-    the observability tests already rely on."""
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+def test_default_audit_manager_used_directly_matches_authorize_record_shape():
+    """Sanity check that a real AuditManager.record() call, constructed
+    the same way authorize() uses it internally, produces the same
+    (event_type, detail) shape the test above relies on."""
+    recorder = _RecordingAuditManager()
+    recorder.record("authorization_decision", {"identity": "x"})
 
-    DefaultAuditManager().record("authorization_decision", {"identity": "x"})
-
-    lines = audit_log_path.read_text().splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["event_type"] == "authorization_decision"
+    assert len(recorder.events) == 1
+    assert recorder.events[0][0] == "authorization_decision"
 
 
 def test_stub_boundary_gate_untouched():

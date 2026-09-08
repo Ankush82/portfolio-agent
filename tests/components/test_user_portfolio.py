@@ -1,5 +1,5 @@
 """Tests for DefaultUserPortfolio, BrokerConnector, and
-PlaceholderBrokerConnector (src/components/c01_user_portfolio.py).
+StubBrokerConnector (src/components/c01_user_portfolio.py).
 
 Uses an in-memory Infrastructure test double rather than a live
 Postgres/Redis connection, so these tests run unconditionally (unlike
@@ -11,6 +11,7 @@ itself, which already has its own dedicated test suite.
 """
 
 import json
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -24,17 +25,23 @@ from components.c01_user_portfolio import (
     BrokerHolding,
     BrokerRateLimitError,
     BrokerTransaction,
+    DefaultUpstoxBrokerConnector,
     DefaultUserPortfolio,
+    FailedRecord,
     Holding,
-    PlaceholderBrokerConnector,
+    ImportResult,
     Portfolio,
     PortfolioSnapshot,
     Position,
     StubBrokerConnector,
     StubUserPortfolio,
+    SyncResult,
     Transaction,
     UnsupportedBrokerError,
     User,
+    get_broker_connector,
+    register_broker_connector,
+    unregister_broker_connector,
     validate_stock_symbol,
 )
 from components.c04_knowledge_entity import DefaultKnowledgeEntity
@@ -50,11 +57,18 @@ class _InMemoryInfrastructure:
     contain every key/value in the filter dict (the same containment
     match DefaultInfrastructure.query documents for its JSONB `@>`
     operator). publish/subscribe/schedule/cache_get/cache_set/get_secret
-    are unused by DefaultUserPortfolio and are not implemented."""
+    are unused by DefaultUserPortfolio and are not implemented.
+    
+    Extended for STORY-15: also implements get_broker_connection,
+    upsert_broker_transaction, touch_last_import, mark_broker_connection_error."""
 
     def __init__(self) -> None:
         self._tables: dict[str, dict[str, dict]] = {}
         self._next_id = 0
+        self._broker_connections: dict[tuple[str, str], dict] = {}
+        self._broker_transactions: list[dict] = []
+        self._last_import_calls: list[tuple[str, str]] = []
+        self._broker_holdings: dict[tuple[str, str], list[dict]] = {}
 
     def store(self, table: str, record: dict) -> str:
         self._next_id += 1
@@ -75,11 +89,91 @@ class _InMemoryInfrastructure:
     def delete(self, table: str, id: str) -> bool:
         return self._tables.get(table, {}).pop(id, None) is not None
 
+    # STORY-15 extensions
+    def get_broker_connection(self, user_id: str, broker_id: str) -> "BrokerConnectionRecord | None":
+        from infrastructure_postgres import BrokerConnectionRecord
+        row = self._broker_connections.get((user_id, broker_id))
+        if row is None:
+            return None
+        return BrokerConnectionRecord(
+            id=row.get("id", "test-id"),
+            user_id=row["user_id"],
+            broker_id=row["broker_id"],
+            broker_user_id=row.get("broker_user_id"),
+            access_token_encrypted=row.get("access_token_encrypted", "test-encrypted"),
+            token_type=row.get("token_type", "Bearer"),
+            access_token_expires_at=row.get("access_token_expires_at"),
+            status=row.get("status", "CONNECTED"),
+            last_error=row.get("last_error"),
+            connected_at=row.get("connected_at"),
+            last_import_at=row.get("last_import_at"),
+            created_at=row.get("created_at", "2024-01-01T00:00:00Z"),
+            updated_at=row.get("updated_at", "2024-01-01T00:00:00Z"),
+        )
+
+    def upsert_broker_transaction(
+        self,
+        user_id: str,
+        broker_id: str,
+        external_id: str,
+        symbol: str,
+        isin: str,
+        trade_date: "date",
+        side: str,
+        quantity: "Decimal",
+        price: "Decimal",
+        amount: "Decimal",
+        exchange: str,
+        segment: str,
+        raw: dict,
+    ) -> bool:
+        for existing in self._broker_transactions:
+            if (existing["user_id"], existing["broker_id"], existing["external_id"]) == (
+                user_id, broker_id, external_id
+            ):
+                # Update existing
+                existing.update(
+                    dict(
+                        symbol=symbol, isin=isin, trade_date=str(trade_date),
+                        side=side, quantity=str(quantity), price=str(price),
+                        amount=str(amount), exchange=exchange, segment=segment, raw=raw,
+                    )
+                )
+                return False
+        self._broker_transactions.append(
+            dict(
+                user_id=user_id, broker_id=broker_id, external_id=external_id,
+                symbol=symbol, isin=isin, trade_date=str(trade_date),
+                side=side, quantity=str(quantity), price=str(price),
+                amount=str(amount), exchange=exchange, segment=segment, raw=raw,
+            )
+        )
+        return True
+
+    def touch_last_import(self, user_id: str, broker_id: str) -> None:
+        self._last_import_calls.append((user_id, broker_id))
+        key = (user_id, broker_id)
+        if key in self._broker_connections:
+            self._broker_connections[key]["last_import_at"] = "2024-01-01T00:00:00Z"
+
+    def mark_broker_connection_error(self, user_id: str, broker_id: str, error_message: str) -> None:
+        key = (user_id, broker_id)
+        if key in self._broker_connections:
+            self._broker_connections[key]["status"] = "ERROR"
+            self._broker_connections[key]["last_error"] = error_message
+
+    def _put_broker_connection(self, row: dict) -> None:
+        """Test helper to seed a broker connection row."""
+        self._broker_connections[(row["user_id"], row["broker_id"])] = dict(row)
+
+    def replace_broker_holdings(self, user_id: str, broker_id: str, holdings: list[dict]) -> None:
+        self._broker_holdings[(user_id, broker_id)] = list(holdings)
+
 
 class _FakeBrokerConnector:
     """Test double returning caller-configured holdings/transactions,
     so the import/synchronize/exposure/relevance pipeline can be
-    exercised with real (non-empty) data — PlaceholderBrokerConnector
+    exercised with real (non-empty) data — StubBrokerConnector
     always returns empty lists by design (ADR-0022), which is correct
     for it but not useful for testing what happens when a connector
     actually returns something."""
@@ -201,34 +295,50 @@ def test_connect_portfolio_tags_broker_connection_untrusted_and_persists_it():
 
 def test_connect_portfolio_with_placeholder_connector_produces_synthetic_unmistakable_connection():
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=PlaceholderBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(), broker_connector=StubBrokerConnector()
     )
     user = User(id="user-1", preferences={})
 
     portfolio = portfolio_component.connect_portfolio(user, {})
 
     assert portfolio.user_id == "user-1"
-    # PlaceholderBrokerConnector's own contract (ADR-0022): synthetic,
+    # StubBrokerConnector's own contract (ADR-0022): synthetic,
     # never a value a real broker would return.
     assert portfolio.id  # a real portfolio is still constructed
 
 
-def test_connect_portfolio_records_an_audit_event(tmp_path, monkeypatch):
-    audit_log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(observability, "AUDIT_LOG_PATH", audit_log_path)
+def test_connect_portfolio_records_an_audit_event():
+    # Real, pre-existing, unrelated breakage found live (not caused by
+    # this change): connect_portfolio()'s real signature changed to
+    # (user_id, broker_id, payload) when the broker registry shipped
+    # (#115) -- this test's own call, `connect_portfolio(user, {})`, no
+    # longer matches it and needs its own fix, out of scope for the
+    # audit-logging work (#201/#204/#205) this file's own change is
+    # actually about. What IS in scope and already fixed here: the dead
+    # AUDIT_LOG_PATH monkeypatch this test used to have (removed, STORY-10
+    # / #205 -- DefaultAuditManager.record() has only ever persisted to
+    # Postgres, never that file).
+    class _RecordingAuditManager:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
 
+        def record(self, event_type: str, detail: dict) -> None:
+            self.events.append((event_type, detail))
+
+    recorder = _RecordingAuditManager()
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=_FakeBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(),
+        broker_connector=_FakeBrokerConnector(),
+        audit_manager=recorder,
     )
     user = User(id="user-1", preferences={})
 
     portfolio = portfolio_component.connect_portfolio(user, {})
 
-    lines = audit_log_path.read_text().splitlines()
-    assert len(lines) == 1
-    logged = json.loads(lines[0])
-    assert logged["event_type"] == "portfolio_connected"
-    assert logged["detail"]["portfolio_id"] == portfolio.id
+    assert len(recorder.events) == 1
+    event_type, detail = recorder.events[0]
+    assert event_type == "portfolio_connected"
+    assert detail["portfolio_id"] == portfolio.id
     assert logged["detail"]["provenance"] == Provenance.UNTRUSTED.name
 
 
@@ -237,7 +347,7 @@ def test_connect_portfolio_records_an_audit_event(tmp_path, monkeypatch):
 
 def test_import_holdings_with_placeholder_connector_returns_a_real_empty_list():
     portfolio_component = DefaultUserPortfolio(
-        infrastructure=_InMemoryInfrastructure(), broker_connector=PlaceholderBrokerConnector()
+        infrastructure=_InMemoryInfrastructure(), broker_connector=StubBrokerConnector()
     )
     portfolio = Portfolio(id="pf-1", user_id="user-1")
 
@@ -284,13 +394,17 @@ def test_synchronize_portfolio_reimports_then_assembles_a_snapshot():
     portfolio_component = DefaultUserPortfolio(infrastructure=infra, broker_connector=connector)
     portfolio = Portfolio(id="pf-1", user_id="user-1")
 
-    snapshot = portfolio_component.synchronize_portfolio(portfolio)
+    result = portfolio_component.synchronize_portfolio(portfolio)
 
-    assert isinstance(snapshot, PortfolioSnapshot)
-    assert snapshot.portfolio_id == "pf-1"
-    assert len(snapshot.positions) == 1
-    assert snapshot.positions[0].holding.security_id == "AAPL"
-    assert snapshot.exposure == {"AAPL": {"market_value": 10.0, "weight": 1.0}}
+    assert isinstance(result, SyncResult)
+    assert result.portfolio_id == "pf-1"
+    assert result.holdings_added == 1
+    assert result.success is True
+    assert result.has_changes is True
+    assert result.sync_started_at is not None
+    assert result.sync_completed_at is not None
+    assert result.duration_ms is not None
+    assert result.duration_ms >= 0
 
 
 def test_track_portfolio_state_reads_previously_stored_holdings_without_calling_the_broker_again():
@@ -302,7 +416,7 @@ def test_track_portfolio_state_reads_previously_stored_holdings_without_calling_
 
     # Swap in a connector that would raise if it were ever called, to
     # prove track_portfolio_state only reads storage.
-    class _ExplodingConnector(PlaceholderBrokerConnector):
+    class _ExplodingConnector(StubBrokerConnector):
         def fetch_holdings(self, portfolio):
             raise AssertionError("track_portfolio_state must not call the broker connector")
 
@@ -545,25 +659,108 @@ def test_manually_added_holding_flows_through_track_portfolio_state_and_calculat
     assert portfolio_component.determine_user_relevance(user, {"security_id": apple.id}) is True
 
 
-# --- PlaceholderBrokerConnector ---------------------------------------------
+# --- StubBrokerConnector protocol conformance --------------------------------
 
 
-def test_placeholder_broker_connector_connect_is_synthetic_and_never_looks_real():
-    connector = PlaceholderBrokerConnector()
-    user = User(id="user-1", preferences={})
-
-    result = connector.connect(user, {"api_key": "whatever"})
-
-    assert result["broker"] == "placeholder"
-    assert result["external_account_id"].startswith("placeholder-account-")
+# --- Broker registry (STORY-9) ----------------------------------------------
 
 
-def test_placeholder_broker_connector_fetch_methods_return_empty_not_synthetic_positions():
-    connector = PlaceholderBrokerConnector()
-    portfolio = Portfolio(id="pf-1", user_id="user-1")
+def test_get_broker_connector_upstox_returns_a_real_default_upstox_broker_connector(monkeypatch):
+    monkeypatch.setenv("UPSTOX_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("UPSTOX_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("UPSTOX_REDIRECT_URI", "https://example.com/cb")
 
-    assert connector.fetch_holdings(portfolio) == []
-    assert connector.fetch_transactions(portfolio) == []
+    connector = get_broker_connector("upstox")
+
+    assert isinstance(connector, DefaultUpstoxBrokerConnector)
+
+
+def test_get_broker_connector_unknown_id_raises_unsupported_broker_error_naming_supported_ids():
+    with pytest.raises(UnsupportedBrokerError) as exc_info:
+        get_broker_connector("zerodha")
+
+    assert "upstox" in str(exc_info.value)
+
+
+def test_get_broker_connector_upstox_raises_broker_config_error_when_env_unset(monkeypatch):
+    # The AC's own wording is specific: "BrokerConfigError from STORY-1"
+    # -- that's upstox_config.BrokerConfigError (raised directly by
+    # UpstoxConfig.from_env()), a real, separate class from this
+    # module's own broader BrokerConfigError of the same name (used
+    # here for broker-token-decryption failures instead). Asserting
+    # against the wrong one would pass for the wrong reason if the two
+    # were ever unified later.
+    from upstox_config import BrokerConfigError as UpstoxConfigError
+
+    monkeypatch.delenv("UPSTOX_CLIENT_ID", raising=False)
+    monkeypatch.delenv("UPSTOX_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("UPSTOX_REDIRECT_URI", raising=False)
+
+    with pytest.raises(UpstoxConfigError):
+        get_broker_connector("upstox")
+
+
+class _ThrowawayBrokerConnector:
+    """A throwaway fake connector registered under a brand-new
+    broker_id -- proves DefaultUserPortfolio drives an arbitrary
+    registered broker purely through get_broker_connector(broker_id),
+    with ZERO changes to DefaultUserPortfolio itself (STORY-9's core
+    "a second broker is addable with zero caller changes" claim)."""
+
+    broker_id = "throwaway-test-broker"
+    display_name = "Throwaway Test Broker"
+
+    def __init__(self) -> None:
+        self.fetch_holdings_call_count = 0
+
+    def build_authorize_url(self, *, state: str) -> str:
+        return f"https://throwaway.example/auth?state={state}"
+
+    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
+        return BrokerCredentials(access_token=f"throwaway-token-{code}")
+
+    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
+        self.fetch_holdings_call_count += 1
+        return [
+            BrokerHolding(
+                symbol="THROWAWAY",
+                isin="THROWAWAY-ISIN-0001",
+                quantity=None,
+                average_price=None,
+                last_price=None,
+            )
+        ]
+
+    def fetch_transactions(self, *, credentials, start_date, end_date) -> list[BrokerTransaction]:
+        return []
+
+
+def test_default_user_portfolio_drives_a_newly_registered_broker_via_the_registry_alone():
+    """No broker_connector injected at construction -- DefaultUserPortfolio
+    must resolve _ThrowawayBrokerConnector purely via get_broker_connector,
+    with no code in DefaultUserPortfolio naming this broker_id at all."""
+    infra = _InMemoryInfrastructure()
+    infra._put_broker_connection({
+        "user_id": "user-1",
+        "broker_id": "throwaway-test-broker",
+        "access_token": "seeded-token",
+        "token_type": "Bearer",
+        "access_token_expires_at": None,
+        "broker_user_id": None,
+        "status": "CONNECTED",
+    })
+    connector = _ThrowawayBrokerConnector()
+    register_broker_connector(connector)
+    try:
+        portfolio_component = DefaultUserPortfolio(infrastructure=infra)
+
+        result = portfolio_component.import_holdings("user-1", "throwaway-test-broker")
+
+        assert connector.fetch_holdings_call_count == 1
+        assert result.holdings_written == 1
+        assert result.skipped == 0
+    finally:
+        unregister_broker_connector("throwaway-test-broker")
 
 
 # --- DefaultBoundaryGate wiring, end to end ---------------------------------
@@ -602,6 +799,8 @@ def test_stub_user_portfolio_untouched():
 
     assert stub.import_holdings(portfolio) == []
     assert stub.import_transactions(portfolio) == []
+    sync_result = stub.synchronize_portfolio(portfolio)
+    assert sync_result == SyncResult(portfolio_id="stub-id")
     assert stub.calculate_exposure(PortfolioSnapshot(portfolio_id="x", positions=[], exposure={})) == {}
     assert stub.determine_user_relevance(user, {}) is True
 
@@ -747,14 +946,14 @@ def test_qa_story2_protocol_is_runtime_checkable_and_required_members_match_brie
     from typing import runtime_checkable
 
     # Protocol is runtime_checkable — actual conformance check: an
-    # implementer (PlaceholderBrokerConnector) is isinstance(.)
+    # implementer (StubBrokerConnector) is isinstance(.)
     # against the Protocol, which is the whole point of
     # @runtime_checkable. Without it, the conformance claim is
     # unsubstantiated.
     assert runtime_checkable(BrokerConnector), "BrokerConnector must be @runtime_checkable"
-    placeholder_instance = PlaceholderBrokerConnector()
+    placeholder_instance = StubBrokerConnector()
     assert isinstance(placeholder_instance, BrokerConnector), (
-        "PlaceholderBrokerConnector must satisfy BrokerConnector at "
+        "StubBrokerConnector must satisfy BrokerConnector at "
         "runtime (the @runtime_checkable guarantee)"
     )
 
@@ -1087,7 +1286,7 @@ def test_qa_story2_no_upstox_leak_in_protocol_dtos_or_exceptions_across_the_sour
     for sym in (BrokerConnector, BrokerCredentials, BrokerHolding,
                 BrokerTransaction, BrokerError, BrokerConfigError,
                 BrokerAuthError, BrokerApiError, BrokerRateLimitError,
-                UnsupportedBrokerError, PlaceholderBrokerConnector):
+                UnsupportedBrokerError, StubBrokerConnector):
         try:
             sources.append(inspect.getsource(sym))
         except (TypeError, OSError):
@@ -2372,3 +2571,684 @@ def test_stub_broker_connector_does_not_read_env_at_construction_time():
         f"observed reads: {env_reads!r}"
     )
 
+
+# ---------------------------------------------------------------------------
+# STORY-13: DefaultUserPortfolio.connect_portfolio
+# ---------------------------------------------------------------------------
+
+import pytest
+from datetime import datetime, timezone
+from unittest import mock
+
+from components.c01_user_portfolio import (
+    BrokerConnectionRecord,
+    BrokerCredentials,
+    DefaultUserPortfolio,
+    StubBrokerConnector,
+    get_broker_connector,
+    register_broker_connector,
+    UnsupportedBrokerError,
+    BrokerAuthError,
+    BrokerApiError,
+)
+from infrastructure_postgres import DefaultInfrastructure
+
+
+class _FakeInfrastructureForConnect:
+    """Minimal fake infrastructure that tracks calls for connect_portfolio tests."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, tuple, dict]] = []
+        self._connections: dict[tuple[str, str], BrokerConnectionRecord] = {}
+
+    def get_broker_connection(self, user_id: str, broker_id: str) -> BrokerConnectionRecord | None:
+        self.calls.append(("get_broker_connection", (user_id, broker_id), {}))
+        return self._connections.get((user_id, broker_id))
+
+    def upsert_broker_connection(
+        self,
+        user_id: str,
+        broker_id: str,
+        credentials: BrokerCredentials,
+        status: str = "CONNECTED",
+        last_error: str | None = None,
+        connected_at=None,
+    ) -> BrokerConnectionRecord:
+        self.calls.append(("upsert_broker_connection", (user_id, broker_id), {
+            "credentials": credentials, "status": status, "last_error": last_error,
+        }))
+        record = BrokerConnectionRecord(
+            id="fake-record-id",
+            user_id=user_id,
+            broker_id=broker_id,
+            broker_user_id=credentials.broker_user_id,
+            access_token_encrypted="fake-encrypted",
+            token_type=credentials.token_type,
+            access_token_expires_at=str(credentials.expires_at) if credentials.expires_at else None,
+            status=status,
+            last_error=last_error,
+            connected_at=connected_at.isoformat() if connected_at else None,
+            last_import_at=None,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._connections[(user_id, broker_id)] = record
+        return record
+
+    def mark_broker_connection_error(
+        self,
+        user_id: str,
+        broker_id: str,
+        error_message: str,
+    ) -> None:
+        self.calls.append(("mark_broker_connection_error", (user_id, broker_id), {
+            "error_message": error_message,
+        }))
+        existing = self._connections.get((user_id, broker_id))
+        if existing:
+            self._connections[(user_id, broker_id)] = BrokerConnectionRecord(
+                id=existing.id,
+                user_id=existing.user_id,
+                broker_id=existing.broker_id,
+                broker_user_id=existing.broker_user_id,
+                access_token_encrypted=existing._access_token_encrypted,
+                token_type=existing.token_type,
+                access_token_expires_at=existing.access_token_expires_at,
+                status="ERROR",
+                last_error=error_message,
+                connected_at=existing.connected_at,
+                last_import_at=existing.last_import_at,
+                created_at=existing.created_at,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+
+def test_connect_portfolio_happy_path():
+    """AC: happy path with StubBrokerConnector persists CONNECTED row and returns the record."""
+    stub = StubBrokerConnector()
+    register_broker_connector(stub)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    record = portfolio.connect_portfolio(
+        user_id="user-123",
+        broker_id="stub",
+        payload={"code": "auth-code-abc"},
+    )
+
+    assert record.status == "CONNECTED"
+    assert record.user_id == "user-123"
+    assert record.broker_id == "stub"
+
+    # upsert was called
+    upsert_calls = [c for c in infra.calls if c[0] == "upsert_broker_connection"]
+    assert len(upsert_calls) == 1
+    call_args = upsert_calls[0]
+    assert call_args[1] == ("user-123", "stub")
+    assert call_args[2]["credentials"].access_token == "stub-access-token"
+    assert call_args[2]["status"] == "CONNECTED"
+
+
+def test_connect_portfolio_missing_code_raises_valueerror():
+    """AC: missing or empty code raises ValueError before any connector call."""
+    stub = StubBrokerConnector()
+    register_broker_connector(stub)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    # Missing key entirely
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={})
+
+    # Present but empty string
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={"code": ""})
+
+    # Present but whitespace-only
+    with pytest.raises(ValueError, match=r"payload\['code'\] is required"):
+        portfolio.connect_portfolio(user_id="u", broker_id="stub", payload={"code": "   "})
+
+    # No connector calls were made
+    assert infra.calls == [], "ValueError must be raised before any connector call"
+
+
+def test_connect_portfolio_unknown_broker_id_raises_unsupported():
+    """AC: unknown broker_id raises UnsupportedBrokerError."""
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(UnsupportedBrokerError):
+        portfolio.connect_portfolio(
+            user_id="u", broker_id="nonexistent-broker", payload={"code": "x"}
+        )
+
+
+def test_connect_portfolio_broker_auth_error_marks_existing_row():
+    """AC: BrokerAuthError propagates, no CONNECTED row, existing row marked ERROR."""
+    auth_error_connector = StubBrokerConnector(raise_on=BrokerAuthError("auth failed"))
+    register_broker_connector(auth_error_connector)
+    infra = _FakeInfrastructureForConnect()
+
+    # Seed an existing row so the error-marking path is exercised
+    existing_record = infra.upsert_broker_connection(
+        user_id="user-existing",
+        broker_id="stub",
+        credentials=BrokerCredentials(access_token="old-token"),
+        status="CONNECTED",
+    )
+    assert existing_record.status == "CONNECTED"
+
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerAuthError):
+        portfolio.connect_portfolio(
+            user_id="user-existing",
+            broker_id="stub",
+            payload={"code": "invalid"},
+        )
+
+    # No CONNECTED upsert happened
+    upsert_calls = [c for c in infra.calls if c[0] == "upsert_broker_connection"]
+    assert upsert_calls == []
+
+    # mark_broker_connection_error WAS called
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert len(mark_calls) == 1
+    assert mark_calls[0][1] == ("user-existing", "stub")
+    assert "auth failed" in mark_calls[0][2]["error_message"]
+
+
+def test_connect_portfolio_broker_auth_error_no_prior_row():
+    """AC: BrokerAuthError propagates even when no prior row exists (no mark call)."""
+    auth_error_connector = StubBrokerConnector(raise_on=BrokerAuthError("auth failed"))
+    register_broker_connector(auth_error_connector)
+    infra = _FakeInfrastructureForConnect()
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerAuthError):
+        portfolio.connect_portfolio(
+            user_id="brand-new-user",
+            broker_id="stub",
+            payload={"code": "invalid"},
+        )
+
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert mark_calls == [], "mark_broker_connection_error must not be called when no prior row"
+
+
+def test_connect_portfolio_broker_api_error_marks_existing_row():
+    """AC: BrokerApiError propagates, existing row marked ERROR."""
+    api_error_connector = StubBrokerConnector(raise_on=BrokerApiError("api failed"))
+    register_broker_connector(api_error_connector)
+    infra = _FakeInfrastructureForConnect()
+
+    # Seed an existing row
+    infra.upsert_broker_connection(
+        user_id="user-api-err",
+        broker_id="stub",
+        credentials=BrokerCredentials(access_token="old-token"),
+        status="CONNECTED",
+    )
+
+    portfolio = DefaultUserPortfolio(infrastructure=infra)
+
+    with pytest.raises(BrokerApiError):
+        portfolio.connect_portfolio(
+            user_id="user-api-err",
+            broker_id="stub",
+            payload={"code": "bad-code"},
+        )
+
+    mark_calls = [c for c in infra.calls if c[0] == "mark_broker_connection_error"]
+    assert len(mark_calls) == 1
+
+
+def test_connect_portfolio_no_upstox_in_default_user_portfolio():
+    """AC: grep of DefaultUserPortfolio class body shows zero occurrences of Upstox-specific names."""
+    import inspect
+    from components.c01_user_portfolio import DefaultUserPortfolio
+
+    source = inspect.getsource(DefaultUserPortfolio)
+    # Exclude imports and docstrings (the module-level Upstox connector class)
+    upstox_terms = [
+        "upstox", "api.upstox.com",
+        "client_id", "client_secret", "redirect_uri",  # Upstox field names
+    ]
+    for term in upstox_terms:
+        assert term.lower() not in source.lower(), (
+            f"DefaultUserPortfolio must not contain {term!r}; found in source"
+        )
+
+
+
+# --- SyncResult & FailedRecord (STORY-SYNC-01) ------------------------------
+
+
+def test_sync_result_success_is_true_when_no_failures():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_added=2,
+        holdings_updated=1,
+        holdings_failed=0,
+        transactions_failed=0,
+    )
+    assert result.success is True
+
+
+def test_sync_result_success_is_false_when_holdings_failed():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=1,
+        transactions_failed=0,
+    )
+    assert result.success is False
+
+
+def test_sync_result_success_is_false_when_transactions_failed():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=0,
+        transactions_failed=1,
+    )
+    assert result.success is False
+
+
+def test_sync_result_has_changes_is_true_when_holdings_added():
+    result = SyncResult(portfolio_id="pf-1", holdings_added=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_holdings_updated():
+    result = SyncResult(portfolio_id="pf-1", holdings_updated=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_holdings_removed():
+    result = SyncResult(portfolio_id="pf-1", holdings_removed=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_added():
+    result = SyncResult(portfolio_id="pf-1", transactions_added=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_updated():
+    result = SyncResult(portfolio_id="pf-1", transactions_updated=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_true_when_transactions_removed():
+    result = SyncResult(portfolio_id="pf-1", transactions_removed=1)
+    assert result.has_changes is True
+
+
+def test_sync_result_has_changes_is_false_when_all_unchanged():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_unchanged=5,
+        transactions_unchanged=10,
+    )
+    assert result.has_changes is False
+
+
+def test_sync_result_has_changes_is_false_when_only_failures():
+    """Failed-only sync makes no structural changes."""
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_failed=2,
+        transactions_failed=1,
+    )
+    assert result.has_changes is False
+
+
+def test_sync_result_duration_ms_computes_from_timestamps():
+    from datetime import timezone
+
+    started = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    completed = datetime(2025, 1, 1, 12, 0, 1, tzinfo=timezone.utc)  # +1000 ms
+
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_started_at=started,
+        sync_completed_at=completed,
+    )
+    assert result.duration_ms == 1000
+
+
+def test_sync_result_duration_ms_is_none_when_started_at_is_missing():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_completed_at=datetime.now(timezone.utc),
+    )
+    assert result.duration_ms is None
+
+
+def test_sync_result_duration_ms_is_none_when_completed_at_is_missing():
+    result = SyncResult(
+        portfolio_id="pf-1",
+        sync_started_at=datetime.now(timezone.utc),
+    )
+    assert result.duration_ms is None
+
+
+def test_sync_result_duration_ms_is_none_when_both_timestamps_missing():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.duration_ms is None
+
+
+def test_sync_result_all_counters_default_to_zero():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.holdings_added == 0
+    assert result.holdings_updated == 0
+    assert result.holdings_unchanged == 0
+    assert result.holdings_removed == 0
+    assert result.holdings_failed == 0
+    assert result.transactions_added == 0
+    assert result.transactions_updated == 0
+    assert result.transactions_unchanged == 0
+    assert result.transactions_removed == 0
+    assert result.transactions_failed == 0
+
+
+def test_sync_result_failed_records_list_empty_by_default():
+    result = SyncResult(portfolio_id="pf-1")
+    assert result.failed_records == []
+
+
+def test_failed_record_construction_with_all_fields():
+    record = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="missing required field 'isin'",
+        raw_data={"symbol": "AAPL", "quantity": 10},
+    )
+    assert record.record_type == "holding"
+    assert record.broker_id == "upstox"
+    assert record.reason == "missing required field 'isin'"
+    assert record.raw_data == {"symbol": "AAPL", "quantity": 10}
+
+
+def test_failed_record_broker_id_can_be_none():
+    """Manual-entry failures have no broker source."""
+    record = FailedRecord(
+        record_type="transaction",
+        broker_id=None,
+        reason="amount must be positive",
+        raw_data={},
+    )
+    assert record.broker_id is None
+
+
+def test_failed_record_raw_data_defaults_to_empty_dict():
+    record = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="unparseable",
+    )
+    assert record.raw_data == {}
+
+
+def test_sync_result_with_failed_records_roundtrips_success_and_has_changes():
+    failed = FailedRecord(
+        record_type="holding",
+        broker_id="upstox",
+        reason="parse error",
+        raw_data={},
+    )
+    result = SyncResult(
+        portfolio_id="pf-1",
+        holdings_added=1,
+        holdings_failed=1,
+        failed_records=[failed],
+    )
+    assert result.success is False
+    assert result.has_changes is True
+    assert result.failed_records == [failed]
+
+
+# --- STORY-179: Repository methods for reconciliation -------------------------
+
+
+def test_qa_story179_holding_repository_protocol_has_required_methods():
+    """AC: HoldingRepository Protocol declares the two required methods with
+    correct signatures for the reconciliation use-case."""
+    import inspect
+    from typing import get_type_hints
+
+    # Method 1: find_by_broker_holding_id
+    sig1 = inspect.signature(HoldingRepository.find_by_broker_holding_id)
+    params1 = list(sig1.parameters.keys())
+    assert "broker_holding_id" in params1, (
+        "HoldingRepository.find_by_broker_holding_id must accept broker_holding_id"
+    )
+    hints1 = get_type_hints(HoldingRepository.find_by_broker_holding_id)
+    assert hints1.get("return") in (CurrentHolding, "CurrentHolding"), (
+        f"HoldingRepository.find_by_broker_holding_id must return CurrentHolding | None; "
+        f"got {hints1.get('return')}"
+    )
+
+    # Method 2: find_active_by_account_id
+    sig2 = inspect.signature(HoldingRepository.find_active_by_account_id)
+    params2 = list(sig2.parameters.keys())
+    assert "account_id" in params2, (
+        "HoldingRepository.find_active_by_account_id must accept account_id"
+    )
+    hints2 = get_type_hints(HoldingRepository.find_active_by_account_id)
+    assert "list" in repr(hints2.get("return", "")), (
+        f"HoldingRepository.find_active_by_account_id must return list[CurrentHolding]; "
+        f"got {hints2.get('return')}"
+    )
+
+
+def test_qa_story179_transaction_repository_protocol_has_required_methods():
+    """AC: TransactionRepository Protocol declares the two required methods with
+    correct signatures for the reconciliation use-case."""
+    import inspect
+    from typing import get_type_hints
+
+    # Method 1: find_by_broker_transaction_id
+    sig1 = inspect.signature(TransactionRepository.find_by_broker_transaction_id)
+    params1 = list(sig1.parameters.keys())
+    assert "broker_transaction_id" in params1, (
+        "TransactionRepository.find_by_broker_transaction_id must accept broker_transaction_id"
+    )
+    hints1 = get_type_hints(TransactionRepository.find_by_broker_transaction_id)
+    assert hints1.get("return") in (CurrentTransaction, "CurrentTransaction"), (
+        f"TransactionRepository.find_by_broker_transaction_id must return CurrentTransaction | None; "
+        f"got {hints1.get('return')}"
+    )
+
+    # Method 2: find_active_by_account_id
+    sig2 = inspect.signature(TransactionRepository.find_active_by_account_id)
+    params2 = list(sig2.parameters.keys())
+    assert "account_id" in params2, (
+        "TransactionRepository.find_active_by_account_id must accept account_id"
+    )
+    hints2 = get_type_hints(TransactionRepository.find_active_by_account_id)
+    assert "list" in repr(hints2.get("return", "")), (
+        f"TransactionRepository.find_active_by_account_id must return list[CurrentTransaction]; "
+        f"got {hints2.get('return')}"
+    )
+
+
+def test_qa_story179_default_holding_repository_implements_protocol_methods():
+    """AC: DefaultHoldingRepository implements find_by_broker_holding_id and
+    find_active_by_account_id, using existing DB infrastructure (query)."""
+    import inspect
+
+    repo = DefaultHoldingRepository(infrastructure=_InMemoryInfrastructure())
+
+    # Method exists with correct name and is callable
+    assert hasattr(repo, "find_by_broker_holding_id")
+    assert callable(repo.find_by_broker_holding_id)
+    sig1 = inspect.signature(repo.find_by_broker_holding_id)
+    assert "broker_holding_id" in list(sig1.parameters.keys())
+
+    assert hasattr(repo, "find_active_by_account_id")
+    assert callable(repo.find_active_by_account_id)
+    sig2 = inspect.signature(repo.find_active_by_account_id)
+    assert "account_id" in list(sig2.parameters.keys())
+
+
+def test_qa_story179_default_transaction_repository_implements_protocol_methods():
+    """AC: DefaultTransactionRepository implements find_by_broker_transaction_id
+    and find_active_by_account_id, using existing DB infrastructure (query)."""
+    import inspect
+
+    repo = DefaultTransactionRepository(infrastructure=_InMemoryInfrastructure())
+
+    # Method exists with correct name and is callable
+    assert hasattr(repo, "find_by_broker_transaction_id")
+    assert callable(repo.find_by_broker_transaction_id)
+    sig1 = inspect.signature(repo.find_by_broker_transaction_id)
+    assert "broker_transaction_id" in list(sig1.parameters.keys())
+
+    assert hasattr(repo, "find_active_by_account_id")
+    assert callable(repo.find_active_by_account_id)
+    sig2 = inspect.signature(repo.find_active_by_account_id)
+    assert "account_id" in list(sig2.parameters.keys())
+
+
+def test_qa_story179_holding_repository_find_by_broker_holding_id_returns_record():
+    """AC: find_by_broker_holding_id returns the stored CurrentHolding when
+    a matching broker_holding_id exists (idempotent matching support)."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultHoldingRepository(infrastructure=infra)
+
+    # Persist a holding with a broker_holding_id
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-1",
+            "portfolio_id": "pf-1",
+            "security_id": "AAPL",
+            "quantity": 10.0,
+            "broker_holding_id": "broker-holding-abc",
+            "is_active": True,
+        },
+    )
+
+    result = repo.find_by_broker_holding_id("broker-holding-abc")
+
+    assert result is not None
+    assert result.id == "holding-1"
+    assert result.holding.broker_holding_id == "broker-holding-abc"
+    assert result.holding.security_id == "AAPL"
+    assert result.is_active is True
+
+
+def test_qa_story179_holding_repository_find_by_broker_holding_id_returns_none_when_not_found():
+    """AC: find_by_broker_holding_id returns None when no matching record exists."""
+    repo = DefaultHoldingRepository(infrastructure=_InMemoryInfrastructure())
+
+    result = repo.find_by_broker_holding_id("non-existent-id")
+
+    assert result is None
+
+
+def test_qa_story179_holding_repository_find_active_by_account_id_returns_only_active():
+    """AC: find_active_by_account_id returns only non-removed (is_active=True)
+    holdings for the account, enabling removed-record detection."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultHoldingRepository(infrastructure=infra)
+
+    # Persist two holdings for the same account: one active, one removed
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-active",
+            "portfolio_id": "pf-1",
+            "security_id": "AAPL",
+            "quantity": 5.0,
+            "is_active": True,
+        },
+    )
+    infra.store(
+        "holdings",
+        {
+            "id": "holding-removed",
+            "portfolio_id": "pf-1",
+            "security_id": "MSFT",
+            "quantity": 3.0,
+            "is_active": False,
+        },
+    )
+
+    result = repo.find_active_by_account_id("pf-1")
+
+    assert len(result) == 1
+    assert result[0].id == "holding-active"
+    assert result[0].holding.security_id == "AAPL"
+
+
+def test_qa_story179_transaction_repository_find_by_broker_transaction_id_returns_record():
+    """AC: find_by_broker_transaction_id returns the stored CurrentTransaction
+    when a matching broker_transaction_id exists (idempotent matching support)."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultTransactionRepository(infrastructure=infra)
+
+    # Persist a transaction with a broker_transaction_id
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-1",
+            "portfolio_id": "pf-1",
+            "kind": "buy",
+            "amount": 1000.0,
+            "broker_transaction_id": "broker-txn-xyz",
+            "is_active": True,
+        },
+    )
+
+    result = repo.find_by_broker_transaction_id("broker-txn-xyz")
+
+    assert result is not None
+    assert result.id == "txn-1"
+    assert result.transaction.broker_transaction_id == "broker-txn-xyz"
+    assert result.transaction.kind == "buy"
+    assert result.is_active is True
+
+
+def test_qa_story179_transaction_repository_find_by_broker_transaction_id_returns_none_when_not_found():
+    """AC: find_by_broker_transaction_id returns None when no matching record exists."""
+    repo = DefaultTransactionRepository(infrastructure=_InMemoryInfrastructure())
+
+    result = repo.find_by_broker_transaction_id("non-existent-id")
+
+    assert result is None
+
+
+def test_qa_story179_transaction_repository_find_active_by_account_id_returns_only_active():
+    """AC: find_active_by_account_id returns only non-removed (is_active=True)
+    transactions for the account, enabling removed-record detection."""
+    infra = _InMemoryInfrastructure()
+    repo = DefaultTransactionRepository(infrastructure=infra)
+
+    # Persist two transactions for the same account: one active, one removed
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-active",
+            "portfolio_id": "pf-1",
+            "kind": "buy",
+            "amount": 500.0,
+            "is_active": True,
+        },
+    )
+    infra.store(
+        "transactions",
+        {
+            "id": "txn-removed",
+            "portfolio_id": "pf-1",
+            "kind": "sell",
+            "amount": 200.0,
+            "is_active": False,
+        },
+    )
+
+    result = repo.find_active_by_account_id("pf-1")
+
+    assert len(result) == 1
+    assert result[0].id == "txn-active"
+    assert result[0].transaction.kind == "buy"
