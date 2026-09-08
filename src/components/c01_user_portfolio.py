@@ -28,7 +28,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, runtime_checkable
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
@@ -66,19 +66,57 @@ if TYPE_CHECKING:
 _broker_connector_registry: dict[str, "BrokerConnector"] = {}
 
 
-def get_broker_connector(broker_id: str) -> "BrokerConnector":
-    """Look up a registered BrokerConnector by broker_id (STORY-9).
+def _default_upstox_connector() -> "BrokerConnector":
+    # DefaultUpstoxBrokerConnector is defined further down in this same
+    # module -- referenced here only inside a function body (never
+    # evaluated at import time), so this has nothing to do with why
+    # BROKER_CONNECTORS' factories are lazy (see BROKER_CONNECTORS'
+    # own docstring below for that real reason).
+    return DefaultUpstoxBrokerConnector(UpstoxConfig.from_env())
 
-    Raises ``UnsupportedBrokerError`` if no connector is registered
-    for the given broker_id. The registry contains only broker_id
-    strings (no URLs, no field names) — everything broker-specific
-    lives behind the Protocol."""
+
+# STORY-9: the real extension point for adding a new broker. To add
+# one: write a real Default<Broker>BrokerConnector class conforming to
+# the BrokerConnector Protocol, then add ONE line here mapping its
+# broker_id to a zero-arg factory that builds it -- nothing else in
+# this project needs to change (DefaultUserPortfolio, connect_portfolio,
+# import_holdings/import_transactions all resolve purely through
+# get_broker_connector(broker_id), never a hardcoded class name).
+#
+# Values are LAZY factories (Callable[[], BrokerConnector]), not
+# already-built instances: UpstoxConfig.from_env() raises
+# BrokerConfigError when UPSTOX_CLIENT_ID/SECRET/REDIRECT_URI aren't
+# set, and that must happen when get_broker_connector('upstox') is
+# actually CALLED, not merely because this module got imported in an
+# environment that doesn't have Upstox configured (which would break
+# every test/tool that imports this module at all, whether or not it
+# ever touches a broker).
+BROKER_CONNECTORS: dict[str, Callable[[], "BrokerConnector"]] = {
+    "upstox": _default_upstox_connector,
+}
+
+
+def get_broker_connector(broker_id: str) -> "BrokerConnector":
+    """Look up a BrokerConnector by broker_id (STORY-9).
+
+    Checks the dynamic registry first (``register_broker_connector`` --
+    what tests, and any future runtime override, use) so an explicitly
+    registered connector always wins; falls back to lazily building one
+    from ``BROKER_CONNECTORS`` (the real, shipped connectors) when
+    nothing was explicitly registered for this broker_id. Raises
+    ``UnsupportedBrokerError`` if neither has one. The registry
+    contains only broker_id strings (no URLs, no field names) --
+    everything broker-specific lives behind the Protocol."""
     connector = _broker_connector_registry.get(broker_id)
-    if connector is None:
-        raise UnsupportedBrokerError(
-            f"no connector registered for broker_id {broker_id!r}"
-        )
-    return connector
+    if connector is not None:
+        return connector
+    factory = BROKER_CONNECTORS.get(broker_id)
+    if factory is not None:
+        return factory()
+    raise UnsupportedBrokerError(
+        f"no connector registered for broker_id {broker_id!r}; "
+        f"supported ids: {sorted(set(_broker_connector_registry) | set(BROKER_CONNECTORS))}"
+    )
 
 
 def register_broker_connector(connector: "BrokerConnector") -> None:
@@ -220,34 +258,6 @@ class BrokerConnector(Protocol):
     def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
         """Fetch transactions for the given credentials and date range."""
         ...
-
-
-class PlaceholderBrokerConnector:
-    """Placeholder implementation of BrokerConnector for testing and development.
-    All methods return synthetic, obviously-fake data that cannot be mistaken
-    for real broker data."""
-
-    broker_id: str = "placeholder"
-    display_name: str = "Placeholder Broker"
-
-    def build_authorize_url(self, *, state: str) -> str:
-        return f"https://placeholder.broker/auth?state={state}"
-
-    def exchange_auth_code(self, *, code: str) -> BrokerCredentials:
-        return BrokerCredentials(
-            access_token=f"placeholder-token-{code}",
-            token_type="Bearer",
-            expires_at=None,
-            refresh_token=None,
-            broker_user_id=None,
-            raw={"code": code},
-        )
-
-    def fetch_holdings(self, *, credentials: BrokerCredentials) -> list[BrokerHolding]:
-        return []
-
-    def fetch_transactions(self, *, credentials: BrokerCredentials, start_date: date, end_date: date) -> list[BrokerTransaction]:
-        return []
 
 
 class StubBrokerConnector:
@@ -460,7 +470,7 @@ class DefaultUpstoxBrokerConnector:
     def __init__(
         self,
         config: UpstoxConfig,
-        http: "_UpstoxHttp",
+        http: "_UpstoxHttp | None" = None,
     ) -> None:
         # Deferred import — ``src/upstox_http`` already imports the
         # STORY-2 exception classes from this module at load time, so
@@ -471,6 +481,28 @@ class DefaultUpstoxBrokerConnector:
         # story (STORY-6 onwards).
         from upstox_http import _UpstoxHttp as _UpstoxHttpRuntime
         self._config = config
+        if http is None:
+            # STORY-9's registry factory (BROKER_CONNECTORS['upstox'])
+            # constructs this with only a config, matching the AC's own
+            # `lambda: DefaultUpstoxBrokerConnector(UpstoxConfig.from_env())`
+            # -- no real access token exists yet at registry-resolution
+            # time (tokens are per-connection, bound only once a user has
+            # actually connected). Real callers that DO have a bound
+            # token (every real test, and any real per-connection flow)
+            # pass their own real http explicitly, so this default is
+            # only ever exercised by an unconnected registry entry --
+            # failing with a clear, honest BrokerAuthError the moment a
+            # real call is attempted is correct there, not a crash or a
+            # silently wrong token.
+            def _no_token_bound() -> str:
+                raise BrokerAuthError(
+                    "DefaultUpstoxBrokerConnector has no real access "
+                    "token bound yet -- connect this broker via "
+                    "connect_portfolio before fetching holdings or "
+                    "transactions"
+                )
+
+            http = _UpstoxHttpRuntime(token_provider=_no_token_bound)
         self._http: _UpstoxHttpRuntime = http
 
     def build_authorize_url(self, *, state: str) -> str:
@@ -1660,10 +1692,32 @@ class DefaultUserPortfolio:
         knowledge_entity: DefaultKnowledgeEntity | None = None,
     ) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
-        self._broker_connector = broker_connector or PlaceholderBrokerConnector()
+        # None (the real default) means "resolve fresh via the broker
+        # registry, per broker_id, on every call" (STORY-9) -- an
+        # explicitly injected connector always wins when given (every
+        # existing test's own real seam, unchanged), but the real,
+        # un-injected production path must never pin a single broker
+        # instance for the whole component's lifetime: import_holdings/
+        # import_transactions are called with a real, specific broker_id
+        # each time, and a second broker must become usable with zero
+        # changes here. See _resolve_broker_connector below.
+        self._broker_connector = broker_connector
         self._boundary_gate = boundary_gate or DefaultBoundaryGate()
         self._audit_manager = audit_manager or DefaultAuditManager()
         self._knowledge_entity = knowledge_entity or DefaultKnowledgeEntity(infrastructure=self._infrastructure)
+
+    def _resolve_broker_connector(self, broker_id: str) -> "BrokerConnector":
+        """The constructor-injected connector (if any) always wins --
+        this is what every existing test that passes broker_connector=
+        to the constructor already relies on, and it's a legitimate,
+        real override (e.g. a caller that only ever talks to one
+        broker and wants to skip the registry entirely). Otherwise
+        resolves fresh via get_broker_connector(broker_id) -- the real
+        registry (STORY-9), so a second real broker becomes usable
+        here with zero changes to this method or its callers."""
+        if self._broker_connector is not None:
+            return self._broker_connector
+        return get_broker_connector(broker_id)
 
     def onboard_user(self, details: dict) -> User:
         with traced("DefaultUserPortfolio.onboard_user"):
@@ -1781,12 +1835,13 @@ class DefaultUserPortfolio:
                     f"could not be decrypted"
                 )
 
+            connector = self._resolve_broker_connector(broker_id)
             try:
-                raw_holdings = self._broker_connector.fetch_holdings(credentials=credentials)
+                raw_holdings = connector.fetch_holdings(credentials=credentials)
             except BrokerAuthError:
                 self._infrastructure.mark_broker_connection_error(
                     user_id, broker_id,
-                    f"{self._broker_connector.display_name} access expired, please reconnect"
+                    f"{connector.display_name} access expired, please reconnect"
                 )
                 raise
             except BrokerApiError:
@@ -1936,8 +1991,9 @@ class DefaultUserPortfolio:
                     f"could not be decrypted"
                 )
 
+            connector = self._resolve_broker_connector(broker_id)
             try:
-                raw_transactions = self._broker_connector.fetch_transactions(
+                raw_transactions = connector.fetch_transactions(
                     credentials=credentials,
                     start_date=effective_start,
                     end_date=end_date,

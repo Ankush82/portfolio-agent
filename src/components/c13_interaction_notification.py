@@ -240,10 +240,10 @@ class PlaceholderNotificationChannel:
     via Infrastructure ("notifications_sent") — timestamp, notification
     id, recipient, channel — without actually sending anything, and
     always returns False: nothing was really delivered, so reporting
-    True would be dishonest, the same posture PlaceholderBrokerConnector
-    (component 01) and request_approval (component 12) already
-    established for this project's other genuine external-dependency
-    gaps."""
+    True would be dishonest, the same honest-placeholder posture
+    component 01's broker connectors and request_approval (component
+    12) already established for this project's other genuine
+    external-dependency gaps."""
 
     def __init__(self, infrastructure: Infrastructure | None = None) -> None:
         self._infrastructure = infrastructure or DefaultInfrastructure()
