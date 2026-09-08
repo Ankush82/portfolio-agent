@@ -879,7 +879,8 @@ class DefaultUpstoxBrokerConnector:
             order. May be empty when ``data`` is empty or ``None``.
         """
         response_body = self._http.get(
-            path=self._UPSTOX_LONG_TERM_HOLDINGS_PATH
+            path=self._UPSTOX_LONG_TERM_HOLDINGS_PATH,
+            access_token=credentials.access_token,
         )
 
         # Defensive: ``response_body`` is guaranteed to be a ``dict``
@@ -1139,7 +1140,8 @@ class DefaultUpstoxBrokerConnector:
                 ]
             )
             response_body = self._http.get(
-                path=f"{self._UPSTOX_HISTORICAL_TRADES_PATH}?{query}"
+                path=f"{self._UPSTOX_HISTORICAL_TRADES_PATH}?{query}",
+                access_token=credentials.access_token,
             )
 
             # Belt-and-braces status check -- same reasoning as
@@ -1226,7 +1228,7 @@ class DefaultUpstoxBrokerConnector:
 
                 transactions.append(
                     BrokerTransaction(
-                        external_id=str(trade_id) if trade_id is not None else "",
+                        broker_transaction_id=str(trade_id) if trade_id is not None else "",
                         symbol=element.get("symbol") or "",
                         isin=element.get("isin") or "",
                         trade_date=trade_date_value,
@@ -1236,6 +1238,22 @@ class DefaultUpstoxBrokerConnector:
                         amount=amount,
                         exchange=element.get("exchange") or "",
                         segment=element.get("segment") or "",
+                        # BUG (found via a real, live Upstox connect+import
+                        # round-trip): BrokerTransaction.broker_modified_at
+                        # is a required field this construction call never
+                        # supplied at all -- fetch_transactions crashed
+                        # with a TypeError on every single real result,
+                        # for the entire lifetime of this feature.
+                        # Upstox's real historical-trades response (see
+                        # tests/fixtures/upstox/historical_trades_page1.json)
+                        # carries no separate modification timestamp --
+                        # trade_date (a date, not a datetime) is the only
+                        # real time signal available, so midnight UTC on
+                        # that date is the honest value here, not a
+                        # fabricated "now".
+                        broker_modified_at=datetime.combine(
+                            trade_date_value, datetime.min.time(), tzinfo=timezone.utc
+                        ),
                         raw=element,
                     )
                 )

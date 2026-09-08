@@ -290,7 +290,7 @@ class _UpstoxHttp:
 
     # ---- public surface ------------------------------------------------
 
-    def get(self, path: str) -> dict:
+    def get(self, path: str, *, access_token: str | None = None) -> dict:
         """Authenticated GET against ``UPSTOX_API_BASE_URL + path``.
 
         Attaches ``Authorization: Bearer <token>`` and ``Accept:
@@ -299,6 +299,13 @@ class _UpstoxHttp:
         response to the STORY-2 exceptions. Returns the parsed JSON
         body on a 2xx whose top-level ``status`` field is
         ``"success"``.
+
+        ``access_token``, when given, is used verbatim instead of
+        calling the constructor-bound ``token_provider`` -- the real
+        per-connection token a caller (``fetch_holdings``/
+        ``fetch_transactions``, given a real ``BrokerCredentials`` per
+        call) already has in hand always wins over whatever this
+        helper instance happened to be constructed with.
 
         Raises:
             BrokerAuthError: 401 / 403 — token is invalid, expired, or
@@ -310,7 +317,7 @@ class _UpstoxHttp:
                 truncated to ``_RESPONSE_BODY_MAX_LEN`` chars.
         """
         url = UPSTOX_API_BASE_URL + path
-        access_token = self._token_provider()
+        access_token = access_token if access_token is not None else self._token_provider()
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
