@@ -2252,7 +2252,7 @@ class DefaultHoldingRepository:
                 holding=Holding(
                     portfolio_id=record["portfolio_id"],
                     security_id=record["security_id"],
-                    quantity=record["quantity"],
+                    quantity=Decimal(str(record["quantity"])),
                     broker_holding_id=record.get("broker_holding_id"),
                 ),
             )
@@ -2271,7 +2271,7 @@ class DefaultHoldingRepository:
                     holding=Holding(
                         portfolio_id=record["portfolio_id"],
                         security_id=record["security_id"],
-                        quantity=record["quantity"],
+                        quantity=Decimal(str(record["quantity"])),
                         broker_holding_id=record.get("broker_holding_id"),
                     ),
                 )
@@ -2322,7 +2322,7 @@ class DefaultTransactionRepository:
                 transaction=Transaction(
                     portfolio_id=record["portfolio_id"],
                     kind=record["kind"],
-                    amount=record["amount"],
+                    amount=Decimal(str(record["amount"])),
                     broker_transaction_id=record.get("broker_transaction_id"),
                 ),
                 updated_at=updated_at,
@@ -2353,13 +2353,109 @@ class DefaultTransactionRepository:
                         transaction=Transaction(
                             portfolio_id=record["portfolio_id"],
                             kind=record["kind"],
-                            amount=record["amount"],
+                            amount=Decimal(str(record["amount"])),
                             broker_transaction_id=record.get("broker_transaction_id"),
                         ),
                         updated_at=updated_at,
                     )
                 )
             return results
+
+
+def _current_holding_from_record(record: dict) -> "CurrentHolding":
+    return CurrentHolding(
+        id=record["id"],
+        is_active=record.get("is_active", True),
+        holding=Holding(
+            portfolio_id=record["portfolio_id"],
+            security_id=record["security_id"],
+            quantity=Decimal(str(record["quantity"])),
+            broker_holding_id=record.get("broker_holding_id"),
+        ),
+    )
+
+
+def _current_transaction_from_record(record: dict) -> "CurrentTransaction":
+    raw_updated = record.get("updated_at")
+    if isinstance(raw_updated, datetime):
+        updated_at = raw_updated
+    elif isinstance(raw_updated, str):
+        updated_at = datetime.fromisoformat(raw_updated)
+    else:
+        updated_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return CurrentTransaction(
+        id=record["id"],
+        is_active=record.get("is_active", True),
+        transaction=Transaction(
+            portfolio_id=record["portfolio_id"],
+            kind=record["kind"],
+            amount=Decimal(str(record["amount"])),
+            broker_transaction_id=record.get("broker_transaction_id"),
+        ),
+        updated_at=updated_at,
+    )
+
+
+class _PrefetchedHoldingRepository:
+    """STORY-SYNC-14: an in-memory HoldingRepository backed by ONE
+    upfront, unfiltered query for the whole account -- not a fresh query
+    per lookup. Against `DefaultHoldingRepository` directly,
+    `reconcile_holdings` calling `find_by_broker_holding_id` once per
+    broker holding is a real N+1 (one query per holding), and
+    `find_holdings_to_remove`'s own `find_active_by_account_id` call is
+    a real second, duplicate query for data `synchronize_portfolio`
+    could already have in hand. Building this wrapper from ONE real
+    query per broker per sync call and handing it to both functions in
+    place of `DefaultHoldingRepository` turns that into exactly the two
+    queries per account STORY-SYNC-14 asks for (one for holdings, one
+    for transactions -- see `_PrefetchedTransactionRepository`), without
+    changing `reconcile_holdings`/`find_holdings_to_remove`'s own
+    signatures or their existing tests: they still call the same two
+    Protocol methods, just against a repository answering from memory.
+
+    Built from ALL records for the account (active AND inactive), not
+    just the active ones `find_active_by_account_id` returns --
+    `reconcile_holdings`' own reactivation rule ("a stored record
+    matches but is inactive -> 'updated'") needs to see an inactive
+    record to reactivate it; prefetching active-only would silently
+    make every previously-removed holding look brand new to
+    `find_by_broker_holding_id` instead of a real reactivation."""
+
+    def __init__(self, all_holdings: list["CurrentHolding"]) -> None:
+        self._active = [h for h in all_holdings if h.is_active]
+        self._by_broker_holding_id: dict[str, "CurrentHolding"] = {
+            h.holding.broker_holding_id: h
+            for h in all_holdings
+            if h.holding.broker_holding_id is not None
+        }
+
+    def find_by_broker_holding_id(self, broker_holding_id: str) -> "CurrentHolding | None":
+        return self._by_broker_holding_id.get(broker_holding_id)
+
+    def find_active_by_account_id(self, account_id: str) -> list["CurrentHolding"]:
+        return self._active
+
+
+class _PrefetchedTransactionRepository:
+    """The transaction-side twin of `_PrefetchedHoldingRepository` --
+    same real reasoning, same STORY-SYNC-14 requirement, same
+    zero-signature-change approach, same active+inactive prefetch (so a
+    previously-removed transaction can still be found and reactivated)
+    for `reconcile_transactions`/`find_transactions_to_remove`."""
+
+    def __init__(self, all_transactions: list["CurrentTransaction"]) -> None:
+        self._active = [t for t in all_transactions if t.is_active]
+        self._by_broker_transaction_id: dict[str, "CurrentTransaction"] = {
+            t.transaction.broker_transaction_id: t
+            for t in all_transactions
+            if t.transaction.broker_transaction_id is not None
+        }
+
+    def find_by_broker_transaction_id(self, broker_transaction_id: str) -> "CurrentTransaction | None":
+        return self._by_broker_transaction_id.get(broker_transaction_id)
+
+    def find_active_by_account_id(self, account_id: str) -> list["CurrentTransaction"]:
+        return self._active
 
 
 # Entity.kind values (c04_knowledge_entity.py's "Company | Security |
@@ -2603,6 +2699,297 @@ class DefaultUserPortfolio:
             self._infrastructure.touch_last_import(user_id, broker_id)
 
             return HoldingsImportResult(holdings_written=len(rows), skipped=skipped)
+
+    def synchronize_portfolio(self, portfolio: Portfolio) -> SyncResult:
+        """Real incremental reconciliation sync (STORY-SYNC-03 through
+        SYNC-16). For every broker this portfolio's user has connected,
+        fetches the broker's current holdings/transactions and
+        reconciles them against what's already stored --
+        added/updated/unchanged/removed -- via the pure
+        `reconcile_holdings`/`reconcile_transactions`/
+        `find_holdings_to_remove`/`find_transactions_to_remove`
+        functions above. Deliberately different from
+        `import_holdings`/`import_transactions` (STORY-14/15): those do
+        a wholesale snapshot-replace for one named broker on demand (the
+        "Import Now" button); this does incremental, all-brokers
+        reconciliation, the real strategy a scheduled/background sync
+        needs so an unrelated broker's data is never touched or wiped
+        just because this call happened to run.
+
+        Wrapped in one real Postgres transaction (STORY-SYNC-06, see
+        `Infrastructure.transaction()`): every write below, across every
+        connected broker, commits together or none do. A failure partway
+        through — a bad record, a connector error, anything — rolls back
+        the whole sync; this portfolio's stored data is never left in a
+        half-migrated state. Because the DB genuinely rolls back on
+        failure, `track_portfolio_state` (which reads what's stored) is
+        only called on the real success path (STORY-SYNC-09) — calling
+        it after a rollback would read the pre-sync state anyway, so
+        doing it unconditionally would just be a wasted, misleading read.
+        """
+        with traced("DefaultUserPortfolio.synchronize_portfolio"):
+            sync_started_at = datetime.now(timezone.utc)
+            result = SyncResult(portfolio_id=portfolio.id, sync_started_at=sync_started_at)
+            _logger = logging.getLogger(__name__)
+            # One correlation_id per real sync call (STORY-SYNC-10) --
+            # every log line below includes it so every record-level
+            # transition, and the final summary/failure line, can be
+            # grepped back to the one synchronize_portfolio() call that
+            # produced them, even with several portfolios syncing
+            # concurrently.
+            correlation_id = str(uuid.uuid4())
+            _logger.info(
+                "[SYNC_START] correlation_id=%s portfolio_id=%s",
+                correlation_id, portfolio.id,
+            )
+
+            try:
+                with self._infrastructure.transaction():
+                    for broker in list_available_brokers():
+                        broker_id = broker["broker_id"]
+                        connection = self._infrastructure.get_broker_connection(
+                            portfolio.user_id, broker_id
+                        )
+                        if connection is None:
+                            # This user hasn't connected this broker -- nothing
+                            # of theirs to reconcile, not a real failure.
+                            continue
+
+                        credentials = BrokerCredentials(
+                            access_token=connection.access_token,
+                            token_type=connection.token_type,
+                            expires_at=connection.access_token_expires_at,
+                            refresh_token=None,
+                            broker_user_id=connection.broker_user_id,
+                            raw={},
+                        )
+                        connector = self._resolve_broker_connector(broker_id)
+
+                        # STORY-SYNC-14: exactly two real queries for this
+                        # broker's whole reconciliation pass -- one for
+                        # holdings, one for transactions -- instead of one
+                        # query per broker holding/transaction. Known,
+                        # accepted real limitation: since Holding/
+                        # Transaction carry no broker_id column, this
+                        # portfolio-wide fetch (and the removal-detection
+                        # below) isn't scoped per-broker -- correct today
+                        # because exactly one real connector (upstox) ever
+                        # exists per portfolio in practice; a second real
+                        # broker connector would need a real broker_id
+                        # column before multi-broker removal-detection
+                        # could be trusted.
+                        holding_repo = _PrefetchedHoldingRepository(
+                            [
+                                _current_holding_from_record(r)
+                                for r in self._infrastructure.query(
+                                    HOLDINGS_TABLE, {"portfolio_id": portfolio.id}
+                                )
+                            ]
+                        )
+                        transaction_repo = _PrefetchedTransactionRepository(
+                            [
+                                _current_transaction_from_record(r)
+                                for r in self._infrastructure.query(
+                                    TRANSACTIONS_TABLE, {"portfolio_id": portfolio.id}
+                                )
+                            ]
+                        )
+
+                        # --- Holdings ---
+                        broker_holdings = connector.fetch_holdings(credentials=credentials)
+                        holding_ops = reconcile_holdings(broker_holdings, holding_repo)
+                        seen_holding_ids: set[str] = set()
+                        for op in holding_ops:
+                            seen_holding_ids.add(op.holding.isin)
+                            _logger.debug(
+                                "[SYNC_HOLDING] correlation_id=%s portfolio_id=%s "
+                                "broker_holding_id=%s status=%s",
+                                correlation_id, portfolio.id, op.holding.isin, op.status,
+                            )
+                            if op.status == "unchanged":
+                                result.holdings_unchanged += 1
+                                continue
+                            self._infrastructure.store(
+                                HOLDINGS_TABLE,
+                                {
+                                    # Keyed on isin, not symbol -- isin
+                                    # (broker_holding_id) is the real
+                                    # natural key find_by_broker_holding_id
+                                    # looks up by; two real holdings can
+                                    # share a symbol (dual-listed
+                                    # securities) but never an isin.
+                                    "id": f"{portfolio.id}:{op.holding.isin}",
+                                    "portfolio_id": portfolio.id,
+                                    "security_id": op.holding.symbol,
+                                    "quantity": str(op.holding.quantity),
+                                    "broker_holding_id": op.holding.isin,
+                                    "is_active": True,
+                                },
+                            )
+                            if op.status == "added":
+                                result.holdings_added += 1
+                            else:
+                                result.holdings_updated += 1
+
+                        for removed in find_holdings_to_remove(
+                            seen_holding_ids, holding_repo, portfolio.id
+                        ):
+                            stored = removed.current_holding
+                            _logger.debug(
+                                "[SYNC_HOLDING] correlation_id=%s portfolio_id=%s "
+                                "broker_holding_id=%s status=removed",
+                                correlation_id, portfolio.id, stored.holding.broker_holding_id,
+                            )
+                            self._infrastructure.store(
+                                HOLDINGS_TABLE,
+                                {
+                                    "id": stored.id,
+                                    "portfolio_id": stored.holding.portfolio_id,
+                                    "security_id": stored.holding.security_id,
+                                    "quantity": str(stored.holding.quantity),
+                                    "broker_holding_id": stored.holding.broker_holding_id,
+                                    "is_active": False,
+                                },
+                            )
+                            result.holdings_removed += 1
+
+                        # --- Transactions ---
+                        broker_transactions = connector.fetch_transactions(
+                            credentials=credentials, start_date=date.min, end_date=date.max
+                        )
+                        transaction_ops = reconcile_transactions(broker_transactions, transaction_repo)
+                        seen_transaction_ids: set[str] = set()
+                        for top in transaction_ops:
+                            seen_transaction_ids.add(top.transaction.broker_transaction_id)
+                            _logger.debug(
+                                "[SYNC_TRANSACTION] correlation_id=%s portfolio_id=%s "
+                                "broker_transaction_id=%s status=%s",
+                                correlation_id, portfolio.id,
+                                top.transaction.broker_transaction_id, top.status,
+                            )
+                            if top.status == "unchanged":
+                                result.transactions_unchanged += 1
+                                continue
+                            self._infrastructure.store(
+                                TRANSACTIONS_TABLE,
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "portfolio_id": portfolio.id,
+                                    "kind": top.transaction.side,
+                                    "amount": str(top.transaction.amount),
+                                    "broker_transaction_id": top.transaction.broker_transaction_id,
+                                    "is_active": True,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            if top.status == "added":
+                                result.transactions_added += 1
+                            else:
+                                result.transactions_updated += 1
+
+                        for removed_t in find_transactions_to_remove(
+                            seen_transaction_ids, transaction_repo, portfolio.id
+                        ):
+                            stored_t = removed_t.current_transaction
+                            _logger.debug(
+                                "[SYNC_TRANSACTION] correlation_id=%s portfolio_id=%s "
+                                "broker_transaction_id=%s status=removed",
+                                correlation_id, portfolio.id,
+                                stored_t.transaction.broker_transaction_id,
+                            )
+                            self._infrastructure.store(
+                                TRANSACTIONS_TABLE,
+                                {
+                                    "id": stored_t.id,
+                                    "portfolio_id": stored_t.transaction.portfolio_id,
+                                    "kind": stored_t.transaction.kind,
+                                    "amount": str(stored_t.transaction.amount),
+                                    "broker_transaction_id": stored_t.transaction.broker_transaction_id,
+                                    "is_active": False,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            result.transactions_removed += 1
+            except Exception as exc:  # noqa: BLE001 -- real rollback already happened; record it, don't crash the caller
+                _logger.error(
+                    "[SYNC_FAILED] correlation_id=%s portfolio_id=%s reason=%s",
+                    correlation_id, portfolio.id, exc, exc_info=True,
+                )
+                # The transaction already rolled back every write above --
+                # none of the added/updated/removed counts accumulated
+                # this far are real anymore, so they're reset to 0 rather
+                # than reporting numbers that don't match what's actually
+                # in the database. holdings_failed/transactions_failed are
+                # set to 1 (not a real per-record count -- SyncResult has
+                # no dedicated "whole sync failed" flag) purely so
+                # `SyncResult.success` correctly reads False; the real
+                # detail lives in failed_records.
+                result = SyncResult(
+                    portfolio_id=portfolio.id,
+                    sync_started_at=sync_started_at,
+                    holdings_failed=1,
+                    transactions_failed=1,
+                    failed_records=[
+                        FailedRecord(
+                            record_type="sync", broker_id=None, reason=str(exc), raw_data={}
+                        )
+                    ],
+                )
+                result.sync_completed_at = datetime.now(timezone.utc)
+                self._emit_sync_metrics(portfolio, correlation_id, result)
+                return result
+
+            result.sync_completed_at = datetime.now(timezone.utc)
+            _logger.info(
+                "[SYNC_COMPLETE] correlation_id=%s portfolio_id=%s "
+                "holdings(added=%d updated=%d unchanged=%d removed=%d) "
+                "transactions(added=%d updated=%d unchanged=%d removed=%d) "
+                "duration_ms=%s",
+                correlation_id, portfolio.id,
+                result.holdings_added, result.holdings_updated,
+                result.holdings_unchanged, result.holdings_removed,
+                result.transactions_added, result.transactions_updated,
+                result.transactions_unchanged, result.transactions_removed,
+                result.duration_ms,
+            )
+            self._emit_sync_metrics(portfolio, correlation_id, result)
+            self.track_portfolio_state(portfolio)
+            return result
+
+    def _emit_sync_metrics(
+        self, portfolio: Portfolio, correlation_id: str, result: SyncResult
+    ) -> None:
+        """Emit sync observability metrics (STORY-SYNC-15), complementing
+        STORY-SYNC-10's logging. No dedicated metrics library
+        (prometheus_client/statsd) exists anywhere in this codebase, so
+        this reuses Infrastructure.publish() -- the one real,
+        already-existing event-emission mechanism (Postgres-backed
+        queue_events, ADR-0019) -- rather than inventing new
+        infrastructure a single story shouldn't be adding on its own.
+        Called on every real completion, success or failure (holdings/
+        transactions_processed intentionally counts added+updated+
+        unchanged, so a fully-unchanged sync still emits a real,
+        nonzero heartbeat a monitor can alert on the ABSENCE of)."""
+        holdings_processed = (
+            result.holdings_added + result.holdings_updated + result.holdings_unchanged
+        )
+        transactions_processed = (
+            result.transactions_added + result.transactions_updated + result.transactions_unchanged
+        )
+        self._infrastructure.publish(
+            "metrics.sync",
+            {
+                "correlation_id": correlation_id,
+                "account_id": portfolio.id,
+                "sync_duration_seconds": (
+                    (result.duration_ms or 0) / 1000.0 if result.duration_ms is not None else None
+                ),
+                "holdings_processed": holdings_processed,
+                "transactions_processed": transactions_processed,
+                "holdings_failed": result.holdings_failed,
+                "transactions_failed": result.transactions_failed,
+            },
+        )
 
     def track_portfolio_state(self, portfolio: Portfolio) -> PortfolioSnapshot:
         """Reads holdings already stored — via import_holdings above, or
@@ -3009,10 +3396,15 @@ class DefaultUserPortfolio:
             Holding(
                 portfolio_id=record["portfolio_id"],
                 security_id=record["security_id"],
-                quantity=record["quantity"],
+                quantity=Decimal(str(record["quantity"])),
                 broker_holding_id=record.get("broker_holding_id"),
             )
             for record in records
+            # is_active defaults True for records stored before
+            # synchronize_portfolio's removal tracking (STORY-SYNC-05)
+            # existed -- only a record explicitly marked inactive by a
+            # real reconciliation is excluded here.
+            if record.get("is_active", True)
         ]
 
 
