@@ -34,7 +34,7 @@ from psycopg.types.json import Jsonb
 
 from cross_cutting.observability import traced
 from domain import HOLDINGS_TABLE, PORTFOLIOS_TABLE, TRANSACTIONS_TABLE, USERS_TABLE
-from src.broker_token_crypto import encrypt_secret, decrypt_secret, BrokerConfigError
+from broker_token_crypto import encrypt_secret, decrypt_secret, BrokerConfigError
 
 DEFAULT_POSTGRES_DSN = "postgresql://portfolio_agent:portfolio_agent@localhost:5432/portfolio_agent"
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
